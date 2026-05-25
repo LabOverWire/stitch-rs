@@ -184,10 +184,7 @@ async fn list_by_scope_filters_children() {
     layer
         .create(
             "task",
-            make_record(&[
-                ("id", json!("t1")),
-                ("projectId", json!("p1")),
-            ]),
+            make_record(&[("id", json!("t1")), ("projectId", json!("p1"))]),
             Origin::Local,
         )
         .await
@@ -195,10 +192,7 @@ async fn list_by_scope_filters_children() {
     layer
         .create(
             "task",
-            make_record(&[
-                ("id", json!("t2")),
-                ("projectId", json!("p2")),
-            ]),
+            make_record(&[("id", json!("t2")), ("projectId", json!("p2"))]),
             Origin::Local,
         )
         .await
@@ -214,11 +208,19 @@ async fn list_root_returns_all_roots() {
     let dir = TempDir::new().unwrap();
     let layer = open_layer(&dir).await;
     layer
-        .create("project", make_record(&[("id", json!("p1"))]), Origin::Local)
+        .create(
+            "project",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
         .await
         .unwrap();
     layer
-        .create("project", make_record(&[("id", json!("p2"))]), Origin::Local)
+        .create(
+            "project",
+            make_record(&[("id", json!("p2"))]),
+            Origin::Local,
+        )
         .await
         .unwrap();
 

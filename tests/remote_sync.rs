@@ -84,7 +84,9 @@ struct MockAccessor {
 impl MockAccessor {
     fn insert(&self, entity: &str, id: &str, record: Map<String, Value>) {
         let mut s = self.storage.lock().unwrap();
-        s.entry(entity.to_string()).or_default().insert(id.to_string(), record);
+        s.entry(entity.to_string())
+            .or_default()
+            .insert(id.to_string(), record);
     }
 }
 
@@ -177,7 +179,10 @@ async fn apply_remote_insert_skips_when_scope_missing() {
         operation_id: None,
     };
 
-    layer.apply_mutation_to_db(mutation, &accessor).await.unwrap();
+    layer
+        .apply_mutation_to_db(mutation, &accessor)
+        .await
+        .unwrap();
     assert!(accessor.read("task", "t1").await.unwrap().is_none());
 }
 
@@ -203,7 +208,10 @@ async fn apply_remote_insert_creates_when_scope_exists() {
         operation_id: None,
     };
 
-    layer.apply_mutation_to_db(mutation, &accessor).await.unwrap();
+    layer
+        .apply_mutation_to_db(mutation, &accessor)
+        .await
+        .unwrap();
     let task = accessor.read("task", "t1").await.unwrap().unwrap();
     assert_eq!(task.get("title").and_then(Value::as_str), Some("hello"));
 }
@@ -219,7 +227,7 @@ async fn apply_remote_update_ignores_older_version() {
             ("id", json!("t1")),
             ("projectId", json!("p1")),
             ("title", json!("local-new")),
-            ("_version", json!(5)),
+            ("version", json!(5)),
         ]),
     );
 
@@ -229,17 +237,17 @@ async fn apply_remote_update_ignores_older_version() {
         id: "t1".into(),
         data: Some(make_record(&[
             ("title", json!("stale-remote")),
-            ("_version", json!(3)),
+            ("version", json!(3)),
         ])),
         operation_id: None,
     };
 
-    layer.apply_mutation_to_db(mutation, &accessor).await.unwrap();
+    layer
+        .apply_mutation_to_db(mutation, &accessor)
+        .await
+        .unwrap();
     let task = accessor.read("task", "t1").await.unwrap().unwrap();
-    assert_eq!(
-        task.get("title").and_then(Value::as_str),
-        Some("local-new")
-    );
+    assert_eq!(task.get("title").and_then(Value::as_str), Some("local-new"));
 }
 
 #[tokio::test]
@@ -253,7 +261,7 @@ async fn apply_remote_update_applies_newer_version() {
             ("id", json!("t1")),
             ("projectId", json!("p1")),
             ("title", json!("old")),
-            ("_version", json!(2)),
+            ("version", json!(2)),
         ]),
     );
 
@@ -263,12 +271,15 @@ async fn apply_remote_update_applies_newer_version() {
         id: "t1".into(),
         data: Some(make_record(&[
             ("title", json!("new")),
-            ("_version", json!(5)),
+            ("version", json!(5)),
         ])),
         operation_id: None,
     };
 
-    layer.apply_mutation_to_db(mutation, &accessor).await.unwrap();
+    layer
+        .apply_mutation_to_db(mutation, &accessor)
+        .await
+        .unwrap();
     let task = accessor.read("task", "t1").await.unwrap().unwrap();
     assert_eq!(task.get("title").and_then(Value::as_str), Some("new"));
 }
@@ -284,7 +295,10 @@ async fn apply_remote_delete_ignores_missing() {
         data: None,
         operation_id: None,
     };
-    layer.apply_mutation_to_db(mutation, &accessor).await.unwrap();
+    layer
+        .apply_mutation_to_db(mutation, &accessor)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -314,10 +328,7 @@ async fn reconcile_children_deletes_local_record_missing_from_server() {
     accessor.insert(
         "task",
         "t1",
-        make_record(&[
-            ("id", json!("t1")),
-            ("projectId", json!("p1")),
-        ]),
+        make_record(&[("id", json!("t1")), ("projectId", json!("p1"))]),
     );
 
     layer

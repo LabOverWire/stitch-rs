@@ -7,11 +7,17 @@ use crate::persistence::PersistenceLayer;
 use crate::remote_sync::{LocalAccessor, RemoteSyncLayer};
 use crate::sync_engine::MutationDelivery;
 use crate::types::{
-    ConnectionStatus, Operation, Record, ScopeBundle, StoreEvent, SyncMutation,
+    ConnectionStatus, ListFilter, MutationEvent, Operation, Record, ScopeBundle, SortDirection,
+    SortField, StoreEvent, SyncMutation,
 };
 use async_trait::async_trait;
+use mqdb_core::types::{
+    Filter, FilterOp, SortDirection as MqdbSortDirection, SortOrder as MqdbSortOrder,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, broadcast};
 use tokio::task::JoinHandle;
@@ -24,6 +30,9 @@ pub struct Store {
     inner: OnceCell<Arc<StoreInner>>,
 }
 
+pub type ReconnectValidator =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
 struct StoreInner {
     config: Arc<StoreConfig>,
     memory: Arc<MemoryStore>,
@@ -31,6 +40,7 @@ struct StoreInner {
     remote: Option<Arc<RemoteSyncLayer>>,
     queue: Option<Arc<dyn OfflineQueue>>,
     state: Mutex<StoreState>,
+    reconnect_validator: Mutex<Option<ReconnectValidator>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -39,6 +49,7 @@ struct StoreState {
     initial_sync_done: bool,
     authenticated_user: Option<String>,
     last_connection_status: ConnectionStatus,
+    has_been_connected: bool,
 }
 
 impl Store {
@@ -48,11 +59,7 @@ impl Store {
     }
 
     #[must_use]
-    pub fn with_client_id(
-        config: StoreConfig,
-        options: StoreOptions,
-        client_id: String,
-    ) -> Self {
+    pub fn with_client_id(config: StoreConfig, options: StoreOptions, client_id: String) -> Self {
         Self {
             config: Arc::new(config),
             options,
@@ -64,12 +71,9 @@ impl Store {
     pub async fn initialize(&self) -> Result<()> {
         self.inner
             .get_or_try_init(|| async {
-                let inner = StoreInner::open(
-                    Arc::clone(&self.config),
-                    &self.options,
-                    &self.client_id,
-                )
-                .await?;
+                let inner =
+                    StoreInner::open(Arc::clone(&self.config), &self.options, &self.client_id)
+                        .await?;
                 Ok::<Arc<StoreInner>, Error>(inner)
             })
             .await?;
@@ -86,6 +90,65 @@ impl Store {
 
     pub fn subscribe_persistence(&self) -> Result<Option<broadcast::Receiver<StoreEvent>>> {
         Ok(self.inner()?.persistence.as_ref().map(|p| p.subscribe()))
+    }
+
+    pub fn subscribe_entity(
+        &self,
+        entity: &str,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<MutationEvent>> {
+        let inner = self.inner()?;
+        let mem_rx = inner.memory.subscribe();
+        let persistence_rx = inner.persistence.as_ref().map(|p| p.subscribe());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let entity_owned = entity.to_string();
+        let has_persistence = persistence_rx.is_some();
+
+        spawn_filtered_forwarder(
+            mem_rx,
+            tx.clone(),
+            entity_owned.clone(),
+            None,
+            move |event| {
+                if has_persistence {
+                    matches!(event.origin, Origin::Load | Origin::Clear)
+                } else {
+                    true
+                }
+            },
+            &inner.tasks,
+        );
+
+        if let Some(rx_persistence) = persistence_rx {
+            spawn_filtered_forwarder(
+                rx_persistence,
+                tx,
+                entity_owned,
+                None,
+                |_| true,
+                &inner.tasks,
+            );
+        }
+
+        Ok(rx)
+    }
+
+    pub fn subscribe_scope_entity(
+        &self,
+        scope_id: &str,
+        entity: &str,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<MutationEvent>> {
+        let inner = self.inner()?;
+        let mem_rx = inner.memory.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        spawn_filtered_forwarder(
+            mem_rx,
+            tx,
+            entity.to_string(),
+            Some(scope_id.to_string()),
+            |_| true,
+            &inner.tasks,
+        );
+        Ok(rx)
     }
 
     pub fn begin_batch(&self) -> Result<()> {
@@ -124,6 +187,21 @@ impl Store {
 
     pub fn current_scope(&self) -> Result<Option<String>> {
         Ok(self.inner()?.state.lock().unwrap().current_scope.clone())
+    }
+
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        self.inner.get().is_some()
+    }
+
+    pub fn initial_sync_done(&self) -> Result<bool> {
+        Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
+    }
+
+    pub fn is_reconnecting(&self) -> Result<bool> {
+        let state = self.inner()?.state.lock().unwrap();
+        Ok(state.has_been_connected
+            && !matches!(state.last_connection_status, ConnectionStatus::Connected))
     }
 
     pub async fn create(
@@ -238,7 +316,9 @@ impl Store {
             } else if is_top_level {
                 Some(String::new())
             } else {
-                e.get(scope_field).and_then(Value::as_str).map(str::to_string)
+                e.get(scope_field)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
             }
         });
 
@@ -309,16 +389,12 @@ impl Store {
             match remote.sync_update(entity, &scope_id, id, fields).await {
                 Ok(()) => {
                     if let Some(queue) = &inner.queue {
-                        let _ = queue
-                            .remove(entity, id, &scope_id, Operation::Update)
-                            .await;
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
                 Err(err) if err.is_ownership() => {
                     if let Some(queue) = &inner.queue {
-                        let _ = queue
-                            .remove(entity, id, &scope_id, Operation::Update)
-                            .await;
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
                 Err(err) if err.is_transient() => {}
@@ -348,7 +424,9 @@ impl Store {
             } else if is_top_level {
                 Some(String::new())
             } else {
-                e.get(scope_field).and_then(Value::as_str).map(str::to_string)
+                e.get(scope_field)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
             }
         });
 
@@ -412,16 +490,12 @@ impl Store {
             match remote.sync_delete(entity, &scope_id, id).await {
                 Ok(()) => {
                     if let Some(queue) = &inner.queue {
-                        let _ = queue
-                            .remove(entity, id, &scope_id, Operation::Delete)
-                            .await;
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
                 Err(err) if err.is_ownership() => {
                     if let Some(queue) = &inner.queue {
-                        let _ = queue
-                            .remove(entity, id, &scope_id, Operation::Delete)
-                            .await;
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
                 Err(err) if err.is_not_found() || err.is_transient() => {}
@@ -438,24 +512,74 @@ impl Store {
         self.inner()?.memory.read(entity, id).await
     }
 
-    pub async fn list(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
+    pub async fn list(&self, entity: &str, filter: Option<ListFilter>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
-            persistence.list_by_scope(entity, scope_id).await
+            let mut filters = Vec::new();
+            if let Some(filter) = filter.as_ref()
+                && let Some(scope_id) = filter.scope_id.as_deref()
+            {
+                filters.push(Filter::new(
+                    inner.config.scope.scope_field.clone(),
+                    FilterOp::Eq,
+                    Value::String(scope_id.to_string()),
+                ));
+            }
+            let sort = filter
+                .as_ref()
+                .map(|f| sort_fields_to_orders(&f.sort))
+                .unwrap_or_default();
+            let projection = filter
+                .as_ref()
+                .map(|f| f.projection.clone())
+                .unwrap_or_default();
+            persistence
+                .list_with_projection(entity, filters, sort, None, projection)
+                .await
         } else {
+            let scope_id = filter
+                .as_ref()
+                .and_then(|f| f.scope_id.as_deref())
+                .unwrap_or("");
             inner.memory.list(entity, scope_id).await
         }
     }
 
-    pub async fn list_root_entities(&self) -> Result<Vec<Record>> {
+    pub async fn list_root_entities(&self, sort: Vec<SortField>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         if inner.remote.is_some() && !inner.state.lock().unwrap().initial_sync_done {
             return Ok(Vec::new());
         }
         if let Some(persistence) = &inner.persistence {
-            persistence.list_root().await
+            persistence
+                .list(
+                    &inner.config.scope.root_entity,
+                    Vec::new(),
+                    sort_fields_to_orders(&sort),
+                    None,
+                )
+                .await
         } else {
             inner.memory.list(&inner.config.scope.root_entity, "").await
+        }
+    }
+
+    pub async fn snapshot(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
+        self.inner()?.memory.list(entity, scope_id).await
+    }
+
+    pub async fn child_count(&self, entity: &str, scope_id: &str) -> Result<usize> {
+        let inner = self.inner()?;
+        if let Some(persistence) = &inner.persistence {
+            let filters = vec![Filter::new(
+                inner.config.scope.scope_field.clone(),
+                FilterOp::Eq,
+                Value::String(scope_id.to_string()),
+            )];
+            let rows = persistence.list(entity, filters, Vec::new(), None).await?;
+            Ok(rows.len())
+        } else {
+            Ok(inner.memory.list(entity, scope_id).await?.len())
         }
     }
 
@@ -478,13 +602,15 @@ impl Store {
             let _ = remote.close_scope(&prev).await;
         }
 
-        let connected = inner.state.lock().unwrap().last_connection_status
-            == ConnectionStatus::Connected;
+        let connected =
+            inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected;
         if let (Some(remote), true) = (&inner.remote, connected) {
             if let Some(persistence) = &inner.persistence {
                 persistence.set_suppress_notifications(true);
             }
-            let outcome = inner.open_scope_with_server(scope_id, remote.as_ref()).await;
+            let outcome = inner
+                .open_scope_with_server(scope_id, remote.as_ref())
+                .await;
             if let Some(persistence) = &inner.persistence {
                 persistence.set_suppress_notifications(false);
             }
@@ -543,6 +669,74 @@ impl Store {
         if let Some(remote) = &inner.remote {
             remote.set_session_invalid_handler(handler);
         }
+        Ok(())
+    }
+
+    pub fn set_reconnect_validator(&self, validator: ReconnectValidator) -> Result<()> {
+        let inner = self.inner()?;
+        *inner.reconnect_validator.lock().unwrap() = Some(validator);
+        Ok(())
+    }
+
+    pub async fn read_local_state(&self, entity: &str, id: &str) -> Result<Option<Record>> {
+        let inner = self.inner()?;
+        if let Some(persistence) = &inner.persistence {
+            persistence.read(entity, id).await
+        } else {
+            inner.memory.read(entity, id).await
+        }
+    }
+
+    pub async fn update_local_state(&self, entity: &str, id: &str, fields: Record) -> Result<()> {
+        let inner = self.inner()?;
+        if let Some(persistence) = &inner.persistence {
+            match persistence
+                .update(entity, id, fields.clone(), Origin::Load)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    let mut record = fields;
+                    record.insert("id".to_string(), Value::String(id.to_string()));
+                    persistence
+                        .create(entity, record, Origin::Load)
+                        .await
+                        .map(|_| ())
+                }
+            }
+        } else {
+            if inner.memory.read(entity, id).await?.is_some() {
+                inner.memory.update(entity, id, fields, Origin::Load).await?;
+            }
+            Ok(())
+        }
+    }
+
+    pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
+        let inner = self.inner()?;
+        let Some(remote) = &inner.remote else {
+            return Err(Error::Config("request requires remote configuration".into()));
+        };
+        remote.request(topic, payload).await
+    }
+
+    pub async fn reset_for_logout(&self) -> Result<()> {
+        let inner = self.inner()?;
+        if let Some(remote) = &inner.remote {
+            let _ = remote.disconnect().await;
+        }
+        {
+            let mut state = inner.state.lock().unwrap();
+            state.authenticated_user = None;
+            state.current_scope = None;
+            state.initial_sync_done = false;
+            state.last_connection_status = ConnectionStatus::Offline;
+            state.has_been_connected = false;
+        }
+        if let Some(queue) = &inner.queue {
+            queue.set_authenticated_user(None);
+        }
+        *inner.reconnect_validator.lock().unwrap() = None;
         Ok(())
     }
 
@@ -610,7 +804,9 @@ impl StoreInner {
                 initial_sync_done: options.remote.is_none(),
                 authenticated_user: None,
                 last_connection_status: ConnectionStatus::Offline,
+                has_been_connected: false,
             }),
+            reconnect_validator: Mutex::new(None),
             tasks: Mutex::new(Vec::new()),
         });
 
@@ -646,7 +842,11 @@ impl StoreInner {
         let queue_ref = self.queue.as_deref();
 
         if !state.root.is_empty() {
-            if accessor.read(&self.config.scope.root_entity, scope_id).await?.is_some() {
+            if accessor
+                .read(&self.config.scope.root_entity, scope_id)
+                .await?
+                .is_some()
+            {
                 let _ = accessor
                     .update(&self.config.scope.root_entity, scope_id, state.root.clone())
                     .await;
@@ -659,7 +859,13 @@ impl StoreInner {
 
         for (child_entity, records) in &state.children {
             remote
-                .reconcile_children(scope_id, child_entity, records.clone(), &accessor, queue_ref)
+                .reconcile_children(
+                    scope_id,
+                    child_entity,
+                    records.clone(),
+                    &accessor,
+                    queue_ref,
+                )
                 .await?;
         }
 
@@ -757,7 +963,11 @@ impl LocalAccessor for InnerLocalAccessor {
                 Ok(()) | Err(_) => Ok(()),
             }
         } else {
-            self.inner.memory.delete(entity, id, Origin::Remote).await.ok();
+            self.inner
+                .memory
+                .delete(entity, id, Origin::Remote)
+                .await
+                .ok();
             Ok(())
         }
     }
@@ -783,6 +993,9 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
                 {
                     let mut state = inner.state.lock().unwrap();
                     state.last_connection_status = status;
+                    if status == ConnectionStatus::Connected {
+                        state.has_been_connected = true;
+                    }
                 }
                 if status == ConnectionStatus::Connected {
                     on_connected(Arc::clone(&inner)).await;
@@ -826,8 +1039,12 @@ async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation)
                 }
             }
             (None, Operation::Delete) => {
-                if let Some(existing) =
-                    inner.memory.read(&mutation.entity, &mutation.id).await.ok().flatten()
+                if let Some(existing) = inner
+                    .memory
+                    .read(&mutation.entity, &mutation.id)
+                    .await
+                    .ok()
+                    .flatten()
                 {
                     if mutation.entity == *root_entity {
                         Some(mutation.id.clone()) == current_scope
@@ -898,6 +1115,13 @@ async fn on_connected(inner: Arc<StoreInner>) {
     let remote = inner.remote.clone();
     let accessor = inner.local_accessor();
 
+    let validator = inner.reconnect_validator.lock().unwrap().clone();
+    if let Some(validator) = validator
+        && let Err(err) = validator().await
+    {
+        tracing::warn!(error = %err, "reconnect validator failed");
+    }
+
     if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
         let sender: &dyn crate::offline_queue::MutationSender = remote.as_ref();
         let _ = queue.flush(sender).await;
@@ -914,6 +1138,56 @@ async fn on_connected(inner: Arc<StoreInner>) {
         let mut state = inner.state.lock().unwrap();
         state.initial_sync_done = true;
     }
+}
+
+fn spawn_filtered_forwarder<F>(
+    mut rx: broadcast::Receiver<StoreEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<MutationEvent>,
+    entity: String,
+    scope_id: Option<String>,
+    accept: F,
+    tasks: &Mutex<Vec<JoinHandle<()>>>,
+) where
+    F: Fn(&MutationEvent) -> bool + Send + 'static,
+{
+    let handle = tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(StoreEvent::Mutation(event)) => {
+                    if event.entity != entity {
+                        continue;
+                    }
+                    if let Some(scope) = scope_id.as_deref()
+                        && event.scope_id != scope
+                    {
+                        continue;
+                    }
+                    if !accept(&event) {
+                        continue;
+                    }
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    tasks.lock().unwrap().push(handle);
+}
+
+fn sort_fields_to_orders(sort: &[SortField]) -> Vec<MqdbSortOrder> {
+    sort.iter()
+        .map(|s| MqdbSortOrder {
+            field: s.field.clone(),
+            direction: match s.direction {
+                SortDirection::Asc => MqdbSortDirection::Asc,
+                SortDirection::Desc => MqdbSortDirection::Desc,
+            },
+        })
+        .collect()
 }
 
 impl Drop for StoreInner {

@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde_json::json;
+use std::collections::HashMap;
 use stitch::config::{EntityDefinition, FieldType, PersistenceConfig, SchemaField, ScopeConfig};
 use stitch::types::StoreEvent;
 use stitch::{Origin, Store, StoreConfig, StoreOptions};

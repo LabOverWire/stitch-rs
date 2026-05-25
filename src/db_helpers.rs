@@ -17,10 +17,7 @@ pub(crate) async fn open_memory_db() -> Result<Database> {
         .map_err(|e| Error::mqdb("open_memory_db", e))
 }
 
-pub(crate) async fn open_persistent_db(
-    path: &Path,
-    passphrase: Option<&str>,
-) -> Result<Database> {
+pub(crate) async fn open_persistent_db(path: &Path, passphrase: Option<&str>) -> Result<Database> {
     let mut config = DatabaseConfig::new(path.to_path_buf()).without_background_tasks();
     if let Some(secret) = passphrase {
         config = config.with_passphrase(secret.to_string());
@@ -31,7 +28,11 @@ pub(crate) async fn open_persistent_db(
 }
 
 pub(crate) async fn register_schemas(db: &Database, config: &StoreConfig) -> Result<()> {
-    for (name, def) in config.entities.iter().chain(config.local_only_entities.iter()) {
+    for (name, def) in config
+        .entities
+        .iter()
+        .chain(config.local_only_entities.iter())
+    {
         register_entity_schema(db, name, def).await?;
     }
     Ok(())

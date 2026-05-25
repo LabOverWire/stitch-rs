@@ -216,7 +216,13 @@ async fn open_persistent_queue() -> (TempDir, Arc<PersistenceLayer>, PersistentO
     (dir, layer, queue)
 }
 
-fn pending(op: Operation, entity: &str, id: &str, scope_id: &str, data: Map<String, Value>) -> PendingMutation {
+fn pending(
+    op: Operation,
+    entity: &str,
+    id: &str,
+    scope_id: &str,
+    data: Map<String, Value>,
+) -> PendingMutation {
     PendingMutation {
         op,
         entity: entity.into(),
@@ -343,13 +349,7 @@ async fn consolidates_insert_plus_delete_to_no_op() {
         .await
         .unwrap();
     queue
-        .queue(pending(
-            Operation::Delete,
-            "task",
-            "t1",
-            "p1",
-            Map::new(),
-        ))
+        .queue(pending(Operation::Delete, "task", "t1", "p1", Map::new()))
         .await
         .unwrap();
 
@@ -412,7 +412,10 @@ async fn update_on_root_with_not_found_triggers_hard_delete() {
     let sender = MockSender::new(Behavior::NotFound);
     queue.flush(sender.as_ref()).await.unwrap();
     let log = sender.log();
-    assert!(log.iter().any(|e| e == "hard_delete:project:p1"), "log: {log:?}");
+    assert!(
+        log.iter().any(|e| e == "hard_delete:project:p1"),
+        "log: {log:?}"
+    );
 }
 
 #[tokio::test]
@@ -434,10 +437,7 @@ async fn conflict_on_insert_switches_to_update() {
     queue.flush(sender.as_ref()).await.unwrap();
     let log = sender.log();
     assert!(log.iter().any(|e| e.starts_with("create:")), "log: {log:?}");
-    assert!(
-        log.iter().any(|e| e == "update:task:p1:t1"),
-        "log: {log:?}"
-    );
+    assert!(log.iter().any(|e| e == "update:task:p1:t1"), "log: {log:?}");
 }
 
 #[tokio::test]

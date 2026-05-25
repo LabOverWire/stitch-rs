@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use stitch::config::{EntityDefinition, FieldType, SchemaField, ScopeConfig};
 use stitch::StoreConfig;
+use stitch::config::{EntityDefinition, FieldType, SchemaField, ScopeConfig};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -83,8 +83,7 @@ impl BrokerFixture {
     pub async fn shutdown(mut self) {
         let _ = self.shutdown.send(());
         if let Some(handle) = self.handle.take() {
-            let _ =
-                tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
         }
     }
 }

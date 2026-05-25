@@ -90,12 +90,27 @@ impl Error {
     }
 
     #[must_use]
+    pub fn is_permanent_mutation(&self) -> bool {
+        match self {
+            Self::Mqdb { source, .. } => matches!(
+                source.as_ref(),
+                mqdb_core::error::Error::Validation(_)
+                    | mqdb_core::error::Error::ConstraintViolation(_)
+                    | mqdb_core::error::Error::ForeignKeyViolation { .. }
+                    | mqdb_core::error::Error::ForeignKeyRestrict { .. }
+                    | mqdb_core::error::Error::NotNullViolation { .. }
+                    | mqdb_core::error::Error::InvalidForeignKey
+            ),
+            _ => false,
+        }
+    }
+
+    #[must_use]
     pub fn is_corruption(&self) -> bool {
         match self {
             Self::Mqdb { source, .. } => matches!(
                 source.as_ref(),
-                mqdb_core::error::Error::Corruption { .. }
-                    | mqdb_core::error::Error::Storage(_)
+                mqdb_core::error::Error::Corruption { .. } | mqdb_core::error::Error::Storage(_)
             ),
             _ => false,
         }

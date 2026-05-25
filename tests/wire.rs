@@ -90,8 +90,7 @@ async fn two_stores_sync_creates_via_broker() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut saw_task = false;
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(event)) =
-            tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+        if let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
             && let StoreEvent::Mutation(m) = event
             && m.entity == "task"
             && m.id == "t1"
@@ -248,15 +247,20 @@ async fn initial_sync_populates_local_state_from_server() {
         if tokio::time::Instant::now() >= deadline {
             break;
         }
-        let roots = store_b.list_root_entities().await.unwrap();
-        if roots.iter().any(|r| r.get("id").and_then(Value::as_str) == Some("p1")) {
+        let roots = store_b.list_root_entities(Vec::new()).await.unwrap();
+        if roots
+            .iter()
+            .any(|r| r.get("id").and_then(Value::as_str) == Some("p1"))
+        {
             break;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    let roots = store_b.list_root_entities().await.unwrap();
+    let roots = store_b.list_root_entities(Vec::new()).await.unwrap();
     assert!(
-        roots.iter().any(|r| r.get("id").and_then(Value::as_str) == Some("p1")),
+        roots
+            .iter()
+            .any(|r| r.get("id").and_then(Value::as_str) == Some("p1")),
         "store_b should have synced project p1 from server during initial sync; got: {roots:?}"
     );
 
@@ -357,6 +361,88 @@ async fn higher_version_remote_update_wins() {
         Some("winner"),
         "store_a should converge to store_b's winning update"
     );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn child_mutation_bumps_root_scope_version() {
+    init_tracing();
+    let broker = BrokerFixture::start().await;
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir_a),
+        "client-a-bump".into(),
+    );
+    let store_b = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir_b),
+        "client-b-bump".into(),
+    );
+    store_a.initialize().await.unwrap();
+    store_b.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+    wait_for_connected(&store_b).await;
+
+    store_b.replace_scope("p1").await.unwrap();
+    let mut rx = store_b.subscribe().unwrap();
+
+    store_a
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store_a
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hello")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_project_update = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            && let StoreEvent::Mutation(m) = event
+            && m.entity == "project"
+            && m.id == "p1"
+            && matches!(m.operation, stitch::Operation::Update)
+        {
+            saw_project_update = true;
+            break;
+        }
+    }
+    assert!(
+        saw_project_update,
+        "store_b never observed the bumped project update following a child mutation"
+    );
+
+    let project = store_b
+        .read("project", "p1")
+        .await
+        .unwrap()
+        .expect("store_b should hold the project locally");
+    let version = project
+        .get("version")
+        .and_then(Value::as_i64)
+        .expect("project should carry a numeric version after the bump");
+    assert!(version > 0, "version should be a positive ms timestamp");
 
     store_a.shutdown().await.unwrap();
     store_b.shutdown().await.unwrap();
@@ -481,7 +567,10 @@ async fn top_level_entity_propagates_via_wildcard() {
             break;
         }
     }
-    assert!(saw, "store_b should observe the top-level notification via wildcard");
+    assert!(
+        saw,
+        "store_b should observe the top-level notification via wildcard"
+    );
 
     let read_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut local = None;
@@ -492,7 +581,10 @@ async fn top_level_entity_propagates_via_wildcard() {
         }
         sleep(Duration::from_millis(20)).await;
     }
-    assert!(local.is_some(), "notification should be persisted locally on store_b");
+    assert!(
+        local.is_some(),
+        "notification should be persisted locally on store_b"
+    );
 
     store_a.shutdown().await.unwrap();
     store_b.shutdown().await.unwrap();

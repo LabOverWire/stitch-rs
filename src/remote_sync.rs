@@ -74,6 +74,10 @@ impl RemoteSyncLayer {
         self.sync.is_connected().await
     }
 
+    pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
+        self.sync.request(topic, payload).await
+    }
+
     pub async fn open_scope(&self, scope_id: &str) -> Result<ScopeState> {
         self.sync.open_scope(scope_id).await
     }
@@ -90,12 +94,7 @@ impl RemoteSyncLayer {
         self.sync.fetch_one(entity, id).await
     }
 
-    pub async fn sync_create(
-        &self,
-        entity: &str,
-        scope_id: &str,
-        data: Record,
-    ) -> Result<String> {
+    pub async fn sync_create(&self, entity: &str, scope_id: &str, data: Record) -> Result<String> {
         let role = self.entity_role(entity);
         let outbound_scope = match role {
             EntityRole::Child => scope_id,
@@ -116,7 +115,9 @@ impl RemoteSyncLayer {
             EntityRole::Child => scope_id,
             EntityRole::Root | EntityRole::TopLevel | EntityRole::Unknown => "",
         };
-        self.sync.sync_update(entity, outbound_scope, id, data).await
+        self.sync
+            .sync_update(entity, outbound_scope, id, data)
+            .await
     }
 
     pub async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()> {
@@ -181,7 +182,9 @@ impl RemoteSyncLayer {
                 {
                     return Ok(());
                 }
-                accessor.update(&mutation.entity, &mutation.id, data).await?;
+                accessor
+                    .update(&mutation.entity, &mutation.id, data)
+                    .await?;
             }
             Operation::Delete => match accessor.delete(&mutation.entity, &mutation.id).await {
                 Ok(()) => {}
@@ -410,8 +413,5 @@ enum EntityRole {
 }
 
 fn strip_nulls(record: Record) -> Record {
-    record
-        .into_iter()
-        .filter(|(_, v)| !v.is_null())
-        .collect()
+    record.into_iter().filter(|(_, v)| !v.is_null()).collect()
 }

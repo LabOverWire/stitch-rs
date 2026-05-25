@@ -22,11 +22,9 @@ pub struct PersistenceLayer {
 }
 
 impl PersistenceLayer {
-    pub async fn open(
-        persistence: &PersistenceConfig,
-        config: Arc<StoreConfig>,
-    ) -> Result<Self> {
-        let db = open_persistent_db(&persistence.db_path, persistence.passphrase.as_deref()).await?;
+    pub async fn open(persistence: &PersistenceConfig, config: Arc<StoreConfig>) -> Result<Self> {
+        let db =
+            open_persistent_db(&persistence.db_path, persistence.passphrase.as_deref()).await?;
         register_schemas(&db, &config).await?;
         let (bus, _) = tokio::sync::broadcast::channel(config.event_channel_capacity);
         let mqdb_scope = MqdbScopeConfig::new(
@@ -62,8 +60,7 @@ impl PersistenceLayer {
     }
 
     pub async fn recover(&self) -> Result<()> {
-        let placeholder =
-            crate::db_helpers::open_memory_db().await?;
+        let placeholder = crate::db_helpers::open_memory_db().await?;
         let old = self.db.swap(Arc::new(placeholder));
         old.shutdown();
         drop(old);
@@ -189,15 +186,15 @@ impl PersistenceLayer {
 
         let db = self.database();
         db.delete(
-                entity.to_string(),
-                id.to_string(),
-                None,
-                None,
-                &self.mqdb_scope,
-                &mqdb_core::types::OwnershipConfig::default(),
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("persistence.delete:{entity}"), e))?;
+            entity.to_string(),
+            id.to_string(),
+            None,
+            None,
+            &self.mqdb_scope,
+            &mqdb_core::types::OwnershipConfig::default(),
+        )
+        .await
+        .map_err(|e| Error::mqdb(format!("persistence.delete:{entity}"), e))?;
 
         self.emit_mutation(MutationEvent {
             operation: Operation::Delete,
@@ -217,6 +214,18 @@ impl PersistenceLayer {
         sort: Vec<SortOrder>,
         pagination: Option<Pagination>,
     ) -> Result<Vec<Record>> {
+        self.list_with_projection(entity, filters, sort, pagination, Vec::new())
+            .await
+    }
+
+    pub async fn list_with_projection(
+        &self,
+        entity: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        projection: Vec<String>,
+    ) -> Result<Vec<Record>> {
         let db = self.database();
         let values = db
             .list(
@@ -224,7 +233,7 @@ impl PersistenceLayer {
                 filters,
                 sort,
                 pagination,
-                Vec::new(),
+                projection,
                 None,
             )
             .await

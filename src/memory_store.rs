@@ -104,6 +104,7 @@ impl MemoryStore {
         if !is_root && !is_top_level && !data.contains_key(scope_field) {
             data.insert(scope_field.clone(), Value::String(scope_id.to_string()));
         }
+        strip_nulls(&mut data);
 
         let db = self.db().await;
         let value = db
@@ -151,7 +152,14 @@ impl MemoryStore {
         let db = self.db().await;
         let filters = self.list_filters(entity, scope_id);
         let values = db
-            .list(entity.to_string(), filters, Vec::new(), None, Vec::new(), None)
+            .list(
+                entity.to_string(),
+                filters,
+                Vec::new(),
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .map_err(|e| Error::mqdb(format!("list:{entity}"), e))?;
         values.into_iter().map(value_to_record).collect()
@@ -161,9 +169,10 @@ impl MemoryStore {
         &self,
         entity: &str,
         id: &str,
-        fields: Record,
+        mut fields: Record,
         origin: Origin,
     ) -> Result<Record> {
+        strip_nulls(&mut fields);
         let db = self.db().await;
         let caller = mqdb_agent::CallerContext {
             sender: None,
@@ -250,7 +259,10 @@ impl MemoryStore {
                 )
                 .await
                 .map_err(|e| {
-                    Error::mqdb(format!("load_scope.create:{}", self.config.scope.root_entity), e)
+                    Error::mqdb(
+                        format!("load_scope.create:{}", self.config.scope.root_entity),
+                        e,
+                    )
                 })?;
         }
 
@@ -344,3 +356,6 @@ impl MemoryStore {
     }
 }
 
+fn strip_nulls(record: &mut Record) {
+    record.retain(|_, v| !v.is_null());
+}

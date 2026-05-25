@@ -88,7 +88,7 @@ impl StoreConfig {
             local_only_entities: HashMap::new(),
             sync_topic_prefix: "$DB".to_string(),
             response_topic_prefix: "$DB/clients".to_string(),
-            version_field: "_version".to_string(),
+            version_field: "version".to_string(),
             updated_at_field: "updatedAt".to_string(),
             user_scope_field: None,
             event_channel_capacity: 1024,

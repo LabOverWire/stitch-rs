@@ -2,9 +2,7 @@ use crate::config::StoreConfig;
 use crate::error::{Error, Result};
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
 use mqtt5::client::{ConnectionEvent, DisconnectReason, JwtAuthHandler};
-use mqtt5::types::{
-    ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions,
-};
+use mqtt5::types::{ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions};
 use mqtt5::{MqttClient, QoS};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -39,6 +37,7 @@ struct EngineState {
     subscribed_scopes: Mutex<HashSet<String>>,
     awaiting_state: Mutex<HashSet<String>>,
     buffered: Mutex<HashMap<String, Vec<SyncMutation>>>,
+    applied_version: Mutex<HashMap<String, i64>>,
     mutation_bus: broadcast::Sender<MutationDelivery>,
     connection_status: broadcast::Sender<ConnectionStatus>,
     session_invalid: Mutex<Option<SessionInvalidHandler>>,
@@ -81,6 +80,7 @@ impl SyncEngine {
             subscribed_scopes: Mutex::new(HashSet::new()),
             awaiting_state: Mutex::new(HashSet::new()),
             buffered: Mutex::new(HashMap::new()),
+            applied_version: Mutex::new(HashMap::new()),
             mutation_bus,
             connection_status,
             session_invalid: Mutex::new(None),
@@ -180,11 +180,7 @@ impl SyncEngine {
         match self.do_open_scope(scope_id).await {
             Ok(state) => Ok(state),
             Err(err) => {
-                self.state
-                    .awaiting_state
-                    .lock()
-                    .unwrap()
-                    .remove(scope_id);
+                self.state.awaiting_state.lock().unwrap().remove(scope_id);
                 self.state.buffered.lock().unwrap().remove(scope_id);
                 self.state
                     .subscribed_scopes
@@ -205,23 +201,16 @@ impl SyncEngine {
             .insert(scope_id.to_string());
 
         let root_future = self.fetch_one(&self.config.scope.root_entity, scope_id);
-        let child_futures = self
-            .config
-            .scope
-            .child_entities
-            .iter()
-            .map(|entity| {
-                let entity = entity.clone();
-                async move {
-                    let list = self.fetch_list(&entity, Some(scope_id)).await?;
-                    Ok::<(String, Vec<Record>), Error>((entity, list))
-                }
-            });
+        let child_futures = self.config.scope.child_entities.iter().map(|entity| {
+            let entity = entity.clone();
+            async move {
+                let list = self.fetch_list(&entity, Some(scope_id)).await?;
+                Ok::<(String, Vec<Record>), Error>((entity, list))
+            }
+        });
 
-        let (root_record, child_results) = tokio::join!(
-            root_future,
-            futures::future::try_join_all(child_futures),
-        );
+        let (root_record, child_results) =
+            tokio::join!(root_future, futures::future::try_join_all(child_futures),);
         let root_record = root_record?;
         let mut children: std::collections::BTreeMap<String, Vec<Record>> =
             std::collections::BTreeMap::new();
@@ -283,27 +272,66 @@ impl SyncEngine {
         let response = self.request(&topic, Value::Object(data)).await?;
         check_response(&response)?;
         let id = extract_id(&response)?;
+        if is_child && !scope_id.is_empty() {
+            self.bump_scope_version(scope_id).await?;
+        }
         Ok(id)
     }
 
     pub async fn sync_update(
         &self,
         entity: &str,
-        _scope_id: &str,
+        scope_id: &str,
         id: &str,
         data: Record,
     ) -> Result<()> {
         let topic = format!("{}/{}/{}/update", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(data)).await?;
         check_response(&response)?;
+        let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
+        if is_child && !scope_id.is_empty() {
+            self.bump_scope_version(scope_id).await?;
+        }
         Ok(())
     }
 
-    pub async fn sync_delete(&self, entity: &str, _scope_id: &str, id: &str) -> Result<()> {
+    pub async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()> {
         let topic = format!("{}/{}/{}/delete", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(Map::new())).await?;
         check_response(&response)?;
+        let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
+        if is_child && !scope_id.is_empty() {
+            self.bump_scope_version(scope_id).await?;
+        }
         Ok(())
+    }
+
+    pub async fn bump_scope_version(&self, scope_id: &str) -> Result<()> {
+        let now = now_millis();
+        let mut payload = Map::new();
+        payload.insert(self.config.version_field.clone(), Value::from(now));
+        payload.insert(self.config.updated_at_field.clone(), Value::from(now));
+        let topic = format!(
+            "{}/{}/{}/update",
+            self.prefix, self.config.scope.root_entity, scope_id
+        );
+        let response = self.request(&topic, Value::Object(payload)).await?;
+        check_response(&response)?;
+        self.state
+            .applied_version
+            .lock()
+            .unwrap()
+            .insert(scope_id.to_string(), now);
+        Ok(())
+    }
+
+    pub fn applied_version(&self, scope_id: &str) -> Option<i64> {
+        self.state
+            .applied_version
+            .lock()
+            .unwrap()
+            .get(scope_id)
+            .copied()
     }
 
     pub async fn fetch_one(&self, entity: &str, id: &str) -> Result<Option<Record>> {
@@ -359,10 +387,7 @@ impl SyncEngine {
 
     pub async fn request(&self, topic: &str, payload: Value) -> Result<Map<String, Value>> {
         let request_id = Uuid::now_v7().to_string();
-        let response_topic = format!(
-            "{}/{}/{}",
-            self.response_prefix, self.client_id, request_id
-        );
+        let response_topic = format!("{}/{}/{}", self.response_prefix, self.client_id, request_id);
         let (tx, rx) = oneshot::channel();
         self.state
             .pending_requests
@@ -373,10 +398,7 @@ impl SyncEngine {
         let props = PublishProperties {
             response_topic: Some(response_topic),
             correlation_data: Some(request_id.as_bytes().to_vec()),
-            user_properties: vec![(
-                ORIGIN_USER_PROPERTY.to_string(),
-                self.client_id.clone(),
-            )],
+            user_properties: vec![(ORIGIN_USER_PROPERTY.to_string(), self.client_id.clone())],
             ..PublishProperties::default()
         };
         let opts = PublishOptions {
@@ -447,7 +469,10 @@ impl SyncEngine {
     }
 
     async fn subscribe_to_top_level(&self) -> Result<()> {
-        let root_wildcard = format!("{}/{}/+/events/#", self.prefix, self.config.scope.root_entity);
+        let root_wildcard = format!(
+            "{}/{}/+/events/#",
+            self.prefix, self.config.scope.root_entity
+        );
         let state = Arc::clone(&self.state);
         let options = SubscribeOptions {
             qos: QoS::AtLeastOnce,
@@ -506,8 +531,7 @@ impl SyncEngine {
                     ConnectionEvent::ReconnectFailed { .. } => (ConnectionStatus::Error, false),
                 };
                 let _ = state.connection_status.send(status);
-                if auth_failure
-                    && let Some(handler) = state.session_invalid.lock().unwrap().clone()
+                if auth_failure && let Some(handler) = state.session_invalid.lock().unwrap().clone()
                 {
                     handler();
                 }
@@ -589,16 +613,13 @@ fn handle_scope_message(state: &EngineState, msg: Message) {
 
     let scope_id = parsed.scope_id.clone();
     let buffered = state.awaiting_state.lock().unwrap().contains(&scope_id);
-    if buffered
-        && let Some(list) = state.buffered.lock().unwrap().get_mut(&scope_id)
-    {
+    if buffered && let Some(list) = state.buffered.lock().unwrap().get_mut(&scope_id) {
         list.push(mutation);
         return;
     }
-    let _ = state.mutation_bus.send(MutationDelivery {
-        scope_id,
-        mutation,
-    });
+    let _ = state
+        .mutation_bus
+        .send(MutationDelivery { scope_id, mutation });
 }
 
 fn handle_root_wildcard_message(state: &EngineState, msg: Message) {
@@ -780,4 +801,11 @@ fn extract_id(response: &Map<String, Value>) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| Error::Mqtt("response missing data.id".into()))
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }

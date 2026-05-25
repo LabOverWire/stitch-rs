@@ -183,7 +183,7 @@ async fn persistence_outlives_store_instance() {
         "memory is empty after restart; need replace_scope to repopulate"
     );
 
-    let list = store2.list("project", "").await.unwrap();
+    let list = store2.list("project", None).await.unwrap();
     assert_eq!(list.len(), 1, "persistence reload should expose root");
     assert_eq!(list[0].get("id").and_then(Value::as_str), Some("p1"));
 }
@@ -300,7 +300,7 @@ async fn origin_load_skips_persistence_and_remote() {
         Some("Loaded")
     );
 
-    let listed_from_persistence = store.list("project", "").await.unwrap();
+    let listed_from_persistence = store.list("project", None).await.unwrap();
     assert!(
         listed_from_persistence.is_empty(),
         "Origin::Load should bypass persistence; got rows: {listed_from_persistence:?}"
@@ -349,7 +349,16 @@ async fn origin_clear_skips_persistence_and_remote() {
         store.read("task", "t1").await.unwrap().is_none(),
         "memory should reflect the Clear delete"
     );
-    let in_persistence = store.list("task", "p1").await.unwrap();
+    let in_persistence = store
+        .list(
+            "task",
+            Some(stitch::ListFilter {
+                scope_id: Some("p1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         in_persistence.len(),
         1,
@@ -464,5 +473,368 @@ async fn origin_remote_writes_to_memory_only_when_no_persistence() {
     assert_eq!(
         got.get("name").and_then(Value::as_str),
         Some("server-pushed")
+    );
+}
+
+#[tokio::test]
+async fn list_with_scope_filter_returns_matching_children() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("A"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "project",
+            "p2",
+            make_record(&[("id", json!("p2")), ("name", json!("B"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("p1-task")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p2",
+            make_record(&[
+                ("id", json!("t2")),
+                ("title", json!("p2-task")),
+                ("projectId", json!("p2")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let tasks_p1 = store
+        .list(
+            "task",
+            Some(stitch::ListFilter {
+                scope_id: Some("p1".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tasks_p1.len(), 1);
+    assert_eq!(tasks_p1[0].get("id").and_then(Value::as_str), Some("t1"));
+}
+
+#[tokio::test]
+async fn list_root_entities_honors_sort() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    for (id, name) in [("p3", "Charlie"), ("p1", "Alpha"), ("p2", "Bravo")] {
+        store
+            .create(
+                "project",
+                id,
+                make_record(&[("id", json!(id)), ("name", json!(name))]),
+                Origin::Local,
+            )
+            .await
+            .unwrap();
+    }
+
+    let sorted = store
+        .list_root_entities(vec![stitch::SortField {
+            field: "name".into(),
+            direction: stitch::SortDirection::Asc,
+        }])
+        .await
+        .unwrap();
+    let names: Vec<&str> = sorted
+        .iter()
+        .filter_map(|r| r.get("name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(names, vec!["Alpha", "Bravo", "Charlie"]);
+}
+
+#[tokio::test]
+async fn child_count_returns_matching_rows() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    for i in 0..3 {
+        store
+            .create(
+                "task",
+                "p1",
+                make_record(&[
+                    ("id", json!(format!("t{i}"))),
+                    ("title", json!("x")),
+                    ("projectId", json!("p1")),
+                ]),
+                Origin::Local,
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(store.child_count("task", "p1").await.unwrap(), 3);
+    assert_eq!(store.child_count("task", "p2").await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn subscribe_entity_filters_by_entity_name() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut rx = store.subscribe_entity("task").unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hi")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("subscriber should receive within timeout")
+        .expect("channel should be open");
+    assert_eq!(event.entity, "task");
+    assert_eq!(event.id, "t1");
+    assert_eq!(event.operation, Operation::Insert);
+}
+
+#[tokio::test]
+async fn subscribe_scope_entity_filters_by_scope_and_entity() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut rx = store.subscribe_scope_entity("p1", "task").unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "project",
+            "p2",
+            make_record(&[("id", json!("p2"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p2",
+            make_record(&[
+                ("id", json!("t_other")),
+                ("title", json!("nope")),
+                ("projectId", json!("p2")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t_match")),
+                ("title", json!("yes")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("subscriber should receive within timeout")
+        .expect("channel should be open");
+    assert_eq!(event.entity, "task");
+    assert_eq!(event.id, "t_match");
+    assert_eq!(event.scope_id, "p1");
+}
+
+#[tokio::test]
+async fn ready_is_false_before_initialize_and_true_after() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    assert!(!store.ready());
+    store.initialize().await.unwrap();
+    assert!(store.ready());
+}
+
+#[tokio::test]
+async fn initial_sync_done_is_true_without_remote() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    assert!(store.initial_sync_done().unwrap());
+}
+
+#[tokio::test]
+async fn is_reconnecting_is_false_before_first_connect() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    assert!(!store.is_reconnecting().unwrap());
+}
+
+#[tokio::test]
+async fn request_without_remote_returns_config_error() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    let err = store
+        .request("anything", Value::Object(Map::new()))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, stitch::Error::Config(_)));
+}
+
+#[tokio::test]
+async fn memory_create_strips_null_fields() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[
+                ("id", json!("p1")),
+                ("name", json!("Alpha")),
+                ("missing", Value::Null),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    let got = store.read("project", "p1").await.unwrap().unwrap();
+    assert!(
+        !got.contains_key("missing"),
+        "null-valued field should be stripped before insert"
+    );
+}
+
+#[tokio::test]
+async fn update_local_state_upserts_when_missing() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    store
+        .update_local_state("project", "p1", make_record(&[("name", json!("created"))]))
+        .await
+        .unwrap();
+    let got = store
+        .read_local_state("project", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.get("name").and_then(Value::as_str), Some("created"));
+
+    store
+        .update_local_state("project", "p1", make_record(&[("name", json!("updated"))]))
+        .await
+        .unwrap();
+    let got = store
+        .read_local_state("project", "p1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.get("name").and_then(Value::as_str), Some("updated"));
+}
+
+#[tokio::test]
+async fn reset_for_logout_clears_auth_and_status() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    store
+        .set_authenticated_user(Some("user-1".into()))
+        .unwrap();
+    store.reset_for_logout().await.unwrap();
+
+    assert!(store.current_scope().unwrap().is_none());
+    assert_eq!(
+        store.connection_status().unwrap(),
+        stitch::ConnectionStatus::Offline
     );
 }

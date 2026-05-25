@@ -14,13 +14,8 @@ const PENDING_ENTITY: &str = "pending_sync";
 #[async_trait]
 pub trait MutationSender: Send + Sync {
     async fn sync_create(&self, entity: &str, scope_id: &str, data: Record) -> Result<()>;
-    async fn sync_update(
-        &self,
-        entity: &str,
-        scope_id: &str,
-        id: &str,
-        data: Record,
-    ) -> Result<()>;
+    async fn sync_update(&self, entity: &str, scope_id: &str, id: &str, data: Record)
+    -> Result<()>;
     async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()>;
     async fn read_entity(&self, entity: &str, id: &str) -> Result<Record>;
     async fn delete_entity(&self, entity: &str, id: &str) -> Result<()>;
@@ -167,7 +162,11 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
                 entity,
                 id: entity_id,
                 scope_id,
-                data: if merged.is_empty() { None } else { Some(merged) },
+                data: if merged.is_empty() {
+                    None
+                } else {
+                    Some(merged)
+                },
                 record_ids,
                 min_created_at,
             }
@@ -261,7 +260,26 @@ async fn flush_consolidated(
                     FlushOutcome::Drop
                 }
             }
-            Err(_) => FlushOutcome::Drop,
+            Err(err) if err.is_permanent_mutation() => {
+                tracing::error!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    op = ?mutation.op,
+                    error = %err,
+                    "dropping mutation after permanent error"
+                );
+                FlushOutcome::Drop
+            }
+            Err(err) => {
+                tracing::error!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    op = ?mutation.op,
+                    error = %err,
+                    "dropping mutation after unknown error"
+                );
+                FlushOutcome::Drop
+            }
         };
 
         if matches!(outcome, FlushOutcome::Drop) {
@@ -356,7 +374,11 @@ impl OfflineQueue for PersistentOfflineQueue {
                 FilterOp::Eq,
                 Value::String(entity_id.into()),
             ),
-            Filter::new("scopeId".into(), FilterOp::Eq, Value::String(scope_id.into())),
+            Filter::new(
+                "scopeId".into(),
+                FilterOp::Eq,
+                Value::String(scope_id.into()),
+            ),
             Filter::new(
                 "op".into(),
                 FilterOp::Eq,
@@ -364,7 +386,11 @@ impl OfflineQueue for PersistentOfflineQueue {
             ),
         ];
         if let Some(user) = self.current_user() {
-            filters.push(Filter::new("userId".into(), FilterOp::Eq, Value::String(user)));
+            filters.push(Filter::new(
+                "userId".into(),
+                FilterOp::Eq,
+                Value::String(user),
+            ));
         }
         let rows = self.list_rows(filters).await?;
         for row in rows {
@@ -415,7 +441,11 @@ impl OfflineQueue for PersistentOfflineQueue {
             Value::String(scope_id.into()),
         )];
         if let Some(user) = self.current_user() {
-            filters.push(Filter::new("userId".into(), FilterOp::Eq, Value::String(user)));
+            filters.push(Filter::new(
+                "userId".into(),
+                FilterOp::Eq,
+                Value::String(user),
+            ));
         }
         let rows = self.list_rows(filters).await?;
         Ok(rows.into_iter().map(pending_from_row).collect())
@@ -429,11 +459,7 @@ impl OfflineQueue for PersistentOfflineQueue {
                 FilterOp::Eq,
                 Value::String(entity_id.into()),
             ),
-            Filter::new(
-                "op".into(),
-                FilterOp::Eq,
-                Value::String("insert".into()),
-            ),
+            Filter::new("op".into(), FilterOp::Eq, Value::String("insert".into())),
         ];
         let rows = self.list_rows(filters).await?;
         Ok(!rows.is_empty())
@@ -653,14 +679,14 @@ fn pending_sync_definition() -> crate::config::EntityDefinition {
 
 fn row_from_record(record: Record) -> Option<StoredRow> {
     let record_id = record.get("id")?.as_str()?.to_string();
-    let op = record.get("op").and_then(Value::as_str).and_then(parse_op)?;
+    let op = record
+        .get("op")
+        .and_then(Value::as_str)
+        .and_then(parse_op)?;
     let entity = record.get("entity")?.as_str()?.to_string();
     let entity_id = record.get("entityId")?.as_str()?.to_string();
     let scope_id = record.get("scopeId")?.as_str()?.to_string();
-    let created_at = record
-        .get("createdAt")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let created_at = record.get("createdAt").and_then(Value::as_u64).unwrap_or(0);
     let data = record.get("data").and_then(|v| match v {
         Value::Object(m) => Some(m.clone()),
         _ => None,
