@@ -255,11 +255,38 @@ operation. The current public surface is the re-exports in `lib.rs`:
 
 - `Store`, `StoreConfig`, `StoreOptions`, `PersistenceConfig`, `RemoteConfig`,
   `EntityDefinition`, `SchemaField`, `ForeignKeyDefinition`, `OnDeleteAction`,
-  `ScopeConfig`, `TopLevelEntity`
+  `ScopeConfig`, `TopLevelEntity`, `ReconnectValidator`
 - `Origin`, `Operation`, `MutationEvent`, `StoreEvent`, `ScopeBundle`,
   `ScopeState`, `SyncMutation`, `PendingMutation`, `ListFilter`, `SortField`,
   `SortDirection`, `ConnectionStatus`, `Record`
 - `Error`, `Result`
+
+### `Store` method surface
+
+CRUD: `create`, `read`, `update`, `delete`, `list` (with `ListFilter` for
+scope/sort/projection), `list_root_entities` (with sort), `snapshot`,
+`child_count`.
+
+Subscriptions: `subscribe` (memory bus), `subscribe_persistence` (cross-scope
+persistence bus), `subscribe_entity` and `subscribe_scope_entity`
+(filtered `tokio::sync::mpsc::UnboundedReceiver<MutationEvent>` streams),
+`subscribe_connection_status`.
+
+Lifecycle / readiness: `initialize`, `ready`, `initial_sync_done`,
+`is_reconnecting`, `connection_status`, `current_scope`, `replace_scope`,
+`close_scope`, `disconnect`, `reconnect`, `shutdown`,
+`recover_persistence`.
+
+Auth / session: `set_authenticated_user`, `set_session_invalid_handler`,
+`set_reconnect_validator`, `reset_for_logout`.
+
+Direct broker access: `request` (ad-hoc RPC), `applied_version` (last bump
+seen for a scope).
+
+Local-only state: `read_local_state`, `update_local_state` (skip memory and
+remote; hit persistence directly with upsert semantics).
+
+Batching: `begin_batch`, `end_batch`.
 
 ---
 
@@ -279,7 +306,7 @@ cargo test                              # full suite, default parallel
 cargo clippy --all-targets -- -D warnings   # CI-strict
 ```
 
-Current: 56 tests, all passing, zero clippy warnings, zero build warnings.
+Current: 77 tests, all passing, zero clippy warnings, zero build warnings.
 
 ---
 
@@ -287,14 +314,6 @@ Current: 56 tests, all passing, zero clippy warnings, zero build warnings.
 
 These exist deliberately or as deferred work:
 
-- **Top-level entity wire tests** — the SyncEngine subscribes to top-level
-  patterns and root-wildcard topics, but no dedicated test exercises the
-  end-to-end propagation. Wiring is in place; verifying it under load would be a
-  natural extension of `tests/wire.rs`.
-- **`MutationSender::read_entity` returns `Result<Record>`** — `RemoteSyncLayer`'s
-  impl translates `Ok(None)` from `fetch_one` into `Err(NotFound)` so the queue's
-  upsert path can detect it. This is a small seam; the queue trait could instead
-  take `Result<Option<Record>>` directly.
 - **`Store::set_authenticated_user` requires `initialize()` first** — returns
   `Error::NotInitialized` if called before init. TS allowed the reverse via a
   cached field. Native callers should init first.
@@ -303,9 +322,34 @@ These exist deliberately or as deferred work:
   via the layer module directly (`stitch::persistence::PersistenceLayer`, which
   is `#[doc(hidden)]` but reachable). `Store` does not yet expose a passthrough.
   Auto-retry could be added once a real failure mode emerges.
-- **Minimal inline rustdoc** — only a crate-level preamble in `lib.rs`. Public
-  types and methods have no per-item docs; `cargo doc` mostly shows type
-  signatures. The markdown files here are the primary documentation.
+- **`reset_for_logout` doesn't tear down persistence or queue** — TS clears
+  these handles and the consumer reinitializes. Rust's ownership model makes
+  mid-flight teardown unsound (background tasks still hold `Arc` references),
+  so the Rust port resets auth + sync state in place; callers wanting a full
+  reset should drop the `Store` and construct a new one.
+- **Top-level entity wire propagation has only one wire test** — a basic
+  propagation case is covered in `tests/wire.rs`. Stress tests under
+  high-fanout or contention would be a natural extension.
+
+---
+
+## Wire compatibility with TS clients
+
+The Rust port targets bidirectional interop with TS stitch clients on the same
+broker. The wire-significant choices:
+
+- **`version_field` defaults to `"version"`** (`StoreConfig::new`), matching
+  TS. A Rust+TS pair using defaults agrees on which payload field carries the
+  scope version.
+- **`bump_scope_version`** publishes `$DB/{root}/{scope_id}/update` with
+  `{[version_field]: now_ms, [updated_at_field]: now_ms}` after every successful
+  child create/update/delete. The root must already exist on the server, same
+  precondition as TS. `SyncEngine::applied_version(scope_id)` exposes the last
+  ms value the local client wrote, mirroring TS `getAppliedVersion`.
+- **Scoped topic op derivation** matches TS: scoped messages map the topic
+  suffix (`created` / `updated` / `deleted`) onto `Operation`. Top-level
+  messages read the payload's `operation` field (`Create` / `Update` /
+  `Delete`).
 
 ---
 

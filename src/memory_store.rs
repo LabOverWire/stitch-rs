@@ -190,12 +190,9 @@ impl MemoryStore {
             .await
             .map_err(|e| Error::mqdb(format!("update:{entity}"), e))?;
         let record = value_to_record(updated)?;
-        let scope_id = self.resolve_scope(entity, &record).ok_or_else(|| {
-            Error::Config(format!(
-                "update:{entity}/{id}: record has no scope (missing {})",
-                self.config.scope.scope_field
-            ))
-        })?;
+        let Some(scope_id) = self.resolve_scope(entity, &record) else {
+            return Ok(record);
+        };
         let id_owned = record
             .get("id")
             .and_then(Value::as_str)
@@ -282,10 +279,21 @@ impl MemoryStore {
             }
         }
 
-        {
+        let previous_scope = {
             let mut state = self.state.write().await;
+            let prev = state.current_scope.take();
             state.db = fresh;
             state.current_scope = Some(scope_id.to_string());
+            prev
+        };
+
+        if let Some(prev) = previous_scope
+            && prev != scope_id
+        {
+            let _ = self.bus.send(StoreEvent::ScopeCleared {
+                scope_id: prev,
+                entities: self.all_scoped_entities(),
+            });
         }
 
         let _ = self.bus.send(StoreEvent::ScopeLoaded {

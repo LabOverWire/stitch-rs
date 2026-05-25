@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Primitive types a schema field can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
@@ -13,6 +14,7 @@ pub enum FieldType {
     Array,
 }
 
+/// A single field on an entity's schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaField {
     pub name: String,
@@ -23,6 +25,7 @@ pub struct SchemaField {
     pub default: Option<serde_json::Value>,
 }
 
+/// Cascade behavior when a parent row referenced by a foreign key is deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OnDeleteAction {
@@ -31,6 +34,7 @@ pub enum OnDeleteAction {
     Restrict,
 }
 
+/// Foreign-key relationship between two entities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForeignKeyDefinition {
     pub field: String,
@@ -38,6 +42,7 @@ pub struct ForeignKeyDefinition {
     pub on_delete: OnDeleteAction,
 }
 
+/// Schema for a single entity, including fields, foreign keys, and indexes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityDefinition {
     pub fields: Vec<SchemaField>,
@@ -49,6 +54,9 @@ pub struct EntityDefinition {
     pub indexes: Vec<String>,
 }
 
+/// How a single scope is organized: which entity is the root, which are
+/// children that belong to that root, and which field on children carries the
+/// owning scope id.
 #[derive(Debug, Clone)]
 pub struct ScopeConfig {
     pub root_entity: String,
@@ -56,12 +64,18 @@ pub struct ScopeConfig {
     pub scope_field: String,
 }
 
+/// An entity that lives outside any scope (e.g. user profiles, app config) and
+/// is synced through its own MQTT subscription pattern.
 #[derive(Debug, Clone)]
 pub struct TopLevelEntity {
     pub entity: String,
     pub subscription_pattern: String,
 }
 
+/// Top-level configuration passed to [`Store::new`](crate::Store::new).
+///
+/// Most fields have sensible defaults; only `entities` and `scope` must be
+/// supplied. See [`StoreConfig::new`] for the canonical constructor.
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
     pub entities: HashMap<String, EntityDefinition>,
@@ -107,6 +121,9 @@ impl StoreConfig {
     }
 }
 
+/// Local persistence settings. When provided to [`StoreOptions::persistence`],
+/// the store opens an fjall-backed database at `db_path` (encrypted with
+/// `passphrase` if supplied) for durable local state.
 #[derive(Debug, Clone)]
 pub struct PersistenceConfig {
     pub db_path: std::path::PathBuf,
@@ -118,6 +135,9 @@ pub type TicketFuture =
 
 pub type TicketProvider = Arc<dyn Fn() -> TicketFuture + Send + Sync>;
 
+/// MQTT broker connection settings for remote sync. When provided to
+/// [`StoreOptions::remote`], the store connects to `server_url` and uses
+/// `get_ticket` to obtain a JWT for enhanced auth on each connect.
 #[derive(Clone)]
 pub struct RemoteConfig {
     pub server_url: String,
@@ -149,6 +169,9 @@ impl RemoteConfig {
     }
 }
 
+/// Optional layers attached to a [`Store`](crate::Store): durable persistence
+/// and remote MQTT sync. Both default to `None`, yielding an in-memory-only
+/// store.
 #[derive(Debug, Clone, Default)]
 pub struct StoreOptions {
     pub persistence: Option<PersistenceConfig>,

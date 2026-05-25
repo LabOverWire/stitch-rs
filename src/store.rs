@@ -23,6 +23,12 @@ use tokio::sync::{OnceCell, broadcast};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+/// Reactive state-sync facade over an in-memory cache, fjall persistence, and
+/// MQTT5 remote sync. Construct with [`Store::new`], call [`Store::initialize`]
+/// once, then issue CRUD calls and subscribe to mutation streams.
+///
+/// `Store` is `Send + Sync` and intended to be held in an `Arc` and shared
+/// across tasks.
 pub struct Store {
     config: Arc<StoreConfig>,
     options: StoreOptions,
@@ -30,6 +36,10 @@ pub struct Store {
     inner: OnceCell<Arc<StoreInner>>,
 }
 
+/// Async validator fired at the start of every successful (re)connect. Use it
+/// to hit your own auth check before mutations flush. Returning an `Err` is
+/// logged at `warn` level and does not abort the connect; pair this with
+/// [`Store::set_session_invalid_handler`] for hard logout.
 pub type ReconnectValidator =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
@@ -53,11 +63,15 @@ struct StoreState {
 }
 
 impl Store {
+    /// Construct an unopened `Store` with a freshly generated client id. Call
+    /// [`Store::initialize`] before issuing any other operation.
     #[must_use]
     pub fn new(config: StoreConfig, options: StoreOptions) -> Self {
         Self::with_client_id(config, options, Uuid::now_v7().to_string())
     }
 
+    /// Like [`Store::new`] but with a caller-supplied MQTT client id. The id
+    /// must not contain `+`, `#`, or `/`.
     #[must_use]
     pub fn with_client_id(config: StoreConfig, options: StoreOptions, client_id: String) -> Self {
         Self {
@@ -68,6 +82,9 @@ impl Store {
         }
     }
 
+    /// Open the inner layers (memory + optional persistence + optional remote)
+    /// and start background tasks. Idempotent: subsequent calls return `Ok(())`
+    /// without re-initializing.
     pub async fn initialize(&self) -> Result<()> {
         self.inner
             .get_or_try_init(|| async {
@@ -84,14 +101,24 @@ impl Store {
         self.inner.get().ok_or(Error::NotInitialized)
     }
 
+    /// Broadcast receiver for the memory bus. Sees mutation events for the
+    /// currently-active scope plus `ScopeLoaded` / `ScopeCleared` signals.
     pub fn subscribe(&self) -> Result<broadcast::Receiver<StoreEvent>> {
         Ok(self.inner()?.memory.subscribe())
     }
 
+    /// Broadcast receiver for the persistence bus. Sees every persisted write
+    /// across all scopes — useful for cross-scope observation (e.g. a
+    /// dashboard of all root entities). Returns `None` when persistence is not
+    /// configured.
     pub fn subscribe_persistence(&self) -> Result<Option<broadcast::Receiver<StoreEvent>>> {
         Ok(self.inner()?.persistence.as_ref().map(|p| p.subscribe()))
     }
 
+    /// Stream of mutation events filtered to a single entity. When
+    /// persistence is configured, the memory-bus filter additionally requires
+    /// `Origin::Load` or `Origin::Clear` (mirroring TS's "snapshot refresh"
+    /// semantics) and the persistence bus is forwarded as-is.
     pub fn subscribe_entity(
         &self,
         entity: &str,
@@ -132,6 +159,8 @@ impl Store {
         Ok(rx)
     }
 
+    /// Stream of mutation events filtered to a specific `(scope_id, entity)`
+    /// pair on the memory bus.
     pub fn subscribe_scope_entity(
         &self,
         scope_id: &str,
@@ -151,21 +180,31 @@ impl Store {
         Ok(rx)
     }
 
+    /// Defer memory-bus notifications. While the batch counter is non-zero,
+    /// mutations replace entries in a `HashMap<(scope, entity), MutationEvent>`,
+    /// so rapid bursts collapse to one event per unique `(scope, entity)`.
+    /// Calls nest; the outermost [`Store::end_batch`] drains and emits.
     pub fn begin_batch(&self) -> Result<()> {
         self.inner()?.memory.begin_batch();
         Ok(())
     }
 
+    /// Pair to [`Store::begin_batch`]; the outermost call flushes the
+    /// deduplicated buffer onto the memory bus.
     pub fn end_batch(&self) -> Result<()> {
         self.inner()?.memory.end_batch();
         Ok(())
     }
 
+    /// Current remote connection status, or `Offline` if no remote is
+    /// configured.
     pub fn connection_status(&self) -> Result<ConnectionStatus> {
         let inner = self.inner()?;
         Ok(inner.state.lock().unwrap().last_connection_status)
     }
 
+    /// Subscribe to remote connection-status changes. `None` when no remote is
+    /// configured.
     pub fn subscribe_connection_status(
         &self,
     ) -> Result<Option<broadcast::Receiver<ConnectionStatus>>> {
@@ -176,6 +215,8 @@ impl Store {
             .map(|r| r.subscribe_connection_status()))
     }
 
+    /// Set or clear the authenticated user. Passes through to the offline
+    /// queue so persisted rows are scoped to the user that wrote them.
     pub fn set_authenticated_user(&self, user_id: Option<String>) -> Result<()> {
         let inner = self.inner()?;
         inner.state.lock().unwrap().authenticated_user = user_id.clone();
@@ -185,25 +226,35 @@ impl Store {
         Ok(())
     }
 
+    /// The currently-loaded scope id, or `None` if none is active.
     pub fn current_scope(&self) -> Result<Option<String>> {
         Ok(self.inner()?.state.lock().unwrap().current_scope.clone())
     }
 
+    /// `true` once [`Store::initialize`] has completed successfully.
     #[must_use]
     pub fn ready(&self) -> bool {
         self.inner.get().is_some()
     }
 
+    /// `true` once the first post-connect sync has finished. When no remote is
+    /// configured this is `true` immediately after `initialize`.
     pub fn initial_sync_done(&self) -> Result<bool> {
         Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
     }
 
+    /// `true` if the client was previously connected and is currently not in
+    /// `Connected`. Useful for UI banners.
     pub fn is_reconnecting(&self) -> Result<bool> {
         let state = self.inner()?.state.lock().unwrap();
         Ok(state.has_been_connected
             && !matches!(state.last_connection_status, ConnectionStatus::Connected))
     }
 
+    /// Insert a row. For child entities the `scope_id` argument identifies the
+    /// owning scope; for the root entity it's ignored and the row's own id
+    /// becomes the scope. Returns the new row's id (either taken from the
+    /// `data.id` field or freshly generated).
     pub async fn create(
         &self,
         entity: &str,
@@ -293,6 +344,8 @@ impl Store {
         Ok(id)
     }
 
+    /// Partial-update an existing row. `fields` is merged into the row;
+    /// null-valued entries are stripped before write (matching TS behavior).
     pub async fn update(
         &self,
         entity: &str,
@@ -407,6 +460,7 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a row. No-op if the row doesn't exist.
     pub async fn delete(&self, entity: &str, id: &str, origin: Origin) -> Result<()> {
         let inner = self.inner()?;
         let scope_field = &inner.config.scope.scope_field;
@@ -508,10 +562,16 @@ impl Store {
         Ok(())
     }
 
+    /// Read a single row from the in-memory cache. Returns `None` if the row
+    /// isn't in the currently-loaded scope (call [`Store::read_local_state`]
+    /// if you need to hit persistence directly).
     pub async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>> {
         self.inner()?.memory.read(entity, id).await
     }
 
+    /// List rows of an entity. When persistence is configured, the filter's
+    /// `scope_id` / `sort` / `projection` are applied at the fjall level;
+    /// without persistence, only `scope_id` is honored on the memory cache.
     pub async fn list(&self, entity: &str, filter: Option<ListFilter>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
@@ -545,6 +605,10 @@ impl Store {
         }
     }
 
+    /// List all root entities across all scopes, optionally sorted. Returns
+    /// an empty `Vec` until [`Store::initial_sync_done`] is `true` when a
+    /// remote is configured (so callers don't see stale local state during
+    /// reconnect).
     pub async fn list_root_entities(&self, sort: Vec<SortField>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         if inner.remote.is_some() && !inner.state.lock().unwrap().initial_sync_done {
@@ -564,10 +628,14 @@ impl Store {
         }
     }
 
+    /// Snapshot of all rows for an entity within a scope, taken from the
+    /// in-memory cache. Equivalent to TS `getSnapshot`.
     pub async fn snapshot(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
         self.inner()?.memory.list(entity, scope_id).await
     }
 
+    /// Count of rows of an entity within a scope. Uses persistence when
+    /// configured, otherwise counts the memory snapshot.
     pub async fn child_count(&self, entity: &str, scope_id: &str) -> Result<usize> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
@@ -583,6 +651,12 @@ impl Store {
         }
     }
 
+    /// Switch the active scope. If a remote is connected, fetches the new
+    /// scope's root + children, reconciles them with local state, replays any
+    /// buffered live mutations, and atomically swaps the memory cache. When
+    /// offline, just loads from persistence. Emits `ScopeCleared` for the
+    /// prior scope (if any) and `ScopeLoaded` for the new one on the memory
+    /// bus.
     pub async fn replace_scope(&self, scope_id: &str) -> Result<()> {
         let inner = self.inner()?;
         if inner.state.lock().unwrap().current_scope.as_deref() == Some(scope_id) {
@@ -622,6 +696,8 @@ impl Store {
         Ok(())
     }
 
+    /// Unsubscribe from a scope's MQTT topics and clear it from
+    /// `current_scope` if it was active.
     pub async fn close_scope(&self, scope_id: &str) -> Result<()> {
         let inner = self.inner()?;
         if let Some(remote) = &inner.remote {
@@ -634,6 +710,8 @@ impl Store {
         Ok(())
     }
 
+    /// Disconnect the remote MQTT client. Pending requests are drained with
+    /// [`Error::ConnectionClosed`]. Memory and persistence are unaffected.
     pub async fn disconnect(&self) -> Result<()> {
         if let Some(remote) = &self.inner()?.remote {
             let _ = remote.disconnect().await;
@@ -641,6 +719,10 @@ impl Store {
         Ok(())
     }
 
+    /// Hot-swap the underlying fjall database after corruption. Returns
+    /// `Error::Config` if persistence isn't configured. Callers must drop any
+    /// outstanding `Arc<Database>` clones reached through the internal layer
+    /// modules before calling this.
     pub async fn recover_persistence(&self) -> Result<()> {
         let inner = self.inner()?;
         let Some(persistence) = &inner.persistence else {
@@ -651,6 +733,7 @@ impl Store {
         persistence.recover().await
     }
 
+    /// Reconnect the remote client, optionally with a fresh auth ticket.
     pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
@@ -661,6 +744,9 @@ impl Store {
         remote.reconnect(server_url, ticket).await
     }
 
+    /// Register a callback fired when the broker returns
+    /// `MQTT_DISCONNECT_AUTH_FAILURE`. Use it to clear cached auth state and
+    /// route the user to re-login.
     pub fn set_session_invalid_handler<F>(&self, handler: F) -> Result<()>
     where
         F: Fn() + Send + Sync + 'static,
@@ -672,12 +758,17 @@ impl Store {
         Ok(())
     }
 
+    /// Register an async validator fired at the start of every successful
+    /// (re)connect. See [`ReconnectValidator`].
     pub fn set_reconnect_validator(&self, validator: ReconnectValidator) -> Result<()> {
         let inner = self.inner()?;
         *inner.reconnect_validator.lock().unwrap() = Some(validator);
         Ok(())
     }
 
+    /// Read a row from persistence directly, bypassing memory and remote.
+    /// Useful for `local_only_entities` (user prefs, draft state). Falls back
+    /// to memory when no persistence is configured.
     pub async fn read_local_state(&self, entity: &str, id: &str) -> Result<Option<Record>> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
@@ -687,6 +778,8 @@ impl Store {
         }
     }
 
+    /// Upsert into persistence directly. Tries `update` first and falls back
+    /// to `create` if the row doesn't exist. Bypasses memory and remote.
     pub async fn update_local_state(&self, entity: &str, id: &str, fields: Record) -> Result<()> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
@@ -712,6 +805,20 @@ impl Store {
         }
     }
 
+    /// Last scope-version (ms timestamp) this client published via
+    /// `bump_scope_version`. `None` if this client hasn't bumped the scope
+    /// or no remote is configured. Mirrors TS `getAppliedVersion`.
+    pub fn applied_version(&self, scope_id: &str) -> Result<Option<i64>> {
+        let inner = self.inner()?;
+        Ok(inner
+            .remote
+            .as_ref()
+            .and_then(|r| r.applied_version(scope_id)))
+    }
+
+    /// Send an arbitrary MQTT request and await the broker's response.
+    /// Returns `Error::Config` if no remote is configured. For built-in CRUD,
+    /// prefer the typed methods on `Store`.
     pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
@@ -720,6 +827,10 @@ impl Store {
         remote.request(topic, payload).await
     }
 
+    /// Disconnect the remote client and clear auth + sync state in place.
+    /// Persistence and the offline queue stay alive (Rust's ownership model
+    /// prevents the TS-style mid-flight teardown safely); to fully reset,
+    /// drop the `Store` and construct a new one.
     pub async fn reset_for_logout(&self) -> Result<()> {
         let inner = self.inner()?;
         if let Some(remote) = &inner.remote {
@@ -740,6 +851,8 @@ impl Store {
         Ok(())
     }
 
+    /// Disconnect the remote, close persistence, and abort background tasks.
+    /// Idempotent.
     pub async fn shutdown(&self) -> Result<()> {
         let Some(inner) = self.inner.get() else {
             return Ok(());

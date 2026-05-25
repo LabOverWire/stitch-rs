@@ -1,7 +1,13 @@
 use thiserror::Error;
 
+/// Shorthand for `std::result::Result<T, stitch::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Every fallible operation in stitch returns this error type. Use the
+/// classifier methods ([`Error::is_transient`], [`Error::is_not_found`],
+/// [`Error::is_conflict`], [`Error::is_ownership`],
+/// [`Error::is_permanent_mutation`], [`Error::is_corruption`]) to branch on
+/// recoverable vs terminal failures.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("not initialized")]
@@ -66,6 +72,8 @@ impl Error {
         }
     }
 
+    /// `true` if a retry might succeed (timeout, dropped connection, generic
+    /// MQTT error).
     #[must_use]
     pub fn is_transient(&self) -> bool {
         matches!(
@@ -74,21 +82,28 @@ impl Error {
         )
     }
 
+    /// `true` if the server rejected the call because the authenticated user
+    /// doesn't own the target row.
     #[must_use]
     pub fn is_ownership(&self) -> bool {
         matches!(self, Self::Ownership { .. })
     }
 
+    /// `true` if the referenced row doesn't exist.
     #[must_use]
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
 
+    /// `true` if an insert collided with an existing row.
     #[must_use]
     pub fn is_conflict(&self) -> bool {
         matches!(self, Self::Conflict { .. })
     }
 
+    /// `true` for schema-level rejections that won't be fixed by retrying:
+    /// unique / foreign-key / not-null violations. The offline queue drops
+    /// rows on these.
     #[must_use]
     pub fn is_permanent_mutation(&self) -> bool {
         match self {
@@ -105,6 +120,8 @@ impl Error {
         }
     }
 
+    /// `true` if the underlying fjall database reported corruption. Callers
+    /// should invoke [`Store::recover_persistence`](crate::Store::recover_persistence).
     #[must_use]
     pub fn is_corruption(&self) -> bool {
         match self {

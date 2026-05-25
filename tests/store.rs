@@ -669,6 +669,64 @@ async fn subscribe_entity_filters_by_entity_name() {
 }
 
 #[tokio::test]
+async fn subscribe_entity_receives_remote_origin_events_when_no_persistence() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut rx = store.subscribe_entity("project").unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("inbound"))]),
+            Origin::Remote,
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("subscriber should receive within timeout")
+        .expect("channel should be open");
+    assert_eq!(event.entity, "project");
+    assert_eq!(event.id, "p1");
+}
+
+#[tokio::test]
+async fn subscribe_entity_with_persistence_skips_local_origin_on_memory_bus() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    let mut rx = store.subscribe_entity("project").unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("persistence bus should deliver Local-origin write");
+    let event = event.expect("channel should be open");
+    assert_eq!(event.entity, "project");
+    assert_eq!(event.id, "p1");
+}
+
+#[tokio::test]
 async fn subscribe_scope_entity_filters_by_scope_and_entity() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();

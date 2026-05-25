@@ -93,18 +93,18 @@ A complete runnable example lives at [`examples/quickstart.rs`](./examples/quick
 
 ## Status
 
-Implements the core CRUD-sync surface of TS stitch for the offline-first,
-single-scope-at-a-time use case. Roughly 80% of the TS feature set. See
-[ARCHITECTURE.md](./ARCHITECTURE.md) for layer composition, deliberate
-deviations from TS, and known gaps (top-level entity wire tests, no inline
-rustdoc, no corruption auto-retry in CRUD wrappers, etc.).
+Implements the CRUD-sync surface of TS stitch for the offline-first,
+single-scope-at-a-time use case, including wire-compat with TS clients on the
+same broker (matching `version_field` default, `bump_scope_version`,
+top-level entity propagation). See [ARCHITECTURE.md](./ARCHITECTURE.md) for
+layer composition, deliberate deviations from TS, and known gaps.
 
 ## Documentation
 
 - [README.md](./README.md) — this file
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — internal design, data flow, deviations
-  from TS, known gaps. **No inline rustdoc** — these markdown files are the
-  primary documentation for now.
+  from TS, known gaps.
+- `cargo doc --open` — per-type and per-method rustdoc for the public surface.
 - [`examples/quickstart.rs`](./examples/quickstart.rs) — minimal runnable example
 
 ## Dependencies

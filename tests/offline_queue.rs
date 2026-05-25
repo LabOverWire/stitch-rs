@@ -77,6 +77,8 @@ enum Behavior {
     NotFound,
     Conflict,
     Ownership,
+    Permanent,
+    Unknown,
 }
 
 struct MockSender {
@@ -144,6 +146,11 @@ fn behavior_to_result(b: Behavior, entity: &str, id: &str) -> Result<(), Error> 
             entity: entity.into(),
             id: id.into(),
         }),
+        Behavior::Permanent => Err(Error::mqdb(
+            "test",
+            mqdb_core::error::Error::ConstraintViolation("unique violation".into()),
+        )),
+        Behavior::Unknown => Err(Error::Config("synthetic unknown error".into())),
     }
 }
 
@@ -175,21 +182,18 @@ impl MutationSender for MockSender {
         behavior_to_result(self.resolve("delete"), entity, id)
     }
 
-    async fn read_entity(&self, entity: &str, id: &str) -> Result<Map<String, Value>, Error> {
+    async fn read_entity(
+        &self,
+        entity: &str,
+        id: &str,
+    ) -> Result<Option<Map<String, Value>>, Error> {
         self.record(&format!("read:{entity}:{id}"));
-        let map = self
+        Ok(self
             .read_returns
             .lock()
             .unwrap()
             .get(&(entity.to_string(), id.to_string()))
-            .cloned();
-        match map {
-            Some(m) => Ok(m),
-            None => Err(Error::NotFound {
-                entity: entity.into(),
-                id: id.into(),
-            }),
-        }
+            .cloned())
     }
 
     async fn delete_entity(&self, entity: &str, id: &str) -> Result<(), Error> {
@@ -529,6 +533,49 @@ async fn persistent_queue_survives_reopen() {
     let pending = queue2.pending_for_scope("p1").await.unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].entity, "task");
+}
+
+#[tokio::test]
+async fn permanent_mutation_error_drops_row() {
+    let queue = InMemoryOfflineQueue::new("project".to_string());
+    queue
+        .queue(pending(
+            Operation::Insert,
+            "task",
+            "t-permanent",
+            "p1",
+            make_record(&[("id", json!("t-permanent"))]),
+        ))
+        .await
+        .unwrap();
+
+    let sender = MockSender::new(Behavior::Permanent);
+    queue.flush(sender.as_ref()).await.unwrap();
+    let remaining = queue.pending_for_scope("p1").await.unwrap();
+    assert!(
+        remaining.is_empty(),
+        "permanent constraint violation should drop the row"
+    );
+}
+
+#[tokio::test]
+async fn unknown_error_drops_row() {
+    let queue = InMemoryOfflineQueue::new("project".to_string());
+    queue
+        .queue(pending(
+            Operation::Insert,
+            "task",
+            "t-unknown",
+            "p1",
+            make_record(&[("id", json!("t-unknown"))]),
+        ))
+        .await
+        .unwrap();
+
+    let sender = MockSender::new(Behavior::Unknown);
+    queue.flush(sender.as_ref()).await.unwrap();
+    let remaining = queue.pending_for_scope("p1").await.unwrap();
+    assert!(remaining.is_empty(), "unknown error should drop the row");
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 use crate::config::StoreConfig;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::offline_queue::{MutationSender, OfflineQueue};
 use crate::sync_engine::{MutationDelivery, SyncEngine};
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
@@ -76,6 +76,10 @@ impl RemoteSyncLayer {
 
     pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
         self.sync.request(topic, payload).await
+    }
+
+    pub fn applied_version(&self, scope_id: &str) -> Option<i64> {
+        self.sync.applied_version(scope_id)
     }
 
     pub async fn open_scope(&self, scope_id: &str) -> Result<ScopeState> {
@@ -385,14 +389,8 @@ impl MutationSender for RemoteSyncLayer {
         self.sync_delete(entity, scope_id, id).await
     }
 
-    async fn read_entity(&self, entity: &str, id: &str) -> Result<Record> {
-        match self.sync.fetch_one(entity, id).await? {
-            Some(r) => Ok(r),
-            None => Err(Error::NotFound {
-                entity: entity.to_string(),
-                id: id.to_string(),
-            }),
-        }
+    async fn read_entity(&self, entity: &str, id: &str) -> Result<Option<Record>> {
+        self.sync.fetch_one(entity, id).await
     }
 
     async fn delete_entity(&self, entity: &str, id: &str) -> Result<()> {

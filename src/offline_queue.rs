@@ -17,7 +17,7 @@ pub trait MutationSender: Send + Sync {
     async fn sync_update(&self, entity: &str, scope_id: &str, id: &str, data: Record)
     -> Result<()>;
     async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()>;
-    async fn read_entity(&self, entity: &str, id: &str) -> Result<Record>;
+    async fn read_entity(&self, entity: &str, id: &str) -> Result<Option<Record>>;
     async fn delete_entity(&self, entity: &str, id: &str) -> Result<()>;
 }
 
@@ -234,7 +234,7 @@ async fn flush_consolidated(
             }
             Err(err) if err.is_not_found() && mutation.op == Operation::Update => {
                 match sender.read_entity(&mutation.entity, &mutation.id).await {
-                    Ok(full) => match sender
+                    Ok(Some(full)) => match sender
                         .sync_create(&mutation.entity, &mutation.scope_id, full)
                         .await
                     {
@@ -242,6 +242,7 @@ async fn flush_consolidated(
                         Err(e) if e.is_transient() => FlushOutcome::Keep,
                         Err(_) => FlushOutcome::Drop,
                     },
+                    Ok(None) => FlushOutcome::Drop,
                     Err(e) if e.is_transient() => FlushOutcome::Keep,
                     Err(_) => FlushOutcome::Drop,
                 }

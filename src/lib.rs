@@ -71,7 +71,7 @@ pub use config::{
 };
 pub use error::{Error, Result};
 pub use origin::Origin;
-pub use store::Store;
+pub use store::{ReconnectValidator, Store};
 pub use types::{
     ConnectionStatus, ListFilter, MutationEvent, Operation, PendingMutation, Record, ScopeBundle,
     ScopeState, SortDirection, SortField, StoreEvent, SyncMutation,
