@@ -141,11 +141,11 @@ impl RemoteSyncLayer {
         &self,
         mutation: SyncMutation,
         accessor: &dyn LocalAccessor,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match mutation.op {
             Operation::Insert => {
                 let Some(mut data) = mutation.data else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 if let Some(ref_scope) = data
                     .get(&self.config.scope.scope_field)
@@ -157,7 +157,7 @@ impl RemoteSyncLayer {
                         .await?
                         .is_none()
                     {
-                        return Ok(());
+                        return Ok(false);
                     }
                 }
                 data.insert("id".to_string(), Value::String(mutation.id.clone()));
@@ -165,11 +165,11 @@ impl RemoteSyncLayer {
             }
             Operation::Update => {
                 let Some(data) = mutation.data else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 let existing = accessor.read(&mutation.entity, &mutation.id).await?;
                 let Some(existing) = existing else {
-                    return Ok(());
+                    return Ok(false);
                 };
                 if let (Some(remote), Some(local)) = (
                     data.get(&self.config.version_field).and_then(Value::as_u64),
@@ -178,7 +178,7 @@ impl RemoteSyncLayer {
                         .and_then(Value::as_u64),
                 ) && remote < local
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
                 if let (Some(remote_ts), Some(local_ts)) = (
                     data.get(&self.config.updated_at_field)
@@ -188,7 +188,7 @@ impl RemoteSyncLayer {
                         .and_then(Value::as_u64),
                 ) && remote_ts < local_ts
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
                 accessor
                     .update(&mutation.entity, &mutation.id, data)
@@ -196,11 +196,11 @@ impl RemoteSyncLayer {
             }
             Operation::Delete => match accessor.delete(&mutation.entity, &mutation.id).await {
                 Ok(()) => {}
-                Err(err) if err.is_not_found() => {}
+                Err(err) if err.is_not_found() => return Ok(false),
                 Err(err) => return Err(err),
             },
         }
-        Ok(())
+        Ok(true)
     }
 
     pub async fn reconcile_children(

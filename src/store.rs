@@ -1147,10 +1147,17 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
 
 async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation) {
     let accessor = inner.local_accessor();
-    if let Some(remote) = &inner.remote {
-        let _ = remote
+    let persisted = if let Some(remote) = &inner.remote {
+        remote
             .apply_mutation_to_db(mutation.clone(), &accessor)
-            .await;
+            .await
+            .unwrap_or_default()
+    } else {
+        false
+    };
+
+    if !persisted || inner.persistence.is_none() {
+        return;
     }
 
     let current_scope = inner.state.lock().unwrap().current_scope.clone();
