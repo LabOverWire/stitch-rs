@@ -227,11 +227,11 @@ impl SyncEngine {
         if version > 0
             && let Ok(version_i64) = i64::try_from(version)
         {
-            let mut applied = self.state.applied_version.lock().unwrap();
-            let entry = applied.entry(scope_id.to_string()).or_insert(0);
-            if version_i64 > *entry {
-                *entry = version_i64;
-            }
+            self.state
+                .applied_version
+                .lock()
+                .unwrap()
+                .insert(scope_id.to_string(), version_i64);
         }
 
         let buffered = self
@@ -328,11 +328,11 @@ impl SyncEngine {
         );
         let response = self.request(&topic, Value::Object(payload)).await?;
         check_response(&response)?;
-        let mut applied = self.state.applied_version.lock().unwrap();
-        let entry = applied.entry(scope_id.to_string()).or_insert(0);
-        if now > *entry {
-            *entry = now;
-        }
+        self.state
+            .applied_version
+            .lock()
+            .unwrap()
+            .insert(scope_id.to_string(), now);
         Ok(())
     }
 

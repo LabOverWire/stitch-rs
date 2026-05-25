@@ -306,7 +306,7 @@ cargo test                              # full suite, default parallel
 cargo clippy --all-targets -- -D warnings   # CI-strict
 ```
 
-Current: 77 tests, all passing, zero clippy warnings, zero build warnings.
+Current: 86 tests, all passing, zero clippy warnings, zero build warnings.
 
 ---
 

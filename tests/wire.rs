@@ -657,4 +657,91 @@ async fn applied_version_seeded_from_open_scope_and_cleared_on_close() {
     broker.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_for_logout_disconnects_and_clears_handlers() {
+    init_tracing();
+    let broker = BrokerFixture::start().await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir),
+        "client-logout".into(),
+    );
+    store.initialize().await.unwrap();
+    wait_for_connected(&store).await;
+    store
+        .set_authenticated_user(Some("user-1".into()))
+        .unwrap();
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+    store
+        .set_session_invalid_handler(move || {
+            counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .unwrap();
+
+    store.reset_for_logout().await.unwrap();
+
+    assert_eq!(
+        store.connection_status().unwrap(),
+        stitch::ConnectionStatus::Offline
+    );
+    assert!(store.current_scope().unwrap().is_none());
+    assert!(!store.is_reconnecting().unwrap());
+    assert_eq!(
+        counter.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "session_invalid handler must not fire from a clean reset_for_logout"
+    );
+
+    store.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnect_validator_fires_on_connected() {
+    init_tracing();
+    let broker = BrokerFixture::start().await;
+    let dir = TempDir::new().unwrap();
+    let store = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir),
+        "client-validator".into(),
+    );
+    store.initialize().await.unwrap();
+    wait_for_connected(&store).await;
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+    let validator: stitch::ReconnectValidator = std::sync::Arc::new(move || {
+        let c = counter_clone.clone();
+        Box::pin(async move {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })
+    });
+    store.set_reconnect_validator(validator).unwrap();
+
+    store.disconnect().await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+    store.reconnect(&broker.url(), None).await.unwrap();
+    wait_for_connected(&store).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if counter.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        counter.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "validator should fire on reconnect"
+    );
+
+    store.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
 use std::collections::HashMap;

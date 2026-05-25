@@ -119,6 +119,10 @@ impl Store {
     /// persistence is configured, the memory-bus filter additionally requires
     /// `Origin::Load` or `Origin::Clear` (mirroring TS's "snapshot refresh"
     /// semantics) and the persistence bus is forwarded as-is.
+    ///
+    /// The returned receiver is an unbounded mpsc and supports only a single
+    /// consumer (no `resubscribe`). Drop the receiver to stop the forwarder
+    /// task. Use [`Store::subscribe`] if you need broadcast semantics.
     pub fn subscribe_entity(
         &self,
         entity: &str,
@@ -160,7 +164,8 @@ impl Store {
     }
 
     /// Stream of mutation events filtered to a specific `(scope_id, entity)`
-    /// pair on the memory bus.
+    /// pair on the memory bus. Single-consumer unbounded mpsc; see
+    /// [`Store::subscribe_entity`] for caveats.
     pub fn subscribe_scope_entity(
         &self,
         scope_id: &str,
@@ -243,13 +248,18 @@ impl Store {
         Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
     }
 
-    /// `true` if the client has been connected at least once and is currently
-    /// transitioning back to `Connected` (status is `Connecting`). Returns
-    /// `false` after a hard disconnect that's not actively retrying.
+    /// `true` if the client has been connected at least once and the current
+    /// status indicates the underlying mqtt5 client is between connections
+    /// (`Connecting` during the active retry, or `Disconnected` during the
+    /// backoff window before the next retry fires). `false` after explicit
+    /// disconnect or a terminal error.
     pub fn is_reconnecting(&self) -> Result<bool> {
         let state = self.inner()?.state.lock().unwrap();
         Ok(state.has_been_connected
-            && matches!(state.last_connection_status, ConnectionStatus::Connecting))
+            && matches!(
+                state.last_connection_status,
+                ConnectionStatus::Connecting | ConnectionStatus::Disconnected
+            ))
     }
 
     /// Insert a row. For child entities the `scope_id` argument identifies the
@@ -799,19 +809,25 @@ impl Store {
                         .map(|_| ())
                 }
             }
+        } else if inner.memory.read(entity, id).await?.is_some() {
+            inner
+                .memory
+                .update(entity, id, fields, Origin::Load)
+                .await?;
+            Ok(())
         } else {
-            if inner.memory.read(entity, id).await?.is_some() {
-                inner.memory.update(entity, id, fields, Origin::Load).await?;
-            }
+            let mut record = fields;
+            record.insert("id".to_string(), Value::String(id.to_string()));
+            inner.memory.create(entity, "", record, Origin::Load).await?;
             Ok(())
         }
     }
 
-    /// Highest scope-version (ms timestamp) this client has observed —
-    /// either seeded from the root record at `replace_scope` time or written
+    /// Last scope-version (ms timestamp) this client has observed —
+    /// seeded from the root record at `replace_scope` time and overwritten
     /// by this client's own `bump_scope_version`. Cleared on `close_scope`
-    /// and on disconnect. `None` if the scope hasn't been opened or no
-    /// remote is configured. Mirrors TS `getAppliedVersion`.
+    /// and on explicit `disconnect()`. `None` if the scope hasn't been opened
+    /// or no remote is configured. Mirrors TS `getAppliedVersion`.
     pub fn applied_version(&self, scope_id: &str) -> Result<Option<i64>> {
         let inner = self.inner()?;
         Ok(inner
@@ -839,9 +855,10 @@ impl Store {
     pub async fn reset_for_logout(&self) -> Result<()> {
         let inner = self.inner()?;
         if let Some(remote) = &inner.remote {
-            let _ = remote.disconnect().await;
             remote.clear_session_invalid_handler();
+            let _ = remote.disconnect().await;
         }
+        *inner.reconnect_validator.lock().unwrap() = None;
         {
             let mut state = inner.state.lock().unwrap();
             state.authenticated_user = None;
@@ -853,7 +870,6 @@ impl Store {
         if let Some(queue) = &inner.queue {
             queue.set_authenticated_user(None);
         }
-        *inner.reconnect_validator.lock().unwrap() = None;
         Ok(())
     }
 

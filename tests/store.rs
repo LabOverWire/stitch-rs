@@ -923,6 +923,83 @@ async fn update_local_state_upserts_when_missing() {
 }
 
 #[tokio::test]
+async fn update_local_state_in_memory_creates_when_missing() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    store
+        .update_local_state("project", "p-new", make_record(&[("name", json!("memory-only"))]))
+        .await
+        .unwrap();
+    let got = store
+        .read_local_state("project", "p-new")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.get("name").and_then(Value::as_str), Some("memory-only"));
+    assert_eq!(got.get("id").and_then(Value::as_str), Some("p-new"));
+}
+
+#[tokio::test]
+async fn snapshot_returns_memory_rows_for_scope() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    for i in 0..2 {
+        store
+            .create(
+                "task",
+                "p1",
+                make_record(&[
+                    ("id", json!(format!("t{i}"))),
+                    ("title", json!(format!("task-{i}"))),
+                    ("projectId", json!("p1")),
+                ]),
+                Origin::Local,
+            )
+            .await
+            .unwrap();
+    }
+    let snap = store.snapshot("task", "p1").await.unwrap();
+    assert_eq!(snap.len(), 2);
+}
+
+#[tokio::test]
+async fn subscribe_connection_status_returns_none_without_remote() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    assert!(
+        store.subscribe_connection_status().unwrap().is_none(),
+        "no remote configured: should return None"
+    );
+}
+
+#[tokio::test]
+async fn invalid_client_id_rejected_by_initialize() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        remote: Some(stitch::RemoteConfig::new("mqtt://127.0.0.1:1".to_string())),
+    };
+    let store = Store::with_client_id(fixture_config(), options, "bad/id".into());
+    let err = store.initialize().await.unwrap_err();
+    assert!(
+        matches!(err, stitch::Error::Config(_)),
+        "client id with MQTT special chars should be rejected at init, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn reset_for_logout_clears_auth_and_status() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();
