@@ -26,16 +26,26 @@ Implemented and tested (the full verified core, transport excluded):
 - `sync_state` — a peer's complete state (clock + log + applier); the unit a
   peer session drives. `tests/transitive.rs` runs it through the verified
   line topology `1—2—3` and confirms transitive convergence end to end.
+- `protocol` — length-prefixed `Hello`/`Delta` messages over any
+  `AsyncRead + AsyncWrite`, with a message-size cap.
+- `session` — symmetric per-connection driver: exchange cursors, send the
+  catch-up `Delta`, then a live loop applying inbound deltas and forwarding
+  local writes. Generic over the stream, so it's tested over an in-memory pipe
+  *and* over a real QUIC connection (`tests/quic_loopback.rs`, via mqp2p's
+  `QuicEndpoint` with fingerprint mTLS — no broker, no STUN).
 
 Not yet built:
 
-- **M2 transport** — wrap mqp2p QUIC bidi streams to carry `WriteFrame`s and
-  cursor exchanges; session manager that opens/closes as peers come and go.
+- **Session manager** — discover peers (mqp2p + MQDB signaling), open/close
+  sessions as peers come and go, fan a local write out to all live sessions.
+- **`stitch::Store` integration** — swap the P2P engine in behind the existing
+  facade via config.
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
 
-Apps will keep the existing `stitch::Store` API; the P2P engine swaps in behind
-it via config. Everything above the transport is pure and unit-tested against
-the TLA+ models in `spec/`.
+Everything from the wire frame up through the session is pure or transport-
+generic and tested against the TLA+ models in `spec/`. mqp2p (discovery + NAT +
+QUIC) is a dev-dependency for now; it becomes a runtime dependency when the
+session manager lands.
 
 ## Architecture
 
