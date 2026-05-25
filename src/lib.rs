@@ -15,6 +15,7 @@
 //! verified merge core ([`lww`]). Transport (mqp2p QUIC sessions), anti-entropy
 //! cursors, and membership are later milestones.
 
+pub mod discovery;
 pub mod hlc;
 pub mod lww;
 pub mod node;
@@ -24,6 +25,7 @@ pub mod session;
 pub mod sync_state;
 pub mod wire;
 
+pub use discovery::{Swarm, peer_id_from_fingerprint};
 pub use hlc::{Hlc, PEER_ID_LEN, PeerId, Stamp};
 pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
 pub use node::SyncNode;

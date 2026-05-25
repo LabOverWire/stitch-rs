@@ -43,20 +43,24 @@ Implemented and tested (the full verified core, transport excluded):
   suppression. `tests/node_mesh.rs` proves a line `A—B—C` converges through the
   hub.
 
+- `discovery` — `Swarm`, the connection-lifecycle layer over mqp2p's `Peer`.
+  An accept loop and a connect loop drive a `SyncNode`: discovered peers are
+  dialed (role broken by peer-id order, so each pair forms one connection),
+  each connection opens a sync stream and runs `session::run` against the shared
+  state. `peer_id_from_fingerprint` ties the sync writer identity to the
+  cryptographic cert fingerprint. `tests/discovery_broker.rs` runs two peers
+  through a real `mqdb` broker — register, discover, NAT-traverse to QUIC, and
+  converge — end to end.
+
 Not yet built:
 
-- **Discovery wiring** — drive `SyncNode` from mqp2p's `Peer` (MQDB signaling +
-  NAT traversal): accept/connect loops that `register_session` + spawn
-  `session::run` as peers appear and disappear. The protocol and fan-out are
-  done; this is connection-lifecycle glue, testable with an MQDB broker fixture.
 - **`stitch::Store` integration** — swap the P2P engine in behind the existing
   facade via config.
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
 
-Everything from the wire frame up through the fan-out node is pure or
-transport-generic and tested against the TLA+ models in `spec/`. mqp2p
-(discovery + NAT + QUIC) is a dev-dependency for now; it becomes a runtime
-dependency when the discovery wiring lands.
+mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
+`tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips
+with a message if it's absent.
 
 ## Architecture
 
