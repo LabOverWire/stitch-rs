@@ -51,6 +51,7 @@ struct StoreInner {
     queue: Option<Arc<dyn OfflineQueue>>,
     state: Mutex<StoreState>,
     reconnect_validator: Mutex<Option<ReconnectValidator>>,
+    replace_scope_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -671,6 +672,7 @@ impl Store {
     /// bus.
     pub async fn replace_scope(&self, scope_id: &str) -> Result<()> {
         let inner = self.inner()?;
+        let _serializer = inner.replace_scope_lock.lock().await;
         if inner.state.lock().unwrap().current_scope.as_deref() == Some(scope_id) {
             return Ok(());
         }
@@ -942,6 +944,7 @@ impl StoreInner {
                 has_been_connected: false,
             }),
             reconnect_validator: Mutex::new(None),
+            replace_scope_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
         });
 
@@ -1310,7 +1313,9 @@ fn spawn_filtered_forwarder<F>(
             }
         }
     });
-    tasks.lock().unwrap().push(handle);
+    let mut guard = tasks.lock().unwrap();
+    guard.retain(|h| !h.is_finished());
+    guard.push(handle);
 }
 
 fn sort_fields_to_orders(sort: &[SortField]) -> Vec<MqdbSortOrder> {

@@ -404,16 +404,11 @@ impl OfflineQueue for PersistentOfflineQueue {
     }
 
     async fn flush(&self, sender: &dyn MutationSender) -> Result<()> {
-        {
-            let mut flushing = self.flushing.lock().expect("flushing lock");
-            if *flushing {
-                return Ok(());
-            }
-            *flushing = true;
-        }
-        let result = self.do_flush(sender).await;
-        *self.flushing.lock().expect("flushing lock") = false;
-        result
+        let _guard = match FlushGuard::try_acquire(&self.flushing) {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+        self.do_flush(sender).await
     }
 
     async fn clear(&self) -> Result<()> {
@@ -557,16 +552,12 @@ impl OfflineQueue for InMemoryOfflineQueue {
     }
 
     async fn flush(&self, sender: &dyn MutationSender) -> Result<()> {
-        {
-            let mut flushing = self.flushing.lock().expect("flushing lock");
-            if *flushing {
-                return Ok(());
-            }
-            *flushing = true;
-        }
+        let _guard = match FlushGuard::try_acquire(&self.flushing) {
+            Some(g) => g,
+            None => return Ok(()),
+        };
         let snapshot: Vec<StoredRow> = self.rows.lock().expect("rows lock").clone();
         if snapshot.is_empty() {
-            *self.flushing.lock().expect("flushing lock") = false;
             return Ok(());
         }
         let consolidated = consolidate(snapshot);
@@ -587,7 +578,6 @@ impl OfflineQueue for InMemoryOfflineQueue {
             .lock()
             .expect("rows lock")
             .retain(|r| !flushed.contains(&r.record_id));
-        *self.flushing.lock().expect("flushing lock") = false;
         Ok(())
     }
 
@@ -711,5 +701,28 @@ fn pending_from_row(row: StoredRow) -> PendingMutation {
         scope_id: row.scope_id,
         data: row.data,
         created_at: row.created_at,
+    }
+}
+
+struct FlushGuard<'a> {
+    flag: &'a Mutex<bool>,
+}
+
+impl<'a> FlushGuard<'a> {
+    fn try_acquire(flag: &'a Mutex<bool>) -> Option<Self> {
+        let mut guard = flag.lock().expect("flushing lock");
+        if *guard {
+            return None;
+        }
+        *guard = true;
+        Some(Self { flag })
+    }
+}
+
+impl Drop for FlushGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.flag.lock() {
+            *g = false;
+        }
     }
 }

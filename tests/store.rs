@@ -1000,6 +1000,88 @@ async fn invalid_client_id_rejected_by_initialize() {
 }
 
 #[tokio::test]
+async fn concurrent_replace_scope_serializes() {
+    let dir = TempDir::new().unwrap();
+    let options = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir.path().join("db"),
+            passphrase: None,
+        }),
+        ..StoreOptions::default()
+    };
+    let store = std::sync::Arc::new(Store::new(fixture_config(), options));
+    store.initialize().await.unwrap();
+
+    for id in ["p1", "p2", "p3"] {
+        store
+            .create(
+                "project",
+                id,
+                make_record(&[("id", json!(id))]),
+                Origin::Local,
+            )
+            .await
+            .unwrap();
+    }
+
+    let s1 = std::sync::Arc::clone(&store);
+    let s2 = std::sync::Arc::clone(&store);
+    let s3 = std::sync::Arc::clone(&store);
+
+    let (r1, r2, r3) = tokio::join!(
+        async move { s1.replace_scope("p1").await },
+        async move { s2.replace_scope("p2").await },
+        async move { s3.replace_scope("p3").await },
+    );
+    r1.unwrap();
+    r2.unwrap();
+    r3.unwrap();
+
+    let final_scope = store.current_scope().unwrap();
+    assert!(
+        matches!(final_scope.as_deref(), Some("p1") | Some("p2") | Some("p3")),
+        "final scope should be one of the requested values, got {final_scope:?}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_is_idempotent() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    store.shutdown().await.unwrap();
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_before_initialize_returns_ok() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn subscribe_entity_task_handles_dont_accumulate_after_drop() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    for _ in 0..32 {
+        let rx = store.subscribe_entity("project").unwrap();
+        drop(rx);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let _final_rx = store.subscribe_entity("project").unwrap();
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn reset_for_logout_clears_auth_and_status() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();

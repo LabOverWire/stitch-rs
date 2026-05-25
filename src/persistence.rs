@@ -155,12 +155,9 @@ impl PersistenceLayer {
             .await
             .map_err(|e| Error::mqdb(format!("persistence.update:{entity}"), e))?;
         let record = value_to_record(updated)?;
-        let scope_id = self.resolve_scope(entity, &record).ok_or_else(|| {
-            Error::Config(format!(
-                "persistence.update:{entity}/{id}: record has no scope (missing {})",
-                self.config.scope.scope_field
-            ))
-        })?;
+        let Some(scope_id) = self.resolve_scope(entity, &record) else {
+            return Ok(record);
+        };
         let id_owned = record
             .get("id")
             .and_then(Value::as_str)
