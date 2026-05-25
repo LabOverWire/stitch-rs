@@ -17,6 +17,7 @@
 
 pub mod hlc;
 pub mod lww;
+pub mod node;
 pub mod protocol;
 pub mod replog;
 pub mod session;
@@ -25,6 +26,7 @@ pub mod wire;
 
 pub use hlc::{Hlc, PEER_ID_LEN, PeerId, Stamp};
 pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
+pub use node::SyncNode;
 pub use protocol::{MAX_MESSAGE_LEN, ProtocolError, SyncMessage};
 pub use replog::{Cursors, RecordOutcome, ReplLog};
 pub use sync_state::SyncState;

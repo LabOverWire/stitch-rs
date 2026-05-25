@@ -1,9 +1,8 @@
-use crate::lww::Op;
 use crate::protocol::{ProtocolError, SyncMessage, read_message, write_message};
 use crate::sync_state::SyncState;
 use crate::wire::WriteFrame;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, mpsc};
 
@@ -14,36 +13,20 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Originate a local mutation and queue it for the session to forward. Applies
-/// to local state immediately; the frame propagates to the connected peer when
-/// the session's write loop next runs.
-///
-/// # Errors
-/// Returns the frame back if the outbound channel is closed (session ended).
-pub async fn local_write(
-    state: &Mutex<SyncState>,
-    outbound: &mpsc::UnboundedSender<WriteFrame>,
-    op: Op,
-    entity: impl Into<String>,
-    id: impl Into<String>,
-    data: Vec<u8>,
-) -> Result<WriteFrame, WriteFrame> {
-    let frame = {
-        let mut guard = state.lock().await;
-        guard.local_write(now_millis(), op, entity, id, data)
-    };
-    match outbound.send(frame.clone()) {
-        Ok(()) => Ok(frame),
-        Err(_) => Err(frame),
-    }
-}
-
 /// Drive the sync protocol over one connection until the peer disconnects or the
-/// outbound channel closes. Symmetric: both peers run this. Sequence:
-///   1. send `Hello` with our cursors
-///   2. read their `Hello`
-///   3. send the `Delta` they're missing
-///   4. loop: apply inbound deltas, forward local writes
+/// outbound channel closes. Symmetric — both peers run this.
+///
+/// The protocol is periodic pull-based anti-entropy, matching the verified
+/// `Sync` action in `spec/`:
+/// - send a `Hello` carrying our cursors immediately, then every `pull_interval`
+/// - on an inbound `Hello`, reply with the `Delta` of writes that peer is missing
+/// - on an inbound `Delta`, apply each frame (LWW + GC)
+/// - on a local write (via `outbound`), push it immediately as a one-frame
+///   `Delta` — a latency optimization; correctness rests on the periodic pull
+///
+/// Transitive forwarding is not handled here: a node shares one [`SyncState`]
+/// across all its sessions, so writes pulled in from one peer are served to
+/// others on their next pull. Gaps and lost frames self-heal on the next pull.
 ///
 /// A clean peer disconnect (EOF) returns `Ok(())`.
 pub async fn run<R, W>(
@@ -51,32 +34,27 @@ pub async fn run<R, W>(
     mut reader: R,
     mut writer: W,
     mut outbound: mpsc::UnboundedReceiver<WriteFrame>,
+    pull_interval: Duration,
 ) -> Result<(), ProtocolError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let our_cursors = state.lock().await.cursors();
-    write_message(&mut writer, &SyncMessage::Hello(our_cursors)).await?;
+    send_hello(&state, &mut writer).await?;
 
-    let their_cursors = loop {
-        match read_message(&mut reader).await {
-            Ok(SyncMessage::Hello(c)) => break c,
-            Ok(SyncMessage::Delta(frames)) => apply(&state, frames).await,
-            Err(e) if is_eof(&e) => return Ok(()),
-            Err(e) => return Err(e),
-        }
-    };
-
-    let catch_up = state.lock().await.delta_since(&their_cursors);
-    write_message(&mut writer, &SyncMessage::Delta(catch_up)).await?;
+    let mut ticker = tokio::time::interval(pull_interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
 
     loop {
         tokio::select! {
             inbound = read_message(&mut reader) => {
                 match inbound {
+                    Ok(SyncMessage::Hello(their_cursors)) => {
+                        let catch_up = state.lock().await.delta_since(&their_cursors);
+                        write_message(&mut writer, &SyncMessage::Delta(catch_up)).await?;
+                    }
                     Ok(SyncMessage::Delta(frames)) => apply(&state, frames).await,
-                    Ok(SyncMessage::Hello(_)) => {}
                     Err(e) if is_eof(&e) => return Ok(()),
                     Err(e) => return Err(e),
                 }
@@ -89,8 +67,19 @@ where
                     None => return Ok(()),
                 }
             }
+            _ = ticker.tick() => {
+                send_hello(&state, &mut writer).await?;
+            }
         }
     }
+}
+
+async fn send_hello<W>(state: &Mutex<SyncState>, writer: &mut W) -> Result<(), ProtocolError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let cursors = state.lock().await.cursors();
+    write_message(writer, &SyncMessage::Hello(cursors)).await
 }
 
 async fn apply(state: &Mutex<SyncState>, frames: Vec<WriteFrame>) {
@@ -109,6 +98,7 @@ fn is_eof(err: &ProtocolError) -> bool {
 mod tests {
     use super::*;
     use crate::hlc::{PEER_ID_LEN, PeerId};
+    use crate::lww::Op;
     use std::time::Duration;
     use tokio::io::split;
 
@@ -118,9 +108,7 @@ mod tests {
         id
     }
 
-    async fn settle() {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    const FAST_PULL: Duration = Duration::from_millis(20);
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_peers_converge_over_pipe() {
@@ -139,23 +127,81 @@ mod tests {
         let (a_io, b_io) = tokio::io::duplex(16 * 1024);
         let (a_r, a_w) = split(a_io);
         let (b_r, b_w) = split(b_io);
-        let (_a_tx, a_rx) = mpsc::unbounded_channel();
-        let (_b_tx, b_rx) = mpsc::unbounded_channel();
+        let (a_tx, a_rx) = mpsc::unbounded_channel();
+        let (b_tx, b_rx) = mpsc::unbounded_channel();
 
-        let a = tokio::spawn(run(a_state.clone(), a_r, a_w, a_rx));
-        let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx));
+        let a = tokio::spawn(run(a_state.clone(), a_r, a_w, a_rx, FAST_PULL));
+        let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
 
-        settle().await;
-        drop(_a_tx);
-        drop(_b_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(2), a).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), b).await;
+        let ok = wait_until(Duration::from_secs(2), || async {
+            let a = a_state.lock().await;
+            let b = b_state.lock().await;
+            a.visible("task", "t2").is_some() && b.visible("task", "t1").is_some()
+        })
+        .await;
 
-        let a_final = a_state.lock().await;
-        let b_final = b_state.lock().await;
-        assert_eq!(a_final.visible("task", "t1"), Some(&b"from-a"[..]));
-        assert_eq!(a_final.visible("task", "t2"), Some(&b"from-b"[..]));
-        assert_eq!(b_final.visible("task", "t1"), Some(&b"from-a"[..]));
-        assert_eq!(b_final.visible("task", "t2"), Some(&b"from-b"[..]));
+        drop(a_tx);
+        drop(b_tx);
+        a.abort();
+        b.abort();
+
+        assert!(ok, "peers did not converge");
+        assert_eq!(
+            a_state.lock().await.visible("task", "t2"),
+            Some(&b"from-b"[..])
+        );
+        assert_eq!(
+            b_state.lock().await.visible("task", "t1"),
+            Some(&b"from-a"[..])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_after_connect_propagates() {
+        let a_state = Arc::new(Mutex::new(SyncState::new(peer(1))));
+        let b_state = Arc::new(Mutex::new(SyncState::new(peer(2))));
+
+        let (a_io, b_io) = tokio::io::duplex(16 * 1024);
+        let (a_r, a_w) = split(a_io);
+        let (b_r, b_w) = split(b_io);
+        let (a_tx, a_rx) = mpsc::unbounded_channel();
+        let (b_tx, b_rx) = mpsc::unbounded_channel();
+
+        let a = tokio::spawn(run(a_state.clone(), a_r, a_w, a_rx, FAST_PULL));
+        let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
+
+        // Write on A *after* the session is live; push it through A's outbound.
+        let frame = a_state
+            .lock()
+            .await
+            .local_write(now_millis(), Op::Insert, "task", "late", b"v".to_vec());
+        a_tx.send(frame).unwrap();
+
+        let ok = wait_until(Duration::from_secs(2), || async {
+            b_state.lock().await.visible("task", "late").is_some()
+        })
+        .await;
+
+        drop(a_tx);
+        drop(b_tx);
+        a.abort();
+        b.abort();
+
+        assert!(ok, "post-connect write did not propagate");
+    }
+
+    async fn wait_until<F, Fut>(timeout: Duration, mut cond: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if cond().await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
     }
 }

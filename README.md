@@ -28,24 +28,35 @@ Implemented and tested (the full verified core, transport excluded):
   line topology `1—2—3` and confirms transitive convergence end to end.
 - `protocol` — length-prefixed `Hello`/`Delta` messages over any
   `AsyncRead + AsyncWrite`, with a message-size cap.
-- `session` — symmetric per-connection driver: exchange cursors, send the
-  catch-up `Delta`, then a live loop applying inbound deltas and forwarding
-  local writes. Generic over the stream, so it's tested over an in-memory pipe
-  *and* over a real QUIC connection (`tests/quic_loopback.rs`, via mqp2p's
-  `QuicEndpoint` with fingerprint mTLS — no broker, no STUN).
+- `session` — symmetric per-connection driver. Periodic **pull-based
+  anti-entropy** (the verified `Sync` action on a timer): send `Hello(cursors)`,
+  reply to inbound `Hello` with the `Delta` they're missing, apply inbound
+  deltas, and live-push local writes for low latency. Generic over the stream,
+  tested over an in-memory pipe *and* a real QUIC connection
+  (`tests/quic_loopback.rs`, via mqp2p's `QuicEndpoint` with fingerprint mTLS —
+  no broker, no STUN).
+- `node` — `SyncNode`, the fan-out layer. One shared `SyncState` across all of
+  a device's sessions; `register_session` hands a session its outbound channel,
+  `local_write` applies and fans out to every live session. **Transitive
+  forwarding falls out of the shared state**: a write pulled from one peer is
+  served to the others on their next pull — no re-broadcast, no echo
+  suppression. `tests/node_mesh.rs` proves a line `A—B—C` converges through the
+  hub.
 
 Not yet built:
 
-- **Session manager** — discover peers (mqp2p + MQDB signaling), open/close
-  sessions as peers come and go, fan a local write out to all live sessions.
+- **Discovery wiring** — drive `SyncNode` from mqp2p's `Peer` (MQDB signaling +
+  NAT traversal): accept/connect loops that `register_session` + spawn
+  `session::run` as peers appear and disappear. The protocol and fan-out are
+  done; this is connection-lifecycle glue, testable with an MQDB broker fixture.
 - **`stitch::Store` integration** — swap the P2P engine in behind the existing
   facade via config.
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
 
-Everything from the wire frame up through the session is pure or transport-
-generic and tested against the TLA+ models in `spec/`. mqp2p (discovery + NAT +
-QUIC) is a dev-dependency for now; it becomes a runtime dependency when the
-session manager lands.
+Everything from the wire frame up through the fan-out node is pure or
+transport-generic and tested against the TLA+ models in `spec/`. mqp2p
+(discovery + NAT + QUIC) is a dev-dependency for now; it becomes a runtime
+dependency when the discovery wiring lands.
 
 ## Architecture
 

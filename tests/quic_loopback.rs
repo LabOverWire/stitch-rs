@@ -47,7 +47,7 @@ async fn two_peers_converge_over_real_quic() {
         let conn = ep_b.accept_with_fingerprint(&fp_a).await.unwrap();
         let (send, recv) = conn.accept_bi().await.unwrap();
         let (_tx, rx) = mpsc::unbounded_channel();
-        let _ = session::run(b_run_state, recv, send, rx).await;
+        let _ = session::run(b_run_state, recv, send, rx, Duration::from_millis(50)).await;
     });
 
     // Connector A.
@@ -56,7 +56,7 @@ async fn two_peers_converge_over_real_quic() {
     let a_run_state = Arc::clone(&a_state);
     let a_task = tokio::spawn(async move {
         let (_tx, rx) = mpsc::unbounded_channel();
-        let _ = session::run(a_run_state, recv, send, rx).await;
+        let _ = session::run(a_run_state, recv, send, rx, Duration::from_millis(50)).await;
     });
 
     let converged = wait_until(Duration::from_secs(5), || async {
