@@ -101,10 +101,10 @@ impl MemoryStore {
         let scope_field = &self.config.scope.scope_field;
         let is_root = entity == self.config.scope.root_entity;
         let is_top_level = self.top_level.contains(entity);
+        strip_nulls(&mut data);
         if !is_root && !is_top_level && !data.contains_key(scope_field) {
             data.insert(scope_field.clone(), Value::String(scope_id.to_string()));
         }
-        strip_nulls(&mut data);
 
         let db = self.db().await;
         let value = db

@@ -224,6 +224,16 @@ impl SyncEngine {
             .and_then(Value::as_u64)
             .unwrap_or(0);
 
+        if version > 0
+            && let Ok(version_i64) = i64::try_from(version)
+        {
+            let mut applied = self.state.applied_version.lock().unwrap();
+            let entry = applied.entry(scope_id.to_string()).or_insert(0);
+            if version_i64 > *entry {
+                *entry = version_i64;
+            }
+        }
+
         let buffered = self
             .state
             .buffered
@@ -249,6 +259,7 @@ impl SyncEngine {
             .remove(scope_id);
         self.state.buffered.lock().unwrap().remove(scope_id);
         self.state.awaiting_state.lock().unwrap().remove(scope_id);
+        self.state.applied_version.lock().unwrap().remove(scope_id);
         let topic = format!(
             "{}/{}/{}/#",
             self.prefix, self.config.scope.root_entity, scope_id
@@ -317,11 +328,11 @@ impl SyncEngine {
         );
         let response = self.request(&topic, Value::Object(payload)).await?;
         check_response(&response)?;
-        self.state
-            .applied_version
-            .lock()
-            .unwrap()
-            .insert(scope_id.to_string(), now);
+        let mut applied = self.state.applied_version.lock().unwrap();
+        let entry = applied.entry(scope_id.to_string()).or_insert(0);
+        if now > *entry {
+            *entry = now;
+        }
         Ok(())
     }
 
@@ -548,6 +559,10 @@ impl SyncEngine {
         *self.state.session_invalid.lock().unwrap() = Some(Arc::new(handler));
     }
 
+    pub fn clear_session_invalid_handler(&self) {
+        *self.state.session_invalid.lock().unwrap() = None;
+    }
+
     pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
         let _ = self.client.disconnect().await;
         self.connect(server_url, ticket).await
@@ -557,6 +572,7 @@ impl SyncEngine {
         self.state.subscribed_scopes.lock().unwrap().clear();
         self.state.awaiting_state.lock().unwrap().clear();
         self.state.buffered.lock().unwrap().clear();
+        self.state.applied_version.lock().unwrap().clear();
         let pending: Vec<oneshot::Sender<Result<Value>>> = self
             .state
             .pending_requests

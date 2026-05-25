@@ -243,12 +243,13 @@ impl Store {
         Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
     }
 
-    /// `true` if the client was previously connected and is currently not in
-    /// `Connected`. Useful for UI banners.
+    /// `true` if the client has been connected at least once and is currently
+    /// transitioning back to `Connected` (status is `Connecting`). Returns
+    /// `false` after a hard disconnect that's not actively retrying.
     pub fn is_reconnecting(&self) -> Result<bool> {
         let state = self.inner()?.state.lock().unwrap();
         Ok(state.has_been_connected
-            && !matches!(state.last_connection_status, ConnectionStatus::Connected))
+            && matches!(state.last_connection_status, ConnectionStatus::Connecting))
     }
 
     /// Insert a row. For child entities the `scope_id` argument identifies the
@@ -570,8 +571,9 @@ impl Store {
     }
 
     /// List rows of an entity. When persistence is configured, the filter's
-    /// `scope_id` / `sort` / `projection` are applied at the fjall level;
-    /// without persistence, only `scope_id` is honored on the memory cache.
+    /// `scope_id` / `sort` / `projection` are applied at the fjall level.
+    /// Without persistence, only `scope_id` is honored — `sort` and
+    /// `projection` are silently ignored on the memory cache.
     pub async fn list(&self, entity: &str, filter: Option<ListFilter>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         if let Some(persistence) = &inner.persistence {
@@ -805,9 +807,11 @@ impl Store {
         }
     }
 
-    /// Last scope-version (ms timestamp) this client published via
-    /// `bump_scope_version`. `None` if this client hasn't bumped the scope
-    /// or no remote is configured. Mirrors TS `getAppliedVersion`.
+    /// Highest scope-version (ms timestamp) this client has observed —
+    /// either seeded from the root record at `replace_scope` time or written
+    /// by this client's own `bump_scope_version`. Cleared on `close_scope`
+    /// and on disconnect. `None` if the scope hasn't been opened or no
+    /// remote is configured. Mirrors TS `getAppliedVersion`.
     pub fn applied_version(&self, scope_id: &str) -> Result<Option<i64>> {
         let inner = self.inner()?;
         Ok(inner
@@ -827,7 +831,8 @@ impl Store {
         remote.request(topic, payload).await
     }
 
-    /// Disconnect the remote client and clear auth + sync state in place.
+    /// Disconnect the remote client, clear auth + sync state, and drop the
+    /// `reconnect_validator` and `session_invalid_handler` callbacks.
     /// Persistence and the offline queue stay alive (Rust's ownership model
     /// prevents the TS-style mid-flight teardown safely); to fully reset,
     /// drop the `Store` and construct a new one.
@@ -835,6 +840,7 @@ impl Store {
         let inner = self.inner()?;
         if let Some(remote) = &inner.remote {
             let _ = remote.disconnect().await;
+            remote.clear_session_invalid_handler();
         }
         {
             let mut state = inner.state.lock().unwrap();

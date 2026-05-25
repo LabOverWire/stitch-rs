@@ -70,6 +70,10 @@ impl RemoteSyncLayer {
         self.sync.set_session_invalid_handler(handler);
     }
 
+    pub fn clear_session_invalid_handler(&self) {
+        self.sync.clear_session_invalid_handler();
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.sync.is_connected().await
     }

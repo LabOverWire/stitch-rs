@@ -43,11 +43,18 @@ pub struct MutationEvent {
 /// Includes both per-row mutations and whole-scope load/clear signals.
 #[derive(Debug, Clone)]
 pub enum StoreEvent {
+    /// A single row insert/update/delete.
     Mutation(MutationEvent),
+    /// A fresh scope was loaded — fires after `replace_scope` swaps the
+    /// memory cache and after explicit `MemoryStore::load_scope` calls.
     ScopeLoaded {
         scope_id: String,
         entities: Vec<String>,
     },
+    /// A scope was torn down. Fires from explicit `MemoryStore::clear_scope`
+    /// **and** from `replace_scope` for the prior scope when switching
+    /// scopes. Subscribers should treat it as "this scope id is no longer
+    /// active in memory."
     ScopeCleared {
         scope_id: String,
         entities: Vec<String>,

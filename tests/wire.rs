@@ -591,4 +591,70 @@ async fn top_level_entity_propagates_via_wildcard() {
     broker.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn applied_version_seeded_from_open_scope_and_cleared_on_close() {
+    init_tracing();
+    let broker = BrokerFixture::start().await;
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir_a),
+        "client-a-applied".into(),
+    );
+    let store_b = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.url(), &dir_b),
+        "client-b-applied".into(),
+    );
+    store_a.initialize().await.unwrap();
+    store_b.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+    wait_for_connected(&store_b).await;
+
+    store_a.replace_scope("p1").await.unwrap();
+    store_a
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store_a
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("seed")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(200)).await;
+
+    store_b.replace_scope("p1").await.unwrap();
+
+    let seeded = store_b.applied_version("p1").unwrap();
+    assert!(
+        seeded.is_some_and(|v| v > 0),
+        "store_b should see applied_version after replace_scope; got {seeded:?}"
+    );
+
+    store_b.close_scope("p1").await.unwrap();
+    assert!(
+        store_b.applied_version("p1").unwrap().is_none(),
+        "applied_version should be cleared after close_scope"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
 use std::collections::HashMap;

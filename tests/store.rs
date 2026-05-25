@@ -694,7 +694,7 @@ async fn subscribe_entity_receives_remote_origin_events_when_no_persistence() {
 }
 
 #[tokio::test]
-async fn subscribe_entity_with_persistence_skips_local_origin_on_memory_bus() {
+async fn subscribe_entity_with_persistence_delivers_exactly_one_event_per_local_create() {
     let dir = TempDir::new().unwrap();
     let options = StoreOptions {
         persistence: Some(PersistenceConfig {
@@ -718,12 +718,20 @@ async fn subscribe_entity_with_persistence_skips_local_origin_on_memory_bus() {
         .await
         .unwrap();
 
-    let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-        .await
-        .expect("persistence bus should deliver Local-origin write");
-    let event = event.expect("channel should be open");
-    assert_eq!(event.entity, "project");
-    assert_eq!(event.id, "p1");
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        match tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await {
+            Ok(Some(event)) => events.push(event),
+            _ => break,
+        }
+    }
+    assert_eq!(
+        events.len(),
+        1,
+        "memory-bus Local events should be filtered out; only persistence-bus event should remain. got: {events:?}"
+    );
+    assert_eq!(events[0].entity, "project");
+    assert_eq!(events[0].id, "p1");
 }
 
 #[tokio::test]
@@ -818,6 +826,40 @@ async fn request_without_remote_returns_config_error() {
         .await
         .unwrap_err();
     assert!(matches!(err, stitch::Error::Config(_)));
+}
+
+#[tokio::test]
+async fn memory_create_strips_null_scope_field_then_injects_argument() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("body")),
+                ("projectId", Value::Null),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    let task = store.read("task", "t1").await.unwrap().unwrap();
+    assert_eq!(
+        task.get("projectId").and_then(Value::as_str),
+        Some("p1"),
+        "explicit null scope_field should be stripped and re-injected from the scope_id arg"
+    );
 }
 
 #[tokio::test]

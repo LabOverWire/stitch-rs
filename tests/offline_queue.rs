@@ -535,6 +535,30 @@ async fn persistent_queue_survives_reopen() {
     assert_eq!(pending[0].entity, "task");
 }
 
+#[test]
+fn error_classifier_distinguishes_permanent_from_unknown() {
+    let permanent = Error::mqdb(
+        "test",
+        mqdb_core::error::Error::ConstraintViolation("unique violation".into()),
+    );
+    assert!(
+        permanent.is_permanent_mutation(),
+        "ConstraintViolation should be classified as permanent"
+    );
+    assert!(!permanent.is_transient());
+
+    let unknown = Error::Config("synthetic".into());
+    assert!(
+        !unknown.is_permanent_mutation(),
+        "Config error should not be classified as permanent"
+    );
+    assert!(!unknown.is_transient());
+
+    let transient = Error::ConnectionClosed;
+    assert!(transient.is_transient());
+    assert!(!transient.is_permanent_mutation());
+}
+
 #[tokio::test]
 async fn permanent_mutation_error_drops_row() {
     let queue = InMemoryOfflineQueue::new("project".to_string());
