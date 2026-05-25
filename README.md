@@ -13,22 +13,29 @@ real **tombstone-resurrection bug** in naive garbage collection and confirmed
 the fix (a per-record GC floor). The `lww` module is a direct port of the
 verified model. See [`spec/README.md`](./spec/README.md) for the results.
 
-## Status — milestone M1
+## Status
 
-Implemented and tested:
+Implemented and tested (the full verified core, transport excluded):
 
 - `hlc` — Hybrid Logical Clock (`tick`, `observe`) and `Stamp` total order.
 - `lww` — the verified merge core: LWW apply, tombstones, per-record GC floor.
 - `wire` — compact binary `WriteFrame` (60-byte header + entity/id/data),
   descended from MQDB's `ReplicationWrite`, extended with HLC + peer id + seq.
+- `replog` — per-origin append-only logs + cursors + in-order catchup
+  (`delta_since`), mirroring the verified `truelog`/`seen`/`Sync` model.
+- `sync_state` — a peer's complete state (clock + log + applier); the unit a
+  peer session drives. `tests/transitive.rs` runs it through the verified
+  line topology `1—2—3` and confirms transitive convergence end to end.
 
-Not yet built (later milestones):
+Not yet built:
 
-- **M2** — mqp2p QUIC sessions, per-peer anti-entropy cursors, transitive sync.
+- **M2 transport** — wrap mqp2p QUIC bidi streams to carry `WriteFrame`s and
+  cursor exchanges; session manager that opens/closes as peers come and go.
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
 
 Apps will keep the existing `stitch::Store` API; the P2P engine swaps in behind
-it via config.
+it via config. Everything above the transport is pure and unit-tested against
+the TLA+ models in `spec/`.
 
 ## Architecture
 

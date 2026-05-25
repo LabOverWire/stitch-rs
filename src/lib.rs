@@ -17,8 +17,12 @@
 
 pub mod hlc;
 pub mod lww;
+pub mod replog;
+pub mod sync_state;
 pub mod wire;
 
 pub use hlc::{Hlc, PEER_ID_LEN, PeerId, Stamp};
 pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
+pub use replog::{Cursors, RecordOutcome, ReplLog};
+pub use sync_state::SyncState;
 pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame};

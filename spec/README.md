@@ -11,6 +11,7 @@ particularly the tombstone GC design.
 | `StitchP2P.tla` | LWW with Lamport counter + peer tiebreak, writes + deletes | `InvConvergence`, `InvStateIsApplied`, `InvLogMonotonic` |
 | `StitchP2PGc.tla` | Multi-record + tombstone GC, `Protected` flag toggles the gc_floor guard | `InvVisibleConvergence` |
 | `StitchP2PSkew.tla` | Adversarial clock — every write picks an arbitrary seq | `InvConvergence`, `InvStateIsApplied` |
+| `StitchP2PTransitive.tla` | Fixed sync topology; a peer learns an origin's writes only through an intermediary | `InvConvergence`, `InvPrefixBounded` |
 
 ## Results (all full state-space exhaustion, not `limit_reached`)
 
@@ -22,6 +23,9 @@ particularly the tombstone GC design.
 | Unsafe GC | `StitchP2PGc_unsafe_small.cfg` | 281 | **convergence violated (resurrection) at depth 6** |
 | Safe GC (per-record floor) | `StitchP2PGc_protected_small.cfg` | 533 | converges |
 | Adversarial clock skew | `StitchP2PSkew.cfg` | 14,641 | converges |
+| Transitive forwarding (line 1—2—3) | `StitchP2PTransitive.cfg` | 1,300 | converges |
+| Transitive, single writer × 2 ops | `StitchP2PTransitive_deep.cfg` | 64 | converges |
+| Transitive delivery reachable (probe) | `StitchP2PTransitive_probe.cfg` | — | refuted (proves non-vacuity) |
 
 ## What they establish
 
@@ -41,6 +45,15 @@ particularly the tombstone GC design.
 4. **Clock skew cannot fork state.** Even when every write carries an arbitrary
    seq, convergence holds. HLC future-bounds are a griefing mitigation, not a
    correctness requirement.
+
+5. **Transitive forwarding converges.** In a line topology where peers 1 and 3
+   never connect directly, peer 3 still acquires peer 1's writes through peer 2
+   and converges. The enabling rule: a peer applies an origin's writes strictly
+   in order (single integer cursor) and serves an origin's write only after
+   applying it — so every peer's view of an origin is a contiguous *prefix*,
+   never a gapped set. `InvPrefixBounded` + the in-order `Sync` action make gaps
+   unconstructible. The probe config refutes "peer 3 never gets peer 1's write,"
+   confirming the convergence check is not vacuous.
 
 ## Reproducing
 
