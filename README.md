@@ -5,6 +5,39 @@ eventually-consistent replication with **no central authority**. Peers resolve
 conflicts locally using last-writer-wins keyed by a Hybrid Logical Clock and a
 peer-fingerprint tiebreak, giving a deterministic total order without a server.
 
+## Usage
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use serde_json::json;
+use mqp2p::{Peer, PeerConfig};
+use stitch_p2p::{Store, Swarm, peer_id_from_fingerprint};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut peer = Peer::new(PeerConfig::new("alice", "127.0.0.1:1883")).await?;
+peer.register().await?;
+let store = Store::new(peer_id_from_fingerprint(peer.fingerprint()).unwrap());
+
+// Attach discovery: dials/accepts peers and syncs in the background.
+let _swarm = Swarm::spawn(Arc::new(peer), store.node().clone(), Duration::from_secs(1));
+
+store.create("task", "t1", json!({"title": "ship it", "done": false})).await?;
+let mut events = store.subscribe().await;
+tokio::spawn(async move {
+    while let Ok(ev) = events.recv().await {
+        println!("{:?} {}/{}", ev.op, ev.entity, ev.id);
+    }
+});
+# Ok(()) }
+```
+
+`Store` is the app-facing facade — a sibling to `stitch::Store` with the same
+shape (`create` / `read` / `update` / `delete` / `list` / `subscribe`) but a
+multi-leader HLC engine instead of the broker-authoritative version-LWW one.
+The two conflict models can't share an inbound-apply path, so this is a
+separate Store rather than a mode of `stitch::Store`.
+
 ## Why a formal spec first
 
 Multi-leader sync has subtle convergence properties. Before writing code, the
@@ -52,11 +85,17 @@ Implemented and tested (the full verified core, transport excluded):
   through a real `mqdb` broker — register, discover, NAT-traverse to QUIC, and
   converge — end to end.
 
+- `store` — `Store`, the app-facing document facade over `SyncNode`. JSON
+  records keyed by `(entity, id)`; `create`/`read`/`update` (read-merge-write)/
+  `delete`/`list`/`subscribe`. `SyncState` carries a mutation event bus that
+  fires on both local and peer-applied writes. `tests/store_sync.rs` shows two
+  `Store`s converging on JSON documents, including a concurrent-edit conflict.
+
 Not yet built:
 
-- **`stitch::Store` integration** — swap the P2P engine in behind the existing
-  facade via config.
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
+- **Optional polish** — feature-gate mqp2p/quinn so the verified core builds
+  with just tokio + thiserror; durable persistence (the engine is in-memory).
 
 mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
 `tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips

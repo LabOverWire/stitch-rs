@@ -77,6 +77,17 @@ impl SyncNode {
             .map(<[u8]>::to_vec)
     }
 
+    /// Every visible record of an entity as `(id, data)`.
+    #[must_use]
+    pub async fn list_entity(&self, entity: &str) -> Vec<(String, Vec<u8>)> {
+        self.state.lock().await.visible_entity(entity)
+    }
+
+    /// Subscribe to visible-state mutations (local and remote).
+    pub async fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::sync_state::MutationEvent> {
+        self.state.lock().await.subscribe()
+    }
+
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.sessions.lock().expect("sessions lock").len()

@@ -1501,6 +1501,7 @@ name = "stitch-p2p"
 version = "0.1.0"
 dependencies = [
  "mqp2p",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

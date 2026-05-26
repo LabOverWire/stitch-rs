@@ -103,6 +103,19 @@ impl Applier {
             .as_ref()
             .map(|w| w.stamp)
     }
+
+    /// Every visible (non-deleted) record of an entity, as `(id, data)`.
+    #[must_use]
+    pub fn visible_entity(&self, entity: &str) -> Vec<(String, Vec<u8>)> {
+        self.cells
+            .iter()
+            .filter(|((e, _), _)| e == entity)
+            .filter_map(|((_, id), cell)| match &cell.current {
+                Some(w) if !w.op.is_delete() => Some((id.clone(), w.data.clone())),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

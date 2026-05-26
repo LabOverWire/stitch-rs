@@ -22,6 +22,7 @@ pub mod node;
 pub mod protocol;
 pub mod replog;
 pub mod session;
+pub mod store;
 pub mod sync_state;
 pub mod wire;
 
@@ -31,5 +32,6 @@ pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
 pub use node::SyncNode;
 pub use protocol::{MAX_MESSAGE_LEN, ProtocolError, SyncMessage};
 pub use replog::{Cursors, RecordOutcome, ReplLog};
-pub use sync_state::SyncState;
+pub use store::{Store, StoreError};
+pub use sync_state::{MutationEvent, SyncState, WriteOrigin};
 pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame};

@@ -1,7 +1,30 @@
 use crate::hlc::{Hlc, PeerId, Stamp};
-use crate::lww::{Applier, Op};
+use crate::lww::{Applier, MergeOutcome, Op};
 use crate::replog::{Cursors, RecordOutcome, ReplLog};
 use crate::wire::WriteFrame;
+use tokio::sync::broadcast;
+
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Where an observable mutation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOrigin {
+    Local,
+    Remote,
+}
+
+/// Emitted whenever a write changes the visible state (the LWW winner), whether
+/// originated locally or applied from a peer. Delivered on the bus exposed by
+/// [`SyncState::subscribe`].
+#[derive(Debug, Clone)]
+pub struct MutationEvent {
+    pub op: Op,
+    pub entity: String,
+    pub id: String,
+    /// Serialized record for inserts/updates; `None` for deletes.
+    pub data: Option<Vec<u8>>,
+    pub origin: WriteOrigin,
+}
 
 /// One peer's complete sync state: the HLC, the per-origin replication log
 /// (delivery), and the LWW applier (conflict resolution + GC). This is the
@@ -13,16 +36,19 @@ pub struct SyncState {
     clock: Hlc,
     log: ReplLog,
     applier: Applier,
+    events: broadcast::Sender<MutationEvent>,
 }
 
 impl SyncState {
     #[must_use]
     pub fn new(self_id: PeerId) -> Self {
+        let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             self_id,
             clock: Hlc::default(),
             log: ReplLog::new(self_id),
             applier: Applier::new(),
+            events,
         }
     }
 
@@ -31,8 +57,15 @@ impl SyncState {
         self.self_id
     }
 
+    /// Subscribe to visible-state mutations (local and remote).
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<MutationEvent> {
+        self.events.subscribe()
+    }
+
     /// Originate a local mutation. Advances the HLC, appends to our own log,
-    /// applies it locally, and returns the frame to broadcast to peers.
+    /// applies it locally, emits a [`MutationEvent`], and returns the frame to
+    /// broadcast to peers.
     pub fn local_write(
         &mut self,
         wall_ms: u64,
@@ -45,20 +78,39 @@ impl SyncState {
         let stamp = Stamp::new(hlc, self.self_id);
         let frame = self.log.append_local(stamp, op, entity, id, data);
         self.applier.merge(frame.clone().into_stamped());
+        self.emit(&frame, WriteOrigin::Local);
         frame
     }
 
     /// Apply a frame received from a peer. Always advances the HLC by observing
     /// the remote stamp. Only merges into state when the frame is the next
     /// in-order write for its origin (`RecordOutcome::Appended`); duplicates and
-    /// gaps leave state untouched.
+    /// gaps leave state untouched. Emits a [`MutationEvent`] only when the write
+    /// actually changes the visible state (won LWW).
     pub fn receive(&mut self, frame: WriteFrame, wall_ms: u64) -> RecordOutcome {
         self.clock.observe(frame.stamp.hlc, wall_ms);
         let outcome = self.log.record(frame.clone());
-        if outcome == RecordOutcome::Appended {
-            self.applier.merge(frame.into_stamped());
+        if outcome == RecordOutcome::Appended
+            && self.applier.merge(frame.clone().into_stamped()) == MergeOutcome::Applied
+        {
+            self.emit(&frame, WriteOrigin::Remote);
         }
         outcome
+    }
+
+    fn emit(&self, frame: &WriteFrame, origin: WriteOrigin) {
+        let data = if frame.op == Op::Delete {
+            None
+        } else {
+            Some(frame.data.clone())
+        };
+        let _ = self.events.send(MutationEvent {
+            op: frame.op,
+            entity: frame.entity.clone(),
+            id: frame.id.clone(),
+            data,
+            origin,
+        });
     }
 
     #[must_use]
@@ -74,6 +126,12 @@ impl SyncState {
     #[must_use]
     pub fn visible(&self, entity: &str, id: &str) -> Option<&[u8]> {
         self.applier.visible(entity, id)
+    }
+
+    /// Every visible (non-deleted) record of an entity, as `(id, data)`.
+    #[must_use]
+    pub fn visible_entity(&self, entity: &str) -> Vec<(String, Vec<u8>)> {
+        self.applier.visible_entity(entity)
     }
 
     pub fn collect_tombstone(&mut self, entity: &str, id: &str) -> bool {
