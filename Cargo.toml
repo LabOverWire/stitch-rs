@@ -1,0 +1,11 @@
+[package]
+name = "stitch-tasks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.10.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+stitch-p2p = { version = "0.1.0", path = "../stitch-p2p" }
+tokio = { version = "1.52.3", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "io-util"] }
