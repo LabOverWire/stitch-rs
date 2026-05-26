@@ -35,6 +35,24 @@ impl SyncNode {
         }
     }
 
+    /// Build a node whose state is rebuilt by replaying the persister's stored
+    /// frames, then continues to persist new writes to it.
+    #[must_use]
+    pub fn with_persister(
+        self_id: crate::hlc::PeerId,
+        persister: Arc<dyn crate::sync_state::FramePersister>,
+    ) -> Self {
+        let mut state = SyncState::new(self_id);
+        for frame in persister.load() {
+            state.replay(frame);
+        }
+        state.set_persister(persister);
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            sessions: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
     #[must_use]
     pub fn state(&self) -> Arc<Mutex<SyncState>> {
         Arc::clone(&self.state)

@@ -26,6 +26,8 @@ pub mod wire;
 
 #[cfg(feature = "discovery")]
 pub mod discovery;
+#[cfg(feature = "persistence")]
+pub mod persistence;
 #[cfg(feature = "store")]
 pub mod store;
 
@@ -37,7 +39,11 @@ pub use replog::{Cursors, RecordOutcome, ReplLog};
 pub use sync_state::{MutationEvent, SyncState, WriteOrigin};
 pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame};
 
+pub use sync_state::FramePersister;
+
 #[cfg(feature = "discovery")]
 pub use discovery::{Swarm, peer_id_from_fingerprint};
+#[cfg(feature = "persistence")]
+pub use persistence::{FjallLog, PersistError};
 #[cfg(feature = "store")]
 pub use store::{Store, StoreError};

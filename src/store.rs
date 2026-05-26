@@ -34,6 +34,19 @@ impl Store {
         }
     }
 
+    /// Open a durable store: rebuilds state from the fjall log at `path` and
+    /// persists every subsequent write.
+    #[cfg(feature = "persistence")]
+    pub fn open(
+        self_id: PeerId,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, crate::persistence::PersistError> {
+        let log = std::sync::Arc::new(crate::persistence::FjallLog::open(path)?);
+        Ok(Self {
+            node: SyncNode::with_persister(self_id, log),
+        })
+    }
+
     /// The underlying node, for wiring discovery (`Swarm::spawn`).
     #[must_use]
     pub fn node(&self) -> &SyncNode {

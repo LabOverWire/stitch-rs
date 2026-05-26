@@ -2,9 +2,19 @@ use crate::hlc::{Hlc, PeerId, Stamp};
 use crate::lww::{Applier, MergeOutcome, Op};
 use crate::replog::{Cursors, RecordOutcome, ReplLog};
 use crate::wire::WriteFrame;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Durable sink for the per-origin replication log. Every frame that enters the
+/// log (local or received) is handed to `append`; `load` returns all persisted
+/// frames at startup so state can be rebuilt by replay. Implemented by the
+/// `persistence` feature; the verified core stays storage-agnostic.
+pub trait FramePersister: Send + Sync {
+    fn append(&self, frame: &WriteFrame);
+    fn load(&self) -> Vec<WriteFrame>;
+}
 
 /// Where an observable mutation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,13 +40,13 @@ pub struct MutationEvent {
 /// (delivery), and the LWW applier (conflict resolution + GC). This is the
 /// executable analog of the verified TLA+ models — `ReplLog` mirrors
 /// `truelog`/`seen`/`Sync`, `Applier` mirrors the LWW + GC-floor logic.
-#[derive(Debug)]
 pub struct SyncState {
     self_id: PeerId,
     clock: Hlc,
     log: ReplLog,
     applier: Applier,
     events: broadcast::Sender<MutationEvent>,
+    persister: Option<Arc<dyn FramePersister>>,
 }
 
 impl SyncState {
@@ -49,6 +59,23 @@ impl SyncState {
             log: ReplLog::new(self_id),
             applier: Applier::new(),
             events,
+            persister: None,
+        }
+    }
+
+    /// Attach a durable sink. Call after [`SyncState::replay`]-ing any persisted
+    /// frames so replay doesn't re-persist what's already stored.
+    pub fn set_persister(&mut self, persister: Arc<dyn FramePersister>) {
+        self.persister = Some(persister);
+    }
+
+    /// Rebuild state from a persisted frame at startup: advances the clock,
+    /// records into the log, and merges into the applier — without re-persisting
+    /// or emitting events.
+    pub fn replay(&mut self, frame: WriteFrame) {
+        self.clock.observe(frame.stamp.hlc, frame.stamp.hlc.physical);
+        if self.log.record(frame.clone()) == RecordOutcome::Appended {
+            self.applier.merge(frame.into_stamped());
         }
     }
 
@@ -77,6 +104,7 @@ impl SyncState {
         let hlc = self.clock.tick(wall_ms);
         let stamp = Stamp::new(hlc, self.self_id);
         let frame = self.log.append_local(stamp, op, entity, id, data);
+        self.persist(&frame);
         self.applier.merge(frame.clone().into_stamped());
         self.emit(&frame, WriteOrigin::Local);
         frame
@@ -90,12 +118,19 @@ impl SyncState {
     pub fn receive(&mut self, frame: WriteFrame, wall_ms: u64) -> RecordOutcome {
         self.clock.observe(frame.stamp.hlc, wall_ms);
         let outcome = self.log.record(frame.clone());
-        if outcome == RecordOutcome::Appended
-            && self.applier.merge(frame.clone().into_stamped()) == MergeOutcome::Applied
-        {
-            self.emit(&frame, WriteOrigin::Remote);
+        if outcome == RecordOutcome::Appended {
+            self.persist(&frame);
+            if self.applier.merge(frame.clone().into_stamped()) == MergeOutcome::Applied {
+                self.emit(&frame, WriteOrigin::Remote);
+            }
         }
         outcome
+    }
+
+    fn persist(&self, frame: &WriteFrame) {
+        if let Some(persister) = &self.persister {
+            persister.append(frame);
+        }
     }
 
     fn emit(&self, frame: &WriteFrame, origin: WriteOrigin) {

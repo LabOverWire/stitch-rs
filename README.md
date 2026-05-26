@@ -98,16 +98,21 @@ Implemented and tested (the full verified core, transport excluded):
 | (none) | — | `tokio`, `thiserror` | the verified core: `hlc`, `lww`, `wire`, `replog`, `sync_state`, `protocol`, `session`, `node` |
 | `store` | on | `serde_json` | `stitch_p2p::store::Store` (JSON document facade) |
 | `discovery` | on | `mqp2p` (→ quinn, mqtt5) | `stitch_p2p::discovery::Swarm` (peer discovery + NAT + QUIC) |
+| `persistence` | on | `fjall` | `stitch_p2p::persistence::FjallLog` + `Store::open(path)` (durable replication log) |
 
 `default-features = false` builds the formally-verified engine with just
 `tokio` + `thiserror` — no networking, no JSON, no transitive QUIC/MQTT stack.
 Add `store` for the document API, `discovery` for the mqp2p transport.
 
+- `persistence` — `FjallLog`, a durable replication log. `SyncState` gains a
+  `FramePersister` hook (core trait, no deps); every appended frame is persisted
+  and `Store::open(path)` rebuilds state by replaying the log — recovering the
+  HLC so post-restart writes still win. `tests/persistence.rs` proves state and
+  tombstones survive a reopen.
+
 Not yet built:
 
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
-- **Durable persistence** — the engine is in-memory; records don't survive
-  restart.
 
 mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
 `tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips
