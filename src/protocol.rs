@@ -27,13 +27,15 @@ pub enum ProtocolError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncMessage {
-    Hello(Cursors),
+    /// The sender's peer id and its per-origin cursors.
+    Hello { from: PeerId, cursors: Cursors },
     Delta(Vec<WriteFrame>),
 }
 
-fn encode_hello(cursors: &Cursors) -> Vec<u8> {
+fn encode_hello(from: &PeerId, cursors: &Cursors) -> Vec<u8> {
     let count = u32::try_from(cursors.len()).expect("cursor count exceeds u32");
-    let mut payload = Vec::with_capacity(4 + cursors.len() * (PEER_ID_LEN + 8));
+    let mut payload = Vec::with_capacity(PEER_ID_LEN + 4 + cursors.len() * (PEER_ID_LEN + 8));
+    payload.extend_from_slice(from);
     payload.extend_from_slice(&count.to_be_bytes());
     for (peer, cursor) in cursors {
         payload.extend_from_slice(peer);
@@ -42,16 +44,20 @@ fn encode_hello(cursors: &Cursors) -> Vec<u8> {
     payload
 }
 
-fn decode_hello(payload: &[u8]) -> Result<Cursors, ProtocolError> {
-    if payload.len() < 4 {
+fn decode_hello(payload: &[u8]) -> Result<(PeerId, Cursors), ProtocolError> {
+    let header = PEER_ID_LEN + 4;
+    if payload.len() < header {
         return Err(ProtocolError::Truncated {
-            need: 4,
+            need: header,
             have: payload.len(),
         });
     }
-    let count = u32::from_be_bytes(payload[0..4].try_into().expect("4 bytes")) as usize;
+    let mut from: PeerId = [0u8; PEER_ID_LEN];
+    from.copy_from_slice(&payload[0..PEER_ID_LEN]);
+    let count =
+        u32::from_be_bytes(payload[PEER_ID_LEN..header].try_into().expect("4 bytes")) as usize;
     let entry_len = PEER_ID_LEN + 8;
-    let need = 4 + count * entry_len;
+    let need = header + count * entry_len;
     if payload.len() < need {
         return Err(ProtocolError::Truncated {
             need,
@@ -59,7 +65,7 @@ fn decode_hello(payload: &[u8]) -> Result<Cursors, ProtocolError> {
         });
     }
     let mut cursors: Cursors = HashMap::with_capacity(count);
-    let mut off = 4;
+    let mut off = header;
     for _ in 0..count {
         let mut peer: PeerId = [0u8; PEER_ID_LEN];
         peer.copy_from_slice(&payload[off..off + PEER_ID_LEN]);
@@ -68,7 +74,7 @@ fn decode_hello(payload: &[u8]) -> Result<Cursors, ProtocolError> {
         off += 8;
         cursors.insert(peer, cursor);
     }
-    Ok(cursors)
+    Ok((from, cursors))
 }
 
 fn encode_delta(frames: &[WriteFrame]) -> Result<Vec<u8>, ProtocolError> {
@@ -120,7 +126,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let (kind, payload) = match msg {
-        SyncMessage::Hello(c) => (MSG_HELLO, encode_hello(c)),
+        SyncMessage::Hello { from, cursors } => (MSG_HELLO, encode_hello(from, cursors)),
         SyncMessage::Delta(frames) => (MSG_DELTA, encode_delta(frames)?),
     };
     let len = u32::try_from(payload.len()).map_err(|_| ProtocolError::TooLarge(payload.len()))?;
@@ -146,7 +152,10 @@ where
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload).await?;
     match kind[0] {
-        MSG_HELLO => Ok(SyncMessage::Hello(decode_hello(&payload)?)),
+        MSG_HELLO => {
+            let (from, cursors) = decode_hello(&payload)?;
+            Ok(SyncMessage::Hello { from, cursors })
+        }
         MSG_DELTA => Ok(SyncMessage::Delta(decode_delta(&payload)?)),
         other => Err(ProtocolError::BadType(other)),
     }
@@ -181,7 +190,10 @@ mod tests {
         let mut cursors = Cursors::new();
         cursors.insert(peer(1), 3);
         cursors.insert(peer(2), 7);
-        let msg = SyncMessage::Hello(cursors);
+        let msg = SyncMessage::Hello {
+            from: peer(1),
+            cursors,
+        };
 
         let (mut client, mut server) = tokio::io::duplex(4096);
         write_message(&mut client, &msg).await.unwrap();
@@ -209,11 +221,14 @@ mod tests {
     #[tokio::test]
     async fn two_messages_back_to_back() {
         let (mut client, mut server) = tokio::io::duplex(8192);
-        let m1 = SyncMessage::Hello({
-            let mut c = Cursors::new();
-            c.insert(peer(9), 1);
-            c
-        });
+        let m1 = SyncMessage::Hello {
+            from: peer(9),
+            cursors: {
+                let mut c = Cursors::new();
+                c.insert(peer(9), 1);
+                c
+            },
+        };
         let m2 = SyncMessage::Delta(vec![frame(9, 1)]);
         write_message(&mut client, &m1).await.unwrap();
         write_message(&mut client, &m2).await.unwrap();

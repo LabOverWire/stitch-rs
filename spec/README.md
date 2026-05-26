@@ -13,6 +13,7 @@ particularly the tombstone GC design.
 | `StitchP2PSkew.tla` | Adversarial clock — every write picks an arbitrary seq | `InvConvergence`, `InvStateIsApplied` |
 | `StitchP2PTransitive.tla` | Fixed sync topology; a peer learns an origin's writes only through an intermediary | `InvConvergence`, `InvPrefixBounded` |
 | `StitchP2PAuth.tla` | Membership authorization over eventually-consistent membership; `Causal` toggles reject-at-receipt vs read-time filter | `InvConvergence` |
+| `StitchP2PReclaim.tla` | Tombstone reclamation; `RequireLwm` toggles naive-on-tombstone vs cursor low-water-mark | `InvConvergence` |
 
 ## Results (all full state-space exhaustion, not `limit_reached`)
 
@@ -29,6 +30,8 @@ particularly the tombstone GC design.
 | Transitive delivery reachable (probe) | `StitchP2PTransitive_probe.cfg` | — | refuted (proves non-vacuity) |
 | Membership auth — reject-at-receipt | `StitchP2PAuth_naive.cfg` | 23 | **convergence violated (receive-order dependent)** |
 | Membership auth — read-time filter | `StitchP2PAuth_causal.cfg` | 64 | converges |
+| Reclaim — naive (on tombstone) | `StitchP2PReclaim_naive.cfg` | 41 | **convergence violated (late write resurrects)** |
+| Reclaim — cursor low-water-mark | `StitchP2PReclaim_lwm.cfg` | 83 | converges |
 
 ## What they establish
 
@@ -57,6 +60,14 @@ particularly the tombstone GC design.
    never a gapped set. `InvPrefixBounded` + the in-order `Sync` action make gaps
    unconstructible. The probe config refutes "peer 3 never gets peer 1's write,"
    confirming the convergence check is not vacuous.
+
+7. **Tombstone reclamation needs a cursor low-water-mark.** Forgetting a
+   tombstone as soon as a peer holds it lets a still-in-flight older write
+   resurrect the record once the floor is gone (naive model, depth 6). Safe
+   reclamation requires every member to have delivered everything below the
+   tombstone's HLC — then no older write is in flight and the record can be
+   forgotten. The price: an offline or new member blocks reclamation (no
+   resurrection, but no GC) until it catches up or snapshots.
 
 6. **Membership authorization must be a read-time filter, not a reject.** If a
    peer permanently drops a write because the author isn't *yet* a known member,

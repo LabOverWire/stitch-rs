@@ -133,6 +133,12 @@ impl SyncNode {
         self.state.lock().await.subscribe()
     }
 
+    /// Reclaim replication-log prefixes every listed member has delivered.
+    /// Returns frames dropped. See [`crate::sync_state::SyncState::reclaim`].
+    pub async fn reclaim(&self, members: &[crate::hlc::PeerId]) -> usize {
+        self.state.lock().await.reclaim(members)
+    }
+
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.sessions.lock().expect("sessions lock").len()

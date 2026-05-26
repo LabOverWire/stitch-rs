@@ -17,6 +17,9 @@ pub enum RecordOutcome {
 pub struct ReplLog {
     self_id: PeerId,
     observed: HashMap<PeerId, Vec<WriteFrame>>,
+    /// Seq of the last reclaimed (truncated) frame per origin. Stored frames
+    /// are those with seq in `base + 1 ..= base + observed.len()`.
+    base: HashMap<PeerId, u64>,
 }
 
 impl ReplLog {
@@ -25,6 +28,7 @@ impl ReplLog {
         Self {
             self_id,
             observed: HashMap::new(),
+            base: HashMap::new(),
         }
     }
 
@@ -33,16 +37,25 @@ impl ReplLog {
         self.self_id
     }
 
+    fn base_of(&self, origin: &PeerId) -> u64 {
+        self.base.get(origin).copied().unwrap_or(0)
+    }
+
+    /// Highest seq applied for `origin` (covers reclaimed frames too).
+    #[must_use]
+    pub fn cursor_for(&self, origin: &PeerId) -> u64 {
+        self.base_of(origin) + self.observed.get(origin).map_or(0, Vec::len) as u64
+    }
+
     /// The seq the next write from `origin` will take (1-based).
     #[must_use]
     pub fn next_seq(&self, origin: &PeerId) -> u64 {
-        self.observed.get(origin).map_or(0, Vec::len) as u64 + 1
+        self.cursor_for(origin) + 1
     }
 
     pub fn record(&mut self, frame: WriteFrame) -> RecordOutcome {
         let origin = frame.stamp.peer;
-        let log = self.observed.entry(origin).or_default();
-        let have = log.len() as u64;
+        let have = self.cursor_for(&origin);
         if frame.seq <= have {
             return RecordOutcome::Duplicate;
         }
@@ -52,32 +65,48 @@ impl ReplLog {
                 got: frame.seq,
             };
         }
-        log.push(frame);
+        self.observed.entry(origin).or_default().push(frame);
         RecordOutcome::Appended
     }
 
     #[must_use]
     pub fn cursors(&self) -> Cursors {
         self.observed
-            .iter()
-            .map(|(origin, log)| (*origin, log.len() as u64))
+            .keys()
+            .chain(self.base.keys())
+            .map(|origin| (*origin, self.cursor_for(origin)))
             .collect()
-    }
-
-    #[must_use]
-    pub fn cursor_for(&self, origin: &PeerId) -> u64 {
-        self.observed.get(origin).map_or(0, |log| log.len() as u64)
     }
 
     #[must_use]
     pub fn delta_since(&self, their: &Cursors) -> Vec<WriteFrame> {
         let mut out = Vec::new();
         for (origin, log) in &self.observed {
+            let base = self.base_of(origin);
             let from = their.get(origin).copied().unwrap_or(0);
-            let start = usize::try_from(from).unwrap_or(usize::MAX).min(log.len());
+            let skip = from.saturating_sub(base);
+            let start = usize::try_from(skip).unwrap_or(usize::MAX).min(log.len());
             out.extend_from_slice(&log[start..]);
         }
         out
+    }
+
+    /// Drop the prefix of `origin`'s log with seq `<= up_to`, advancing the
+    /// base. Safe only when every member has already delivered through `up_to`
+    /// (the cursor low-water-mark — see `spec/StitchP2PReclaim.tla`). Returns
+    /// the number of frames dropped.
+    pub fn truncate(&mut self, origin: &PeerId, up_to: u64) -> usize {
+        let base = self.base_of(origin);
+        if up_to <= base {
+            return 0;
+        }
+        let Some(log) = self.observed.get_mut(origin) else {
+            return 0;
+        };
+        let drop = usize::try_from(up_to - base).unwrap_or(usize::MAX).min(log.len());
+        log.drain(..drop);
+        self.base.insert(*origin, base + drop as u64);
+        drop
     }
 }
 
@@ -113,6 +142,36 @@ mod tests {
         assert_eq!(log.next_seq(&peer(1)), 2);
         log.record(frame(1, 2));
         assert_eq!(log.next_seq(&peer(1)), 3);
+    }
+
+    #[test]
+    fn truncate_drops_prefix_and_preserves_cursor() {
+        let mut log = ReplLog::new(peer(1));
+        log.record(frame(2, 1));
+        log.record(frame(2, 2));
+        log.record(frame(2, 3));
+
+        assert_eq!(log.truncate(&peer(2), 2), 2);
+        assert_eq!(log.cursor_for(&peer(2)), 3, "cursor unchanged after truncate");
+        assert_eq!(log.next_seq(&peer(2)), 4);
+
+        let mut from2 = Cursors::new();
+        from2.insert(peer(2), 2);
+        assert_eq!(log.delta_since(&from2).len(), 1, "only seq 3 remains to serve");
+
+        assert_eq!(
+            log.record(frame(2, 4)),
+            RecordOutcome::Appended,
+            "log keeps accepting in order after truncation"
+        );
+    }
+
+    #[test]
+    fn truncate_is_idempotent_and_bounded() {
+        let mut log = ReplLog::new(peer(1));
+        log.record(frame(2, 1));
+        assert_eq!(log.truncate(&peer(2), 5), 1, "clamps to available frames");
+        assert_eq!(log.truncate(&peer(2), 1), 0, "already at or below base");
     }
 
     #[test]

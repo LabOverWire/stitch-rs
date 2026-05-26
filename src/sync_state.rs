@@ -59,6 +59,7 @@ pub struct SyncState {
     events: broadcast::Sender<MutationEvent>,
     persister: Option<Arc<dyn FramePersister>>,
     auth: Option<Arc<dyn FrameAuth>>,
+    peer_cursors: std::collections::HashMap<PeerId, Cursors>,
 }
 
 impl SyncState {
@@ -73,7 +74,51 @@ impl SyncState {
             events,
             persister: None,
             auth: None,
+            peer_cursors: std::collections::HashMap::new(),
         }
+    }
+
+    /// Record a peer's reported cursors (from its `Hello`). Feeds the
+    /// reclamation low-water-mark.
+    pub fn note_peer_cursors(&mut self, peer: PeerId, cursors: Cursors) {
+        self.peer_cursors.insert(peer, cursors);
+    }
+
+    /// Reclaim **in-memory** replication-log prefixes that every listed member
+    /// has already delivered. For each origin, the low-water-mark is the minimum
+    /// cursor across this peer and all `members`; frames at or below it are
+    /// dropped from the in-memory log. Returns frames dropped.
+    ///
+    /// Per `spec/StitchP2PReclaim.tla` this is safe: no member can still send an
+    /// older write once all have delivered through the mark. A member whose
+    /// cursor is unknown (never heard from) holds the mark at 0, so nothing is
+    /// reclaimed until it reports in — no resurrection, but no GC meanwhile.
+    ///
+    /// This bounds a long-running peer's memory. It does not truncate durable
+    /// storage: a persisted store rebuilds state by replaying the full log on
+    /// reopen, so on-disk reclamation requires a state snapshot (future work).
+    pub fn reclaim(&mut self, members: &[PeerId]) -> usize {
+        let mut dropped = 0;
+        let origins: Vec<PeerId> = self.cursors().keys().copied().collect();
+        for origin in origins {
+            let mut lwm = self.log.cursor_for(&origin);
+            for member in members {
+                if *member == self.self_id {
+                    continue;
+                }
+                let cursor = self
+                    .peer_cursors
+                    .get(member)
+                    .and_then(|c| c.get(&origin))
+                    .copied()
+                    .unwrap_or(0);
+                lwm = lwm.min(cursor);
+            }
+            if lwm > 0 {
+                dropped += self.log.truncate(&origin, lwm);
+            }
+        }
+        dropped
     }
 
     /// Attach signing/verification. Local writes are signed; received frames
@@ -261,5 +306,45 @@ mod tests {
         b.receive(f, 10);
         let later = b.local_write(10, Op::Update, "task", "t1", b"y".to_vec());
         assert!(later.stamp.hlc.physical >= 1000);
+    }
+
+    #[test]
+    fn reclaim_waits_for_lagging_member_then_truncates() {
+        let mut a = SyncState::new(peer(1));
+        a.local_write(1, Op::Insert, "task", "t1", b"a".to_vec());
+        a.local_write(2, Op::Insert, "task", "t2", b"b".to_vec());
+
+        // No cursor heard from peer 2 → low-water-mark 0 → nothing reclaimed.
+        assert_eq!(a.reclaim(&[peer(2)]), 0);
+
+        // Peer 2 reports it has both of peer 1's writes.
+        let mut cursors = Cursors::new();
+        cursors.insert(peer(1), 2);
+        a.note_peer_cursors(peer(2), cursors);
+
+        assert_eq!(a.reclaim(&[peer(2)]), 2, "both delivered everywhere → reclaim");
+        // Visible state is retained; only the log prefix is dropped.
+        assert_eq!(a.visible("task", "t1"), Some(&b"a"[..]));
+        assert_eq!(a.visible("task", "t2"), Some(&b"b"[..]));
+        // The clock/seq continuity survives reclamation.
+        let next = a.local_write(3, Op::Insert, "task", "t3", b"c".to_vec());
+        assert_eq!(next.seq, 3);
+    }
+
+    #[test]
+    fn reclaim_truncates_only_to_the_slowest_member() {
+        let mut a = SyncState::new(peer(1));
+        for i in 1..=3u64 {
+            a.local_write(i, Op::Insert, "task", format!("t{i}"), vec![i as u8]);
+        }
+        let mut fast = Cursors::new();
+        fast.insert(peer(1), 3);
+        let mut slow = Cursors::new();
+        slow.insert(peer(1), 1);
+        a.note_peer_cursors(peer(2), fast);
+        a.note_peer_cursors(peer(3), slow);
+
+        // Low-water-mark is the slow member's cursor (1).
+        assert_eq!(a.reclaim(&[peer(2), peer(3)]), 1);
     }
 }

@@ -124,11 +124,21 @@ Add `store` for the document API, `discovery` for the mqp2p transport.
   records whose author isn't a current member, and every peer reaches the same
   view. Signatures are still checked at receipt.
 
-M3 in progress — built: signed writes, membership authorization. Remaining:
+- **Reclamation** (`SyncNode::reclaim`): the session gossips each peer's
+  cursors (in `Hello`); `reclaim(members)` drops in-memory replication-log
+  prefixes below the cursor low-water-mark — the minimum cursor across all
+  members. Per `spec/StitchP2PReclaim.tla` this is safe (no older write can
+  still be in flight); a never-heard-from member holds the mark at 0. This
+  bounds a long-running peer's memory.
 
-- **Tombstone reclamation** (cursor low-water-mark): gossip per-origin
-  applied-through vectors; reclaim a tombstone only once every member has
-  delivered everything below its HLC. Provably safe; needs its own TLA+ model.
+M3 complete (signed writes, membership authorization, reclamation).
+
+Known future work:
+
+- **Durable reclamation** — `reclaim` truncates the in-memory log only. A
+  persisted store rebuilds state by replaying the full log on reopen, so
+  truncating on disk would lose state; on-disk reclamation needs a persisted
+  state snapshot (MQDB-style). The verified safety condition is the same.
 
 mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
 `tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips

@@ -50,8 +50,12 @@ where
         tokio::select! {
             inbound = read_message(&mut reader) => {
                 match inbound {
-                    Ok(SyncMessage::Hello(their_cursors)) => {
-                        let catch_up = state.lock().await.delta_since(&their_cursors);
+                    Ok(SyncMessage::Hello { from, cursors }) => {
+                        let catch_up = {
+                            let mut guard = state.lock().await;
+                            guard.note_peer_cursors(from, cursors.clone());
+                            guard.delta_since(&cursors)
+                        };
                         write_message(&mut writer, &SyncMessage::Delta(catch_up)).await?;
                     }
                     Ok(SyncMessage::Delta(frames)) => apply(&state, frames).await,
@@ -78,8 +82,11 @@ async fn send_hello<W>(state: &Mutex<SyncState>, writer: &mut W) -> Result<(), P
 where
     W: AsyncWrite + Unpin,
 {
-    let cursors = state.lock().await.cursors();
-    write_message(writer, &SyncMessage::Hello(cursors)).await
+    let (from, cursors) = {
+        let guard = state.lock().await;
+        (guard.self_id(), guard.cursors())
+    };
+    write_message(writer, &SyncMessage::Hello { from, cursors }).await
 }
 
 async fn apply(state: &Mutex<SyncState>, frames: Vec<WriteFrame>) {
