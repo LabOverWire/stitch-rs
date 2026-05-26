@@ -91,11 +91,23 @@ Implemented and tested (the full verified core, transport excluded):
   fires on both local and peer-applied writes. `tests/store_sync.rs` shows two
   `Store`s converging on JSON documents, including a concurrent-edit conflict.
 
+## Feature flags
+
+| Feature | Default | Pulls in | Gates |
+|---|---|---|---|
+| (none) | — | `tokio`, `thiserror` | the verified core: `hlc`, `lww`, `wire`, `replog`, `sync_state`, `protocol`, `session`, `node` |
+| `store` | on | `serde_json` | `stitch_p2p::store::Store` (JSON document facade) |
+| `discovery` | on | `mqp2p` (→ quinn, mqtt5) | `stitch_p2p::discovery::Swarm` (peer discovery + NAT + QUIC) |
+
+`default-features = false` builds the formally-verified engine with just
+`tokio` + `thiserror` — no networking, no JSON, no transitive QUIC/MQTT stack.
+Add `store` for the document API, `discovery` for the mqp2p transport.
+
 Not yet built:
 
 - **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
-- **Optional polish** — feature-gate mqp2p/quinn so the verified core builds
-  with just tokio + thiserror; durable persistence (the engine is in-memory).
+- **Durable persistence** — the engine is in-memory; records don't survive
+  restart.
 
 mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
 `tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips

@@ -15,23 +15,29 @@
 //! verified merge core ([`lww`]). Transport (mqp2p QUIC sessions), anti-entropy
 //! cursors, and membership are later milestones.
 
-pub mod discovery;
 pub mod hlc;
 pub mod lww;
 pub mod node;
 pub mod protocol;
 pub mod replog;
 pub mod session;
-pub mod store;
 pub mod sync_state;
 pub mod wire;
 
-pub use discovery::{Swarm, peer_id_from_fingerprint};
+#[cfg(feature = "discovery")]
+pub mod discovery;
+#[cfg(feature = "store")]
+pub mod store;
+
 pub use hlc::{Hlc, PEER_ID_LEN, PeerId, Stamp};
 pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
 pub use node::SyncNode;
 pub use protocol::{MAX_MESSAGE_LEN, ProtocolError, SyncMessage};
 pub use replog::{Cursors, RecordOutcome, ReplLog};
-pub use store::{Store, StoreError};
 pub use sync_state::{MutationEvent, SyncState, WriteOrigin};
 pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame};
+
+#[cfg(feature = "discovery")]
+pub use discovery::{Swarm, peer_id_from_fingerprint};
+#[cfg(feature = "store")]
+pub use store::{Store, StoreError};

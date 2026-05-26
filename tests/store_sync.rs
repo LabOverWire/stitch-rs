@@ -1,3 +1,4 @@
+#![cfg(feature = "store")]
 //! App-level convergence: two `Store`s exchanging JSON documents over a pipe
 //! via the session protocol. Exercises the full stack — Store → SyncNode →
 //! session — with real serialized records.

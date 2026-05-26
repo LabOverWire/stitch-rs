@@ -4,10 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mqp2p = { version = "0.1.0", path = "../mqp2p" }
-serde_json = "1.0.150"
+mqp2p = { version = "0.1.0", path = "../mqp2p", optional = true }
+serde_json = { version = "1.0.150", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["sync", "io-util", "macros", "rt", "rt-multi-thread", "time", "net"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+[features]
+default = ["discovery", "store"]
+# JSON document Store facade (stitch_p2p::store).
+store = ["dep:serde_json"]
+# Peer discovery + NAT traversal + QUIC transport via mqp2p (stitch_p2p::discovery).
+discovery = ["dep:mqp2p"]

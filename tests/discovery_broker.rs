@@ -1,3 +1,4 @@
+#![cfg(feature = "discovery")]
 //! End-to-end discovery wiring over a real MQDB broker: two peers register,
 //! discover each other, NAT-traverse to a direct QUIC connection, and run the
 //! sync protocol to convergence — all driven by `Swarm`. Requires the `mqdb`

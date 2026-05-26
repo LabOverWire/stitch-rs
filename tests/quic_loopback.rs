@@ -1,3 +1,4 @@
+#![cfg(feature = "discovery")]
 //! Proves the sync session works over a real QUIC connection (not just an
 //! in-memory pipe), using mqp2p's `QuicEndpoint` for cert/fingerprint mTLS.
 //! No broker and no STUN — peers connect directly over localhost, which is all
