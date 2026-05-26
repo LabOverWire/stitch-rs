@@ -176,6 +176,17 @@ impl Store {
     /// store has an owner.
     #[must_use]
     pub async fn list(&self, entity: &str) -> Vec<Value> {
+        self.entries(entity)
+            .await
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
+    }
+
+    /// All visible `(id, value)` records of an entity, filtered to authorized
+    /// authors when the store has an owner.
+    #[must_use]
+    pub async fn entries(&self, entity: &str) -> Vec<(String, Value)> {
         let authorized = self.authorized_authors().await;
         self.node
             .entries_with_authors(entity)
@@ -185,7 +196,7 @@ impl Store {
                 Some(set) => set.contains_key(author),
                 None => true,
             })
-            .filter_map(|(_, bytes, _)| serde_json::from_slice(&bytes).ok())
+            .filter_map(|(id, bytes, _)| serde_json::from_slice(&bytes).ok().map(|v| (id, v)))
             .collect()
     }
 
