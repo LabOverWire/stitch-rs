@@ -208,6 +208,18 @@ impl SyncState {
         self.applier.visible_entity(entity)
     }
 
+    /// The visible record plus the peer id that authored the winning write.
+    #[must_use]
+    pub fn visible_with_author(&self, entity: &str, id: &str) -> Option<(Vec<u8>, PeerId)> {
+        self.applier.visible_with_author(entity, id)
+    }
+
+    /// Every visible record of an entity as `(id, data, author)`.
+    #[must_use]
+    pub fn entries_with_authors(&self, entity: &str) -> Vec<(String, Vec<u8>, PeerId)> {
+        self.applier.entries_with_authors(entity)
+    }
+
     pub fn collect_tombstone(&mut self, entity: &str, id: &str) -> bool {
         self.applier.collect_tombstone(entity, id)
     }

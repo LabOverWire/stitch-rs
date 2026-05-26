@@ -12,6 +12,7 @@ particularly the tombstone GC design.
 | `StitchP2PGc.tla` | Multi-record + tombstone GC, `Protected` flag toggles the gc_floor guard | `InvVisibleConvergence` |
 | `StitchP2PSkew.tla` | Adversarial clock — every write picks an arbitrary seq | `InvConvergence`, `InvStateIsApplied` |
 | `StitchP2PTransitive.tla` | Fixed sync topology; a peer learns an origin's writes only through an intermediary | `InvConvergence`, `InvPrefixBounded` |
+| `StitchP2PAuth.tla` | Membership authorization over eventually-consistent membership; `Causal` toggles reject-at-receipt vs read-time filter | `InvConvergence` |
 
 ## Results (all full state-space exhaustion, not `limit_reached`)
 
@@ -26,6 +27,8 @@ particularly the tombstone GC design.
 | Transitive forwarding (line 1—2—3) | `StitchP2PTransitive.cfg` | 1,300 | converges |
 | Transitive, single writer × 2 ops | `StitchP2PTransitive_deep.cfg` | 64 | converges |
 | Transitive delivery reachable (probe) | `StitchP2PTransitive_probe.cfg` | — | refuted (proves non-vacuity) |
+| Membership auth — reject-at-receipt | `StitchP2PAuth_naive.cfg` | 23 | **convergence violated (receive-order dependent)** |
+| Membership auth — read-time filter | `StitchP2PAuth_causal.cfg` | 64 | converges |
 
 ## What they establish
 
@@ -54,6 +57,16 @@ particularly the tombstone GC design.
    never a gapped set. `InvPrefixBounded` + the in-order `Sync` action make gaps
    unconstructible. The probe config refutes "peer 3 never gets peer 1's write,"
    confirming the convergence check is not vacuous.
+
+6. **Membership authorization must be a read-time filter, not a reject.** If a
+   peer permanently drops a write because the author isn't *yet* a known member,
+   two peers diverge based on whether they received the write or the
+   membership grant first (the naive model produces this trace at depth 5). The
+   fix: always store validly-signed writes; apply membership as a filter over
+   the converged state at read time. Then visibility is a deterministic function
+   of (converged data, converged membership) and all peers agree. Signature
+   validity *is* checked at receipt — it never changes, so rejecting forgeries
+   can't diverge.
 
 ## Reproducing
 

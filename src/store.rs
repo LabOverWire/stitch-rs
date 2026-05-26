@@ -18,6 +18,10 @@ use tokio::sync::broadcast;
 #[derive(Clone)]
 pub struct Store {
     node: SyncNode,
+    /// Genesis owner when membership filtering is enabled; `None` = open store
+    /// (every validly-signed author's records are visible).
+    #[cfg_attr(not(feature = "membership"), allow(dead_code))]
+    owner: Option<PeerId>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +35,7 @@ impl Store {
     pub fn new(self_id: PeerId) -> Self {
         Self {
             node: SyncNode::new(self_id),
+            owner: None,
         }
     }
 
@@ -44,12 +49,13 @@ impl Store {
         let log = std::sync::Arc::new(crate::persistence::FjallLog::open(path)?);
         Ok(Self {
             node: SyncNode::with_persister(self_id, log),
+            owner: None,
         })
     }
 
     /// A store whose writes are Ed25519-signed by `identity` and whose peer id
     /// is the identity's public key. Received writes failing verification are
-    /// rejected.
+    /// rejected. No membership filtering — see [`Store::with_owner`].
     #[cfg(feature = "membership")]
     #[must_use]
     pub fn with_identity(identity: crate::membership::Identity) -> Self {
@@ -57,6 +63,37 @@ impl Store {
         state.set_auth(std::sync::Arc::new(identity));
         Self {
             node: SyncNode::from_state(state),
+            owner: None,
+        }
+    }
+
+    /// A store where this identity is the genesis owner of the scope. Writes are
+    /// signed; reads are filtered to records authored by authorized members
+    /// (the owner, plus peers it or its admins invited). See [`Store::invite`].
+    #[cfg(feature = "membership")]
+    #[must_use]
+    pub fn with_owner(identity: crate::membership::Identity) -> Self {
+        let owner = identity.peer_id();
+        let mut state = crate::SyncState::new(owner);
+        state.set_auth(std::sync::Arc::new(identity));
+        Self {
+            node: SyncNode::from_state(state),
+            owner: Some(owner),
+        }
+    }
+
+    /// A store that joins a scope owned by `owner`. Writes are signed by
+    /// `identity`; reads filter by the same membership rules. The peer becomes
+    /// effective once the owner (or an admin) has invited it and that record
+    /// has replicated in.
+    #[cfg(feature = "membership")]
+    #[must_use]
+    pub fn join(identity: crate::membership::Identity, owner: PeerId) -> Self {
+        let mut state = crate::SyncState::new(identity.peer_id());
+        state.set_auth(std::sync::Arc::new(identity));
+        Self {
+            node: SyncNode::from_state(state),
+            owner: Some(owner),
         }
     }
 
@@ -76,6 +113,7 @@ impl Store {
         state.set_auth(std::sync::Arc::new(identity));
         Ok(Self {
             node: SyncNode::from_state(state),
+            owner: None,
         })
     }
 
@@ -97,10 +135,14 @@ impl Store {
         Ok(())
     }
 
-    /// Read a record from local converged state.
+    /// Read a record from local converged state. When the store has an owner,
+    /// records authored by non-members are filtered out.
     #[must_use]
     pub async fn read(&self, entity: &str, id: &str) -> Option<Value> {
-        let bytes = self.node.visible(entity, id).await?;
+        let (bytes, author) = self.node.visible_with_author(entity, id).await?;
+        if !self.author_authorized(author).await {
+            return None;
+        }
         serde_json::from_slice(&bytes).ok()
     }
 
@@ -130,15 +172,83 @@ impl Store {
         self.node.local_write(Op::Delete, entity, id, Vec::new()).await;
     }
 
-    /// All visible records of an entity.
+    /// All visible records of an entity, filtered to authorized authors when the
+    /// store has an owner.
     #[must_use]
     pub async fn list(&self, entity: &str) -> Vec<Value> {
+        let authorized = self.authorized_authors().await;
         self.node
-            .list_entity(entity)
+            .entries_with_authors(entity)
             .await
             .into_iter()
-            .filter_map(|(_, bytes)| serde_json::from_slice(&bytes).ok())
+            .filter(|(_, _, author)| match &authorized {
+                Some(set) => set.contains_key(author),
+                None => true,
+            })
+            .filter_map(|(_, bytes, _)| serde_json::from_slice(&bytes).ok())
             .collect()
+    }
+
+    /// Invite a peer at `role` (owner/admin only — enforced when authorization
+    /// is evaluated). No-op semantics if the caller lacks authority: the record
+    /// is written but ignored by `authorized_members`.
+    #[cfg(feature = "membership")]
+    pub async fn invite(&self, target: PeerId, role: crate::membership::Role) {
+        let id = crate::membership::member_record_id(&target);
+        self.node
+            .local_write(
+                Op::Insert,
+                crate::membership::MEMBERS_ENTITY,
+                &id,
+                vec![role.as_byte()],
+            )
+            .await;
+    }
+
+    /// Revoke a peer's membership.
+    #[cfg(feature = "membership")]
+    pub async fn revoke(&self, target: PeerId) {
+        let id = crate::membership::member_record_id(&target);
+        self.node
+            .local_write(
+                Op::Delete,
+                crate::membership::MEMBERS_ENTITY,
+                &id,
+                Vec::new(),
+            )
+            .await;
+    }
+
+    async fn author_authorized(&self, author: PeerId) -> bool {
+        match self.authorized_authors().await {
+            Some(set) => set.contains_key(&author),
+            None => true,
+        }
+    }
+
+    #[cfg(feature = "membership")]
+    async fn authorized_authors(
+        &self,
+    ) -> Option<std::collections::HashMap<PeerId, crate::membership::Role>> {
+        let owner = self.owner?;
+        let records: Vec<(PeerId, PeerId, crate::membership::Role)> = self
+            .node
+            .entries_with_authors(crate::membership::MEMBERS_ENTITY)
+            .await
+            .into_iter()
+            .filter_map(|(id, data, granter)| {
+                let target = crate::membership::peer_from_record_id(&id)?;
+                let role = crate::membership::Role::from_byte(*data.first()?)?;
+                Some((target, granter, role))
+            })
+            .collect();
+        Some(crate::membership::authorized_members(owner, &records))
+    }
+
+    #[cfg(not(feature = "membership"))]
+    #[allow(clippy::unused_async)]
+    async fn authorized_authors(&self) -> Option<std::collections::HashMap<PeerId, ()>> {
+        None
     }
 
     /// Subscribe to mutation events (local and from peers).

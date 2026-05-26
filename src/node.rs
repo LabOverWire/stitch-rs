@@ -109,6 +109,25 @@ impl SyncNode {
         self.state.lock().await.visible_entity(entity)
     }
 
+    /// The visible record plus the peer that authored the winning write.
+    #[must_use]
+    pub async fn visible_with_author(
+        &self,
+        entity: &str,
+        id: &str,
+    ) -> Option<(Vec<u8>, crate::hlc::PeerId)> {
+        self.state.lock().await.visible_with_author(entity, id)
+    }
+
+    /// Every visible record of an entity as `(id, data, author)`.
+    #[must_use]
+    pub async fn entries_with_authors(
+        &self,
+        entity: &str,
+    ) -> Vec<(String, Vec<u8>, crate::hlc::PeerId)> {
+        self.state.lock().await.entries_with_authors(entity)
+    }
+
     /// Subscribe to visible-state mutations (local and remote).
     pub async fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::sync_state::MutationEvent> {
         self.state.lock().await.subscribe()

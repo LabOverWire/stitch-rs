@@ -1,4 +1,4 @@
-use crate::hlc::Stamp;
+use crate::hlc::{PeerId, Stamp};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +112,28 @@ impl Applier {
             .filter(|((e, _), _)| e == entity)
             .filter_map(|((_, id), cell)| match &cell.current {
                 Some(w) if !w.op.is_delete() => Some((id.clone(), w.data.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The visible record plus the peer id that authored the winning write.
+    #[must_use]
+    pub fn visible_with_author(&self, entity: &str, id: &str) -> Option<(Vec<u8>, PeerId)> {
+        match &self.cells.get(&(entity.to_string(), id.to_string()))?.current {
+            Some(w) if !w.op.is_delete() => Some((w.data.clone(), w.stamp.peer)),
+            _ => None,
+        }
+    }
+
+    /// Every visible record of an entity as `(id, data, author)`.
+    #[must_use]
+    pub fn entries_with_authors(&self, entity: &str) -> Vec<(String, Vec<u8>, PeerId)> {
+        self.cells
+            .iter()
+            .filter(|((e, _), _)| e == entity)
+            .filter_map(|((_, id), cell)| match &cell.current {
+                Some(w) if !w.op.is_delete() => Some((id.clone(), w.data.clone(), w.stamp.peer)),
                 _ => None,
             })
             .collect()

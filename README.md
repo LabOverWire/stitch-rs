@@ -116,12 +116,16 @@ Add `store` for the document API, `discovery` for the mqp2p transport.
   before they touch the log. The wire frame carries an optional signature.
   `Store::with_identity` / `open_with_identity` produce signed stores.
 
-M3 in progress — built so far: **signed writes** (this layer). Remaining:
+- Owner-controlled **membership authorization**: signed `_members` records
+  (role byte) define an authorized set, derived by a fixpoint from the genesis
+  owner (`Store::with_owner` / `join` / `invite` / `revoke`). Per
+  `spec/StitchP2PAuth.tla`, authorization is a **read-time filter over converged
+  state**, never a reject-at-receipt (which diverges) — so `read`/`list` hide
+  records whose author isn't a current member, and every peer reaches the same
+  view. Signatures are still checked at receipt.
 
-- **Membership authorization** (owner-controlled): a replicated member set with
-  owner/admin roles; reject writes from non-members. Gated on a TLA+ model
-  first — authorization reads eventually-consistent membership, so two peers
-  can transiently disagree and must not diverge.
+M3 in progress — built: signed writes, membership authorization. Remaining:
+
 - **Tombstone reclamation** (cursor low-water-mark): gossip per-origin
   applied-through vectors; reclaim a tombstone only once every member has
   delivered everything below its HLC. Provably safe; needs its own TLA+ model.
