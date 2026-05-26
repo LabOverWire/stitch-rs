@@ -99,6 +99,7 @@ Implemented and tested (the full verified core, transport excluded):
 | `store` | on | `serde_json` | `stitch_p2p::store::Store` (JSON document facade) |
 | `discovery` | on | `mqp2p` (→ quinn, mqtt5) | `stitch_p2p::discovery::Swarm` (peer discovery + NAT + QUIC) |
 | `persistence` | on | `fjall` | `stitch_p2p::persistence::FjallLog` + `Store::open(path)` (durable replication log) |
+| `membership` | on | `ed25519-dalek` | `stitch_p2p::membership::Identity` — Ed25519-signed writes; `Store::with_identity` |
 
 `default-features = false` builds the formally-verified engine with just
 `tokio` + `thiserror` — no networking, no JSON, no transitive QUIC/MQTT stack.
@@ -110,9 +111,20 @@ Add `store` for the document API, `discovery` for the mqp2p transport.
   HLC so post-restart writes still win. `tests/persistence.rs` proves state and
   tombstones survive a reopen.
 
-Not yet built:
+- `membership` — Ed25519 `Identity` (peer id == public key) signing every
+  local write; `SyncState` verifies inbound frames and rejects bad signatures
+  before they touch the log. The wire frame carries an optional signature.
+  `Store::with_identity` / `open_with_identity` produce signed stores.
 
-- **M3** — membership (invite/revoke), signed entries, tombstone reclamation.
+M3 in progress — built so far: **signed writes** (this layer). Remaining:
+
+- **Membership authorization** (owner-controlled): a replicated member set with
+  owner/admin roles; reject writes from non-members. Gated on a TLA+ model
+  first — authorization reads eventually-consistent membership, so two peers
+  can transiently disagree and must not diverge.
+- **Tombstone reclamation** (cursor low-water-mark): gossip per-origin
+  applied-through vectors; reclaim a tombstone only once every member has
+  delivered everything below its HLC. Provably safe; needs its own TLA+ model.
 
 mqp2p (discovery + NAT + QUIC) is now a runtime dependency. The
 `tests/discovery_broker.rs` test requires the `mqdb` binary on PATH and skips

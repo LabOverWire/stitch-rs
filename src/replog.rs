@@ -1,5 +1,4 @@
-use crate::hlc::{PeerId, Stamp};
-use crate::lww::Op;
+use crate::hlc::PeerId;
 use crate::wire::WriteFrame;
 use std::collections::HashMap;
 
@@ -10,6 +9,8 @@ pub enum RecordOutcome {
     Appended,
     Duplicate,
     Gap { expected: u64, got: u64 },
+    /// The frame failed authentication/authorization and was not recorded.
+    Rejected,
 }
 
 #[derive(Debug)]
@@ -32,28 +33,10 @@ impl ReplLog {
         self.self_id
     }
 
-    pub fn append_local(
-        &mut self,
-        stamp: Stamp,
-        op: Op,
-        entity: impl Into<String>,
-        id: impl Into<String>,
-        data: Vec<u8>,
-    ) -> WriteFrame {
-        debug_assert_eq!(stamp.peer, self.self_id, "local writes must be self-stamped");
-        let origin = self.self_id;
-        let log = self.observed.entry(origin).or_default();
-        let seq = log.len() as u64 + 1;
-        let frame = WriteFrame {
-            stamp,
-            seq,
-            op,
-            entity: entity.into(),
-            id: id.into(),
-            data,
-        };
-        log.push(frame.clone());
-        frame
+    /// The seq the next write from `origin` will take (1-based).
+    #[must_use]
+    pub fn next_seq(&self, origin: &PeerId) -> u64 {
+        self.observed.get(origin).map_or(0, Vec::len) as u64 + 1
     }
 
     pub fn record(&mut self, frame: WriteFrame) -> RecordOutcome {
@@ -101,7 +84,8 @@ impl ReplLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hlc::{Hlc, PEER_ID_LEN};
+    use crate::hlc::{Hlc, PEER_ID_LEN, Stamp};
+    use crate::lww::Op;
 
     fn peer(n: u8) -> PeerId {
         let mut id = [0u8; PEER_ID_LEN];
@@ -117,17 +101,18 @@ mod tests {
             entity: "task".into(),
             id: format!("t{seq}"),
             data: vec![origin],
+            signature: None,
         }
     }
 
     #[test]
-    fn append_local_assigns_increasing_seq() {
+    fn next_seq_advances_with_records() {
         let mut log = ReplLog::new(peer(1));
-        let a = log.append_local(Stamp::new(Hlc::new(5, 0), peer(1)), Op::Insert, "task", "t1", vec![]);
-        let b = log.append_local(Stamp::new(Hlc::new(6, 0), peer(1)), Op::Insert, "task", "t2", vec![]);
-        assert_eq!(a.seq, 1);
-        assert_eq!(b.seq, 2);
-        assert_eq!(log.cursor_for(&peer(1)), 2);
+        assert_eq!(log.next_seq(&peer(1)), 1);
+        log.record(frame(1, 1));
+        assert_eq!(log.next_seq(&peer(1)), 2);
+        log.record(frame(1, 2));
+        assert_eq!(log.next_seq(&peer(1)), 3);
     }
 
     #[test]

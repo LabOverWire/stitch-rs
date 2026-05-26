@@ -172,6 +172,7 @@ mod tests {
             entity: "task".into(),
             id: format!("t{seq}"),
             data: vec![origin, 1, 2],
+            signature: None,
         }
     }
 

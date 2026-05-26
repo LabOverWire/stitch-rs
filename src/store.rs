@@ -47,6 +47,38 @@ impl Store {
         })
     }
 
+    /// A store whose writes are Ed25519-signed by `identity` and whose peer id
+    /// is the identity's public key. Received writes failing verification are
+    /// rejected.
+    #[cfg(feature = "membership")]
+    #[must_use]
+    pub fn with_identity(identity: crate::membership::Identity) -> Self {
+        let mut state = crate::SyncState::new(identity.peer_id());
+        state.set_auth(std::sync::Arc::new(identity));
+        Self {
+            node: SyncNode::from_state(state),
+        }
+    }
+
+    /// Durable + signed: replays the fjall log at `path`, persists new writes,
+    /// signs with `identity`, and verifies inbound writes.
+    #[cfg(all(feature = "membership", feature = "persistence"))]
+    pub fn open_with_identity(
+        identity: crate::membership::Identity,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, crate::persistence::PersistError> {
+        let log = std::sync::Arc::new(crate::persistence::FjallLog::open(path)?);
+        let mut state = crate::SyncState::new(identity.peer_id());
+        for frame in crate::FramePersister::load(log.as_ref()) {
+            state.replay(frame);
+        }
+        state.set_persister(log);
+        state.set_auth(std::sync::Arc::new(identity));
+        Ok(Self {
+            node: SyncNode::from_state(state),
+        })
+    }
+
     /// The underlying node, for wiring discovery (`Swarm::spawn`).
     #[must_use]
     pub fn node(&self) -> &SyncNode {

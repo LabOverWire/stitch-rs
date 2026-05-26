@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"], optional = true }
 fjall = { version = "3.0", optional = true }
 mqp2p = { version = "0.1.0", path = "../mqp2p", optional = true }
 serde_json = { version = "1.0.150", optional = true }
@@ -14,10 +15,12 @@ tokio = { version = "1.52.3", features = ["sync", "io-util", "macros", "rt", "rt
 tempfile = "3.27.0"
 
 [features]
-default = ["discovery", "store", "persistence"]
+default = ["discovery", "store", "persistence", "membership"]
 # JSON document Store facade (stitch_p2p::store).
 store = ["dep:serde_json"]
 # Peer discovery + NAT traversal + QUIC transport via mqp2p (stitch_p2p::discovery).
 discovery = ["dep:mqp2p"]
 # Durable replication log on fjall (stitch_p2p::persistence).
 persistence = ["dep:fjall"]
+# Ed25519-signed writes + owner-controlled membership (stitch_p2p::membership).
+membership = ["dep:ed25519-dalek"]

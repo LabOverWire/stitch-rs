@@ -1,8 +1,9 @@
 use crate::hlc::{Hlc, PEER_ID_LEN, PeerId, Stamp};
 use crate::lww::{Op, StampedWrite};
 
-pub const WIRE_VERSION: u8 = 1;
+pub const WIRE_VERSION: u8 = 2;
 pub const HEADER_LEN: usize = 60;
+pub const SIGNATURE_LEN: usize = 64;
 
 const OP_INSERT: u8 = 0;
 const OP_UPDATE: u8 = 1;
@@ -22,6 +23,8 @@ pub enum WireError {
     IdTooLong,
     #[error("entity or id is not valid UTF-8")]
     Utf8,
+    #[error("invalid signature presence flag {0}")]
+    BadSignatureFlag(u8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,9 @@ pub struct WriteFrame {
     pub entity: String,
     pub id: String,
     pub data: Vec<u8>,
+    /// Ed25519 signature over [`WriteFrame::signing_bytes`] by the author
+    /// (`stamp.peer` is the author's public key). `None` for unsigned frames.
+    pub signature: Option<[u8; SIGNATURE_LEN]>,
 }
 
 impl WriteFrame {
@@ -46,14 +52,18 @@ impl WriteFrame {
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+    /// The bytes a signature covers: everything but the signature trailer.
+    /// Stable across signed/unsigned framing so a signature verifies regardless
+    /// of how the frame is later re-encoded.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, WireError> {
         let entity_bytes = self.entity.as_bytes();
         let id_bytes = self.id.as_bytes();
         let entity_len = u8::try_from(entity_bytes.len()).map_err(|_| WireError::EntityTooLong)?;
         let id_len = u8::try_from(id_bytes.len()).map_err(|_| WireError::IdTooLong)?;
         let data_len = u32::try_from(self.data.len()).expect("payload exceeds u32");
 
-        let mut out = Vec::with_capacity(HEADER_LEN + entity_bytes.len() + id_bytes.len() + self.data.len());
+        let mut out =
+            Vec::with_capacity(HEADER_LEN + entity_bytes.len() + id_bytes.len() + self.data.len());
         out.push(WIRE_VERSION);
         out.push(op_to_u8(self.op));
         out.extend_from_slice(&self.stamp.hlc.physical.to_be_bytes());
@@ -66,6 +76,18 @@ impl WriteFrame {
         out.extend_from_slice(entity_bytes);
         out.extend_from_slice(id_bytes);
         out.extend_from_slice(&self.data);
+        Ok(out)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, WireError> {
+        let mut out = self.signing_bytes()?;
+        match &self.signature {
+            Some(sig) => {
+                out.push(1);
+                out.extend_from_slice(sig);
+            }
+            None => out.push(0),
+        }
         Ok(out)
     }
 
@@ -90,17 +112,16 @@ impl WriteFrame {
         let id_len = buf[55] as usize;
         let data_len = u32::from_be_bytes(buf[56..60].try_into().expect("4 bytes")) as usize;
 
-        let need = HEADER_LEN + entity_len + id_len + data_len;
-        if buf.len() < need {
-            return Err(WireError::Truncated {
-                need,
-                have: buf.len(),
-            });
-        }
-
         let entity_end = HEADER_LEN + entity_len;
         let id_end = entity_end + id_len;
         let data_end = id_end + data_len;
+        let flag_end = data_end + 1;
+        if buf.len() < flag_end {
+            return Err(WireError::Truncated {
+                need: flag_end,
+                have: buf.len(),
+            });
+        }
 
         let entity = std::str::from_utf8(&buf[HEADER_LEN..entity_end])
             .map_err(|_| WireError::Utf8)?
@@ -110,6 +131,23 @@ impl WriteFrame {
             .to_string();
         let data = buf[id_end..data_end].to_vec();
 
+        let signature = match buf[data_end] {
+            0 => None,
+            1 => {
+                let sig_end = flag_end + SIGNATURE_LEN;
+                if buf.len() < sig_end {
+                    return Err(WireError::Truncated {
+                        need: sig_end,
+                        have: buf.len(),
+                    });
+                }
+                let mut sig = [0u8; SIGNATURE_LEN];
+                sig.copy_from_slice(&buf[flag_end..sig_end]);
+                Some(sig)
+            }
+            other => return Err(WireError::BadSignatureFlag(other)),
+        };
+
         Ok(Self {
             stamp: Stamp::new(Hlc::new(physical, logical), peer),
             seq,
@@ -117,12 +155,22 @@ impl WriteFrame {
             entity,
             id,
             data,
+            signature,
         })
     }
 
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        HEADER_LEN + self.entity.len() + self.id.len() + self.data.len()
+        HEADER_LEN
+            + self.entity.len()
+            + self.id.len()
+            + self.data.len()
+            + 1
+            + if self.signature.is_some() {
+                SIGNATURE_LEN
+            } else {
+                0
+            }
     }
 }
 
@@ -162,7 +210,30 @@ mod tests {
             entity: "task".into(),
             id: "t-uuid-1".into(),
             data: br#"{"title":"hello"}"#.to_vec(),
+            signature: None,
         }
+    }
+
+    #[test]
+    fn signed_frame_round_trips() {
+        let mut f = frame();
+        f.signature = Some([7u8; SIGNATURE_LEN]);
+        let bytes = f.encode().unwrap();
+        assert_eq!(bytes.len(), f.encoded_len());
+        let back = WriteFrame::decode(&bytes).unwrap();
+        assert_eq!(back, f);
+        assert_eq!(back.signature, Some([7u8; SIGNATURE_LEN]));
+    }
+
+    #[test]
+    fn signing_bytes_independent_of_signature() {
+        let unsigned = frame();
+        let mut signed = frame();
+        signed.signature = Some([9u8; SIGNATURE_LEN]);
+        assert_eq!(
+            unsigned.signing_bytes().unwrap(),
+            signed.signing_bytes().unwrap()
+        );
     }
 
     #[test]

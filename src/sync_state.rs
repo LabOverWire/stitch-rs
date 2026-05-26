@@ -1,7 +1,7 @@
 use crate::hlc::{Hlc, PeerId, Stamp};
 use crate::lww::{Applier, MergeOutcome, Op};
 use crate::replog::{Cursors, RecordOutcome, ReplLog};
-use crate::wire::WriteFrame;
+use crate::wire::{SIGNATURE_LEN, WriteFrame};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -14,6 +14,17 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 pub trait FramePersister: Send + Sync {
     fn append(&self, frame: &WriteFrame);
     fn load(&self) -> Vec<WriteFrame>;
+}
+
+/// Signs locally-originated frames and verifies/authorizes received ones.
+/// Implemented by the `membership` feature (Ed25519); the verified core stays
+/// crypto-agnostic. With no `FrameAuth` set, writes are unsigned and accepted
+/// as today.
+pub trait FrameAuth: Send + Sync {
+    /// Sign a local frame's [`WriteFrame::signing_bytes`].
+    fn sign(&self, signing_bytes: &[u8]) -> [u8; SIGNATURE_LEN];
+    /// Accept a received frame? Checks the signature and (later) authorization.
+    fn verify(&self, frame: &WriteFrame) -> bool;
 }
 
 /// Where an observable mutation came from.
@@ -47,6 +58,7 @@ pub struct SyncState {
     applier: Applier,
     events: broadcast::Sender<MutationEvent>,
     persister: Option<Arc<dyn FramePersister>>,
+    auth: Option<Arc<dyn FrameAuth>>,
 }
 
 impl SyncState {
@@ -60,7 +72,14 @@ impl SyncState {
             applier: Applier::new(),
             events,
             persister: None,
+            auth: None,
         }
+    }
+
+    /// Attach signing/verification. Local writes are signed; received frames
+    /// failing `verify` are rejected before they touch the log or state.
+    pub fn set_auth(&mut self, auth: Arc<dyn FrameAuth>) {
+        self.auth = Some(auth);
     }
 
     /// Attach a durable sink. Call after [`SyncState::replay`]-ing any persisted
@@ -90,9 +109,9 @@ impl SyncState {
         self.events.subscribe()
     }
 
-    /// Originate a local mutation. Advances the HLC, appends to our own log,
-    /// applies it locally, emits a [`MutationEvent`], and returns the frame to
-    /// broadcast to peers.
+    /// Originate a local mutation. Advances the HLC, builds and (if a
+    /// [`FrameAuth`] is set) signs the frame, records it to our own log, applies
+    /// it locally, emits a [`MutationEvent`], and returns the frame to broadcast.
     pub fn local_write(
         &mut self,
         wall_ms: u64,
@@ -103,19 +122,39 @@ impl SyncState {
     ) -> WriteFrame {
         let hlc = self.clock.tick(wall_ms);
         let stamp = Stamp::new(hlc, self.self_id);
-        let frame = self.log.append_local(stamp, op, entity, id, data);
+        let seq = self.log.next_seq(&self.self_id);
+        let mut frame = WriteFrame {
+            stamp,
+            seq,
+            op,
+            entity: entity.into(),
+            id: id.into(),
+            data,
+            signature: None,
+        };
+        if let Some(auth) = &self.auth
+            && let Ok(bytes) = frame.signing_bytes()
+        {
+            frame.signature = Some(auth.sign(&bytes));
+        }
+        self.log.record(frame.clone());
         self.persist(&frame);
         self.applier.merge(frame.clone().into_stamped());
         self.emit(&frame, WriteOrigin::Local);
         frame
     }
 
-    /// Apply a frame received from a peer. Always advances the HLC by observing
-    /// the remote stamp. Only merges into state when the frame is the next
-    /// in-order write for its origin (`RecordOutcome::Appended`); duplicates and
-    /// gaps leave state untouched. Emits a [`MutationEvent`] only when the write
-    /// actually changes the visible state (won LWW).
+    /// Apply a frame received from a peer. With a [`FrameAuth`] set, an
+    /// unverified frame is rejected before it touches the log or state. Always
+    /// advances the HLC by observing the remote stamp. Merges only when the
+    /// frame is the next in-order write for its origin; emits a
+    /// [`MutationEvent`] only when it changes the visible state (won LWW).
     pub fn receive(&mut self, frame: WriteFrame, wall_ms: u64) -> RecordOutcome {
+        if let Some(auth) = &self.auth
+            && !auth.verify(&frame)
+        {
+            return RecordOutcome::Rejected;
+        }
         self.clock.observe(frame.stamp.hlc, wall_ms);
         let outcome = self.log.record(frame.clone());
         if outcome == RecordOutcome::Appended {

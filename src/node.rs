@@ -35,6 +35,17 @@ impl SyncNode {
         }
     }
 
+    /// Build a node from explicit state, e.g. with a persister and/or signing
+    /// identity already attached. Most callers use [`SyncNode::new`] or the
+    /// `Store` constructors.
+    #[must_use]
+    pub fn from_state(state: SyncState) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            sessions: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
     /// Build a node whose state is rebuilt by replaying the persister's stored
     /// frames, then continues to persist new writes to it.
     #[must_use]
@@ -47,10 +58,7 @@ impl SyncNode {
             state.replay(frame);
         }
         state.set_persister(persister);
-        Self {
-            state: Arc::new(Mutex::new(state)),
-            sessions: Arc::new(StdMutex::new(Vec::new())),
-        }
+        Self::from_state(state)
     }
 
     #[must_use]
