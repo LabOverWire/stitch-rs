@@ -2,6 +2,7 @@
 name = "stitch-tasks"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 mqp2p = { version = "0.1.0", path = "../../../mqp2p" }
