@@ -2028,6 +2028,7 @@ dependencies = [
 name = "stitch-tasks"
 version = "0.1.0"
 dependencies = [
+ "mqp2p",
  "rand 0.10.1",
  "serde",
  "serde_json",
