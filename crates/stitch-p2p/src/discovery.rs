@@ -40,26 +40,53 @@ enum Role {
 /// against the node's shared state.
 pub struct Swarm {
     handles: Vec<JoinHandle<()>>,
+    bridges: Bridges,
+}
+
+/// Live per-connection session tasks, tracked so [`Swarm::abort`] can tear them
+/// down (dropping their connections) rather than leaving them detached. Finished
+/// handles are pruned on insert, so the vector stays bounded by live connections.
+type Bridges = Arc<Mutex<Vec<JoinHandle<()>>>>;
+
+fn track(bridges: &Bridges, handle: JoinHandle<()>) {
+    let mut guard = bridges.lock().expect("bridges lock");
+    guard.retain(|h| !h.is_finished());
+    guard.push(handle);
 }
 
 impl Swarm {
     #[must_use]
     pub fn spawn(peer: Arc<Peer>, node: SyncNode, pull_interval: Duration) -> Self {
         let connected: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let bridges: Bridges = Arc::new(Mutex::new(Vec::new()));
         let accept = tokio::spawn(accept_loop(
             Arc::clone(&peer),
             node.clone(),
             Arc::clone(&connected),
+            Arc::clone(&bridges),
             pull_interval,
         ));
-        let connect = tokio::spawn(connect_loop(peer, node, connected, pull_interval));
+        let connect = tokio::spawn(connect_loop(
+            peer,
+            node,
+            connected,
+            Arc::clone(&bridges),
+            pull_interval,
+        ));
         Self {
             handles: vec![accept, connect],
+            bridges,
         }
     }
 
+    /// Stop discovery and tear down every live session, closing their
+    /// connections. After this the peer no longer syncs until a new `Swarm` is
+    /// spawned.
     pub fn abort(&self) {
         for handle in &self.handles {
+            handle.abort();
+        }
+        for handle in self.bridges.lock().expect("bridges lock").drain(..) {
             handle.abort();
         }
     }
@@ -75,6 +102,7 @@ async fn accept_loop(
     peer: Arc<Peer>,
     node: SyncNode,
     connected: Arc<Mutex<HashSet<String>>>,
+    bridges: Bridges,
     pull_interval: Duration,
 ) {
     loop {
@@ -82,7 +110,7 @@ async fn accept_loop(
             Ok(conn) => {
                 let id = conn.remote_peer().id.clone();
                 connected.lock().expect("connected lock").insert(id.clone());
-                tokio::spawn(bridge(
+                let handle = tokio::spawn(bridge(
                     conn,
                     node.clone(),
                     Role::Responder,
@@ -90,6 +118,7 @@ async fn accept_loop(
                     Arc::clone(&connected),
                     id,
                 ));
+                track(&bridges, handle);
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
@@ -100,6 +129,7 @@ async fn connect_loop(
     peer: Arc<Peer>,
     node: SyncNode,
     connected: Arc<Mutex<HashSet<String>>>,
+    bridges: Bridges,
     pull_interval: Duration,
 ) {
     let my_id = match peer.peer_id() {
@@ -121,7 +151,7 @@ async fn connect_loop(
                 }
                 match peer.connect_to(&target).await {
                     Ok(conn) => {
-                        tokio::spawn(bridge(
+                        let handle = tokio::spawn(bridge(
                             conn,
                             node.clone(),
                             Role::Initiator,
@@ -129,6 +159,7 @@ async fn connect_loop(
                             Arc::clone(&connected),
                             target.id.clone(),
                         ));
+                        track(&bridges, handle);
                     }
                     Err(_) => {
                         connected.lock().expect("connected lock").remove(&target.id);

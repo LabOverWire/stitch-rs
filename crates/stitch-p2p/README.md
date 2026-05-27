@@ -1,6 +1,6 @@
 # stitch-p2p
 
-Pure peer-to-peer state sync for [stitch](../stitch-rs) — multi-leader,
+Pure peer-to-peer state sync for [stitch](../stitch) — multi-leader,
 eventually-consistent replication with **no central authority**. Peers resolve
 conflicts locally using last-writer-wins keyed by a Hybrid Logical Clock and a
 peer-fingerprint tiebreak, giving a deterministic total order without a server.
@@ -81,9 +81,12 @@ Implemented and tested (the full verified core, transport excluded):
   dialed (role broken by peer-id order, so each pair forms one connection),
   each connection opens a sync stream and runs `session::run` against the shared
   state. `peer_id_from_fingerprint` ties the sync writer identity to the
-  cryptographic cert fingerprint. `tests/discovery_broker.rs` runs two peers
-  through a real `mqdb` broker — register, discover, NAT-traverse to QUIC, and
-  converge — end to end.
+  cryptographic cert fingerprint. Aborting (or dropping) a `Swarm` tears down its
+  accept/connect loops **and** every live session, so a peer cleanly disconnects
+  and can re-`spawn` to rejoin — the basis for the offline/online story in the
+  `stitch-tasks` demo. `tests/discovery_broker.rs` runs two peers through a real
+  `mqdb` broker — register, discover, NAT-traverse to QUIC, and converge — end to
+  end.
 
 - `store` — `Store`, the app-facing document facade over `SyncNode`. JSON
   records keyed by `(entity, id)`; `create`/`read`/`update` (read-merge-write)/
@@ -147,17 +150,20 @@ with a message if it's absent.
 ## Architecture
 
 ```
-Store (stitch public API, unchanged)
-  └─ PeerSyncEngine        (replaces RemoteSyncLayer)
-       ├─ Applier          (lww: LWW + GC, verified)
-       ├─ per-peer cursors (anti-entropy)         [M2]
-       └─ PeerSession × N  (mqp2p QUIC bidi)      [M2]
+Store                    app-facing JSON document facade        [feature: store]
+  └─ SyncNode            fan-out: one shared SyncState, N sessions
+       ├─ SyncState      hlc (clock) + replog (delivery) + Applier (lww: LWW + GC)
+       ├─ session × N    per-connection anti-entropy (Hello / Delta)
+       └─ Swarm          discovery + connection lifecycle over mqp2p QUIC  [feature: discovery]
 ```
+
+`FjallLog` (persistence) plugs into `SyncState`'s `FramePersister` hook; `Identity`
+(membership) signs outbound writes and gates reads — both optional and feature-gated.
 
 ## Dependencies
 
-- `thiserror` — error types.
-- Later: `mqp2p` (discovery + NAT traversal + QUIC), `mqdb-agent` (local
-  storage), `stitch` (the `Store` facade).
-
-All LabOverWire-owned. No central broker holds canonical state.
+Always: `tokio`, `thiserror`. Everything else is optional and feature-gated —
+`serde_json` (`store`), `mqp2p` → quinn + mqtt5 (`discovery`), `fjall`
+(`persistence`), `ed25519-dalek` (`membership`). There is no dependency on
+`stitch` (the two `Store`s are siblings, not layers) and no central broker holds
+canonical state. All LabOverWire-owned.
