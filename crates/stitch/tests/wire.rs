@@ -669,9 +669,7 @@ async fn reset_for_logout_disconnects_and_clears_handlers() {
     );
     store.initialize().await.unwrap();
     wait_for_connected(&store).await;
-    store
-        .set_authenticated_user(Some("user-1".into()))
-        .unwrap();
+    store.set_authenticated_user(Some("user-1".into())).unwrap();
 
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counter_clone = counter.clone();

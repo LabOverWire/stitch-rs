@@ -820,7 +820,10 @@ impl Store {
         } else {
             let mut record = fields;
             record.insert("id".to_string(), Value::String(id.to_string()));
-            inner.memory.create(entity, "", record, Origin::Load).await?;
+            inner
+                .memory
+                .create(entity, "", record, Origin::Load)
+                .await?;
             Ok(())
         }
     }
@@ -844,7 +847,9 @@ impl Store {
     pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
-            return Err(Error::Config("request requires remote configuration".into()));
+            return Err(Error::Config(
+                "request requires remote configuration".into(),
+            ));
         };
         remote.request(topic, payload).await
     }

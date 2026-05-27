@@ -927,7 +927,11 @@ async fn update_local_state_in_memory_creates_when_missing() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();
     store
-        .update_local_state("project", "p-new", make_record(&[("name", json!("memory-only"))]))
+        .update_local_state(
+            "project",
+            "p-new",
+            make_record(&[("name", json!("memory-only"))]),
+        )
         .await
         .unwrap();
     let got = store
@@ -1086,9 +1090,7 @@ async fn reset_for_logout_clears_auth_and_status() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();
 
-    store
-        .set_authenticated_user(Some("user-1".into()))
-        .unwrap();
+    store.set_authenticated_user(Some("user-1".into())).unwrap();
     store.reset_for_logout().await.unwrap();
 
     assert!(store.current_scope().unwrap().is_none());
