@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 ed25519-dalek = { version = "2", default-features = false, features = ["fast"], optional = true }
 fjall = { version = "3.0", optional = true }
-mqp2p = { version = "0.1.0", path = "../mqp2p", optional = true }
+mqp2p = { version = "0.1.0", path = "../../../mqp2p", optional = true }
 serde_json = { version = "1.0.150", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["sync", "io-util", "macros", "rt", "rt-multi-thread", "time", "net"] }
