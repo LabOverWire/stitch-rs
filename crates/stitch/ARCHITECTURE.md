@@ -1,7 +1,7 @@
 # Architecture
 
 Internal design of the Rust port of stitch. The conceptual model mirrors the TS
-library — see [`../stitch/ARCHITECTURE.md`](../stitch/ARCHITECTURE.md) for the
+library — see the TS library's [`ARCHITECTURE.md`](https://github.com/LabOverWire/stitch/blob/HEAD/ARCHITECTURE.md) for the
 canonical reference. This document focuses on what's specific to the Rust port:
 the layer composition, deliberate deviations, and current gaps.
 

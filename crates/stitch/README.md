@@ -1,6 +1,6 @@
 # stitch
 
-Native Rust port of [`@laboverwire/stitch`](../stitch). Reactive state-sync library
+Native Rust port of [`@laboverwire/stitch`](https://github.com/LabOverWire/stitch). Reactive state-sync library
 bridging an in-memory store, fjall-backed local persistence, and MQTT-based remote
 sync into a single `Store` interface.
 
