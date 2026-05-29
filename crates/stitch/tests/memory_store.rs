@@ -294,3 +294,62 @@ async fn clear_scope_emits_scope_cleared() {
     assert!(cleared.1.contains(&"task".to_string()));
     assert!(store.current_scope().await.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_updates_to_same_record_converge_without_conflict() {
+    let store = Arc::new(MemoryStore::new(fixture_config()).await.unwrap());
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("init")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let store = Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            store
+                .update(
+                    "task",
+                    "t1",
+                    make_record(&[("title", json!(format!("title-{i}")))]),
+                    Origin::Local,
+                )
+                .await
+        }));
+    }
+
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "concurrent same-key update surfaced a conflict: {result:?}"
+        );
+    }
+
+    let final_task = store.read("task", "t1").await.unwrap().unwrap();
+    let title = final_task.get("title").and_then(Value::as_str).unwrap();
+    assert!(title.starts_with("title-"), "unexpected final title: {title}");
+    assert_eq!(
+        final_task.get("projectId").and_then(Value::as_str),
+        Some("p1"),
+        "field-level merge dropped the untouched projectId field"
+    );
+}

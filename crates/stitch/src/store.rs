@@ -957,7 +957,9 @@ impl StoreInner {
             let mutation_rx = remote.subscribe_mutations();
             let status_rx = remote.subscribe_connection_status();
 
-            let mutation_task = tokio::spawn(mutation_loop(Arc::clone(&inner), mutation_rx));
+            let remote_ops: Arc<dyn RemoteSyncOps> = remote.clone();
+            let mutation_task =
+                tokio::spawn(mutation_loop(Arc::clone(&inner), remote_ops, mutation_rx));
             let status_task = tokio::spawn(status_loop(Arc::clone(&inner), status_rx));
 
             inner.tasks.lock().unwrap().push(mutation_task);
@@ -1116,16 +1118,74 @@ impl LocalAccessor for InnerLocalAccessor {
     }
 }
 
-async fn mutation_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<MutationDelivery>) {
+#[async_trait]
+trait RemoteSyncOps: Send + Sync {
+    async fn apply_mutation_to_db(
+        &self,
+        mutation: SyncMutation,
+        accessor: &dyn LocalAccessor,
+    ) -> Result<bool>;
+
+    async fn sync_root_entity_list(
+        &self,
+        accessor: &dyn LocalAccessor,
+        queue: Option<&dyn OfflineQueue>,
+        authenticated_user: Option<&str>,
+    ) -> Result<()>;
+}
+
+#[async_trait]
+impl RemoteSyncOps for RemoteSyncLayer {
+    async fn apply_mutation_to_db(
+        &self,
+        mutation: SyncMutation,
+        accessor: &dyn LocalAccessor,
+    ) -> Result<bool> {
+        RemoteSyncLayer::apply_mutation_to_db(self, mutation, accessor).await
+    }
+
+    async fn sync_root_entity_list(
+        &self,
+        accessor: &dyn LocalAccessor,
+        queue: Option<&dyn OfflineQueue>,
+        authenticated_user: Option<&str>,
+    ) -> Result<()> {
+        RemoteSyncLayer::sync_root_entity_list(self, accessor, queue, authenticated_user).await
+    }
+}
+
+async fn mutation_loop(
+    inner: Arc<StoreInner>,
+    remote: Arc<dyn RemoteSyncOps>,
+    mut rx: broadcast::Receiver<MutationDelivery>,
+) {
     loop {
         match rx.recv().await {
-            Ok(delivery) => handle_remote_mutation(&inner, delivery.mutation).await,
+            Ok(delivery) => {
+                handle_remote_mutation(&inner, remote.as_ref(), delivery.mutation).await
+            }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "mutation receiver lagged");
+                tracing::warn!(skipped, "mutation receiver lagged; resyncing from server");
+                resync_after_lag(&inner, remote.as_ref()).await;
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+async fn resync_after_lag(inner: &Arc<StoreInner>, remote: &dyn RemoteSyncOps) {
+    if inner.state.lock().unwrap().last_connection_status != ConnectionStatus::Connected {
+        return;
+    }
+    let user = inner.state.lock().unwrap().authenticated_user.clone();
+    let accessor = inner.local_accessor();
+    let queue_ref = inner.queue.as_deref();
+    if let Err(err) = remote
+        .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
+        .await
+    {
+        tracing::warn!(error = %err, "resync after mutation lag failed");
     }
 }
 
@@ -1150,15 +1210,23 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
     }
 }
 
-async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation) {
+async fn handle_remote_mutation(
+    inner: &Arc<StoreInner>,
+    remote: &dyn RemoteSyncOps,
+    mutation: SyncMutation,
+) {
     let accessor = inner.local_accessor();
-    let persisted = if let Some(remote) = &inner.remote {
-        remote
-            .apply_mutation_to_db(mutation.clone(), &accessor)
-            .await
-            .unwrap_or_default()
-    } else {
-        false
+    let persisted = match remote.apply_mutation_to_db(mutation.clone(), &accessor).await {
+        Ok(applied) => applied,
+        Err(err) => {
+            tracing::warn!(
+                entity = %mutation.entity,
+                id = %mutation.id,
+                error = %err,
+                "remote mutation apply failed"
+            );
+            false
+        }
     };
 
     if !persisted || inner.persistence.is_none() {
@@ -1234,27 +1302,49 @@ async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation)
                         })
                 };
                 if let Some(sid) = sid {
+                    let id = mutation.id.clone();
                     data.insert("id".into(), Value::String(mutation.id));
-                    let _ = inner
-                        .memory
-                        .create(&mutation.entity, &sid, data, Origin::Remote)
-                        .await;
+                    if let Err(err) =
+                        inner.memory.create(&mutation.entity, &sid, data, Origin::Remote).await
+                    {
+                        tracing::warn!(
+                            entity = %mutation.entity,
+                            id = %id,
+                            error = %err,
+                            "mirror remote insert to memory cache failed"
+                        );
+                    }
                 }
             }
         }
         Operation::Update => {
-            if let Some(data) = mutation.data {
-                let _ = inner
+            if let Some(data) = mutation.data
+                && let Err(err) = inner
                     .memory
                     .update(&mutation.entity, &mutation.id, data, Origin::Remote)
-                    .await;
+                    .await
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "mirror remote update to memory cache failed"
+                );
             }
         }
         Operation::Delete => {
-            let _ = inner
+            if let Err(err) = inner
                 .memory
                 .delete(&mutation.entity, &mutation.id, Origin::Remote)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "mirror remote delete to memory cache failed"
+                );
+            }
         }
     }
 }
@@ -1348,5 +1438,184 @@ impl Drop for StoreInner {
         for handle in handles {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{EntityDefinition, ScopeConfig};
+    use crate::sync_engine::MutationDelivery;
+    use crate::types::SyncMutation;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeRemote {
+        resync_calls: AtomicUsize,
+        apply_calls: AtomicUsize,
+        inject_on_first_resync: StdMutex<Option<broadcast::Sender<MutationDelivery>>>,
+    }
+
+    impl FakeRemote {
+        fn new(inject: Option<broadcast::Sender<MutationDelivery>>) -> Arc<Self> {
+            Arc::new(Self {
+                resync_calls: AtomicUsize::new(0),
+                apply_calls: AtomicUsize::new(0),
+                inject_on_first_resync: StdMutex::new(inject),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RemoteSyncOps for FakeRemote {
+        async fn apply_mutation_to_db(
+            &self,
+            _mutation: SyncMutation,
+            _accessor: &dyn LocalAccessor,
+        ) -> Result<bool> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+
+        async fn sync_root_entity_list(
+            &self,
+            _accessor: &dyn LocalAccessor,
+            _queue: Option<&dyn OfflineQueue>,
+            _authenticated_user: Option<&str>,
+        ) -> Result<()> {
+            self.resync_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(sender) = self.inject_on_first_resync.lock().unwrap().take() {
+                for i in 0..5 {
+                    let _ = sender.send(delivery(&format!("inject-{i}")));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    async fn fixture_inner(status: ConnectionStatus) -> Arc<StoreInner> {
+        let mut entities = HashMap::new();
+        entities.insert("project".to_string(), EntityDefinition::default());
+        entities.insert("task".to_string(), EntityDefinition::default());
+        let config = Arc::new(StoreConfig::new(
+            entities,
+            ScopeConfig {
+                root_entity: "project".to_string(),
+                child_entities: vec!["task".to_string()],
+                scope_field: "projectId".to_string(),
+            },
+        ));
+        let memory = Arc::new(MemoryStore::new(Arc::clone(&config)).await.expect("memory store"));
+        Arc::new(StoreInner {
+            config,
+            memory,
+            persistence: None,
+            remote: None,
+            queue: None,
+            state: Mutex::new(StoreState {
+                current_scope: None,
+                initial_sync_done: true,
+                authenticated_user: None,
+                last_connection_status: status,
+                has_been_connected: true,
+            }),
+            reconnect_validator: Mutex::new(None),
+            replace_scope_lock: tokio::sync::Mutex::new(()),
+            tasks: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn delivery(id: &str) -> MutationDelivery {
+        MutationDelivery {
+            scope_id: "p1".to_string(),
+            mutation: SyncMutation {
+                op: Operation::Update,
+                entity: "task".to_string(),
+                id: id.to_string(),
+                data: Some(BTreeMap::new().into_iter().collect()),
+                operation_id: None,
+            },
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lag_triggers_resync_and_still_applies_retained_messages() {
+        let inner = fixture_inner(ConnectionStatus::Connected).await;
+        let remote = FakeRemote::new(None);
+        let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
+
+        for i in 0..5 {
+            let _ = tx.send(delivery(&format!("m{i}")));
+        }
+        drop(tx);
+
+        mutation_loop(Arc::clone(&inner), remote.clone(), rx).await;
+
+        assert_eq!(
+            remote.resync_calls.load(Ordering::SeqCst),
+            1,
+            "a single lag event must trigger exactly one resync"
+        );
+        assert_eq!(
+            remote.apply_calls.load(Ordering::SeqCst),
+            2,
+            "the 2 retained (non-skipped) deliveries must still be applied after resync"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resync_is_skipped_when_not_connected() {
+        let inner = fixture_inner(ConnectionStatus::Offline).await;
+        let remote = FakeRemote::new(None);
+        let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
+
+        for i in 0..5 {
+            let _ = tx.send(delivery(&format!("m{i}")));
+        }
+        drop(tx);
+
+        mutation_loop(Arc::clone(&inner), remote.clone(), rx).await;
+
+        assert_eq!(
+            remote.resync_calls.load(Ordering::SeqCst),
+            0,
+            "resync must be gated on a Connected status"
+        );
+        assert_eq!(
+            remote.apply_calls.load(Ordering::SeqCst),
+            2,
+            "retained deliveries are still applied even when resync is gated off"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sustained_overflow_during_resync_relags_and_resyncs_again() {
+        let inner = fixture_inner(ConnectionStatus::Connected).await;
+        let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
+        let remote = FakeRemote::new(Some(tx.clone()));
+
+        for i in 0..5 {
+            let _ = tx.send(delivery(&format!("m{i}")));
+        }
+        drop(tx);
+
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mutation_loop(Arc::clone(&inner), remote.clone(), rx),
+        )
+        .await
+        .is_ok();
+
+        assert!(
+            completed,
+            "loop never terminated: the resync that drops the injected sender was not reached"
+        );
+        assert_eq!(
+            remote.resync_calls.load(Ordering::SeqCst),
+            2,
+            "an overflow injected synchronously during the first resync must force a second \
+             lag and a second resync — the amplification hypothesis"
+        );
     }
 }

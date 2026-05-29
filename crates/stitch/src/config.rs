@@ -105,7 +105,7 @@ impl StoreConfig {
             version_field: "version".to_string(),
             updated_at_field: "updatedAt".to_string(),
             user_scope_field: None,
-            event_channel_capacity: 1024,
+            event_channel_capacity: 4096,
             session_expiry_secs: 3600,
             clean_start: false,
         }
