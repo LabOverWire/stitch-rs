@@ -180,6 +180,15 @@ each `ConnectionStatus::Connected` event — first to replay, second to drain
 anything the first left as transient — then runs `sync_root_entity_list` and
 sets `initial_sync_done`.
 
+A private `mutation_loop` task forwards inbound remote deliveries off the
+internal mutation bus into the cache. When a high write rate makes it fall
+behind and the bus returns `RecvError::Lagged`, it does **not** drop the gap
+silently: if still connected, it runs `sync_root_entity_list` to re-fetch
+authoritative state for the connected user, then resumes. The remote operations
+it depends on (`apply_mutation_to_db`, `sync_root_entity_list`) are abstracted
+behind the `RemoteSyncOps` seam so the lag/resync path is covered by in-process
+regression tests without a broker.
+
 ---
 
 ## Subscriptions
@@ -193,7 +202,7 @@ for the current scope plus `ScopeLoaded` / `ScopeCleared` events.
 (e.g., a list of all projects, even ones whose scope isn't open).
 
 Both buses are `tokio::sync::broadcast::Sender<StoreEvent>` with capacity
-controlled by `StoreConfig.event_channel_capacity` (default 1024). Slow consumers
+controlled by `StoreConfig.event_channel_capacity` (default 4096). Slow consumers
 that fall behind get `RecvError::Lagged`.
 
 ### Batching
