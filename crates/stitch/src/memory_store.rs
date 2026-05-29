@@ -188,7 +188,13 @@ impl MemoryStore {
                 &caller,
             )
             .await
-            .map_err(|e| Error::mqdb(format!("update:{entity}"), e))?;
+            .map_err(|e| match e {
+                mqdb_core::error::Error::Conflict(_) => Error::Conflict {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                },
+                other => Error::mqdb(format!("update:{entity}"), other),
+            })?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {
             return Ok(record);
@@ -226,7 +232,13 @@ impl MemoryStore {
             &mqdb_core::types::OwnershipConfig::default(),
         )
         .await
-        .map_err(|e| Error::mqdb(format!("delete:{entity}"), e))?;
+        .map_err(|e| match e {
+            mqdb_core::error::Error::Conflict(_) => Error::Conflict {
+                entity: entity.to_string(),
+                id: id.to_string(),
+            },
+            other => Error::mqdb(format!("delete:{entity}"), other),
+        })?;
 
         self.emit_mutation(MutationEvent {
             operation: Operation::Delete,

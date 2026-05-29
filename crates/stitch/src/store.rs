@@ -1121,11 +1121,30 @@ async fn mutation_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Mutat
         match rx.recv().await {
             Ok(delivery) => handle_remote_mutation(&inner, delivery.mutation).await,
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "mutation receiver lagged");
+                tracing::warn!(skipped, "mutation receiver lagged; resyncing from server");
+                resync_after_lag(&inner).await;
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+async fn resync_after_lag(inner: &Arc<StoreInner>) {
+    let Some(remote) = inner.remote.clone() else {
+        return;
+    };
+    if inner.state.lock().unwrap().last_connection_status != ConnectionStatus::Connected {
+        return;
+    }
+    let user = inner.state.lock().unwrap().authenticated_user.clone();
+    let accessor = inner.local_accessor();
+    let queue_ref = inner.queue.as_deref();
+    if let Err(err) = remote
+        .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
+        .await
+    {
+        tracing::warn!(error = %err, "resync after mutation lag failed");
     }
 }
 
@@ -1153,10 +1172,18 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
 async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation) {
     let accessor = inner.local_accessor();
     let persisted = if let Some(remote) = &inner.remote {
-        remote
-            .apply_mutation_to_db(mutation.clone(), &accessor)
-            .await
-            .unwrap_or_default()
+        match remote.apply_mutation_to_db(mutation.clone(), &accessor).await {
+            Ok(applied) => applied,
+            Err(err) => {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "remote mutation apply failed"
+                );
+                false
+            }
+        }
     } else {
         false
     };
@@ -1234,27 +1261,49 @@ async fn handle_remote_mutation(inner: &Arc<StoreInner>, mutation: SyncMutation)
                         })
                 };
                 if let Some(sid) = sid {
+                    let id = mutation.id.clone();
                     data.insert("id".into(), Value::String(mutation.id));
-                    let _ = inner
-                        .memory
-                        .create(&mutation.entity, &sid, data, Origin::Remote)
-                        .await;
+                    if let Err(err) =
+                        inner.memory.create(&mutation.entity, &sid, data, Origin::Remote).await
+                    {
+                        tracing::warn!(
+                            entity = %mutation.entity,
+                            id = %id,
+                            error = %err,
+                            "mirror remote insert to memory cache failed"
+                        );
+                    }
                 }
             }
         }
         Operation::Update => {
-            if let Some(data) = mutation.data {
-                let _ = inner
+            if let Some(data) = mutation.data
+                && let Err(err) = inner
                     .memory
                     .update(&mutation.entity, &mutation.id, data, Origin::Remote)
-                    .await;
+                    .await
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "mirror remote update to memory cache failed"
+                );
             }
         }
         Operation::Delete => {
-            let _ = inner
+            if let Err(err) = inner
                 .memory
                 .delete(&mutation.entity, &mutation.id, Origin::Remote)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "mirror remote delete to memory cache failed"
+                );
+            }
         }
     }
 }
