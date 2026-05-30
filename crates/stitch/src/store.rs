@@ -53,6 +53,7 @@ struct StoreInner {
     reconnect_validator: Mutex<Option<ReconnectValidator>>,
     replace_scope_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    flush_notify: tokio::sync::Notify,
 }
 
 struct StoreState {
@@ -243,8 +244,11 @@ impl Store {
         self.inner.get().is_some()
     }
 
-    /// `true` once the first post-connect sync has finished. When no remote is
-    /// configured this is `true` immediately after `initialize`.
+    /// `true` once the first post-connect sync has finished, and stays `true`
+    /// across later reconnects and lag-triggered resyncs (a one-way latch). It
+    /// resets to `false` only on [`Store::reset_for_logout`]. When no remote is
+    /// configured this is `true` immediately after `initialize`. Use
+    /// [`Store::is_reconnecting`] for a transient "currently resyncing" signal.
     pub fn initial_sync_done(&self) -> Result<bool> {
         Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
     }
@@ -341,7 +345,9 @@ impl Store {
                             .await;
                     }
                 }
-                Err(err) if err.is_transient() => {}
+                Err(err) if err.is_transient() => {
+                    inner.flush_notify.notify_one();
+                }
                 Err(err) => {
                     tracing::warn!(
                         entity = %entity,
@@ -462,7 +468,9 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
-                Err(err) if err.is_transient() => {}
+                Err(err) if err.is_not_found() || err.is_transient() => {
+                    inner.flush_notify.notify_one();
+                }
                 Err(err) => {
                     tracing::warn!(entity = %entity, id = %id, error = %err, "remote update failed");
                 }
@@ -564,7 +572,9 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
-                Err(err) if err.is_not_found() || err.is_transient() => {}
+                Err(err) if err.is_not_found() || err.is_transient() => {
+                    inner.flush_notify.notify_one();
+                }
                 Err(err) => {
                     tracing::warn!(entity = %entity, id = %id, error = %err, "remote delete failed");
                 }
@@ -951,6 +961,7 @@ impl StoreInner {
             reconnect_validator: Mutex::new(None),
             replace_scope_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
+            flush_notify: tokio::sync::Notify::new(),
         });
 
         if let Some(remote) = &inner.remote {
@@ -961,9 +972,11 @@ impl StoreInner {
             let mutation_task =
                 tokio::spawn(mutation_loop(Arc::clone(&inner), remote_ops, mutation_rx));
             let status_task = tokio::spawn(status_loop(Arc::clone(&inner), status_rx));
+            let flush_task = tokio::spawn(flush_loop(Arc::clone(&inner)));
 
             inner.tasks.lock().unwrap().push(mutation_task);
             inner.tasks.lock().unwrap().push(status_task);
+            inner.tasks.lock().unwrap().push(flush_task);
 
             if let Some(remote_cfg) = &options.remote {
                 let ticket = match &remote_cfg.get_ticket {
@@ -1210,6 +1223,36 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
     }
 }
 
+async fn flush_loop(inner: Arc<StoreInner>) {
+    const RETAIN_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+    loop {
+        inner.flush_notify.notified().await;
+        loop {
+            let connected = inner.state.lock().unwrap().last_connection_status
+                == ConnectionStatus::Connected;
+            if !connected {
+                break;
+            }
+            let (Some(queue), Some(remote)) = (inner.queue.as_deref(), inner.remote.as_ref())
+            else {
+                break;
+            };
+            let sender: &dyn crate::offline_queue::MutationSender = remote.as_ref();
+            let retained = match queue.flush(sender).await {
+                Ok(retained) => retained,
+                Err(err) => {
+                    tracing::warn!(error = %err, "offline queue flush failed");
+                    break;
+                }
+            };
+            if retained == 0 {
+                break;
+            }
+            tokio::time::sleep(RETAIN_BACKOFF).await;
+        }
+    }
+}
+
 async fn handle_remote_mutation(
     inner: &Arc<StoreInner>,
     remote: &dyn RemoteSyncOps,
@@ -1420,15 +1463,10 @@ async fn on_connected(inner: Arc<StoreInner>) {
         let _ = queue.flush(sender).await;
     }
     if let Some(remote) = &remote {
-        {
-            let mut state = inner.state.lock().unwrap();
-            state.initial_sync_done = false;
-        }
         let _ = remote
             .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
             .await;
-        let mut state = inner.state.lock().unwrap();
-        state.initial_sync_done = true;
+        inner.state.lock().unwrap().initial_sync_done = true;
     }
 }
 
@@ -1575,6 +1613,7 @@ mod tests {
             reconnect_validator: Mutex::new(None),
             replace_scope_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
+            flush_notify: tokio::sync::Notify::new(),
         })
     }
 
