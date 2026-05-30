@@ -5,6 +5,24 @@ All notable changes to the `stitch` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-30
+
+### Fixed
+
+- The remote-mutation cache mirror no longer drops out-of-order deliveries. An
+  `Update` that arrives before its `Insert` (which surfaced as `Error::NotFound`
+  from `MemoryStore::update` under high write throughput) now upserts the row
+  from the update's data instead of logging a warning and dropping it, keeping
+  the local cache convergent for cross-process coordination.
+- A `Delete` mirror for an already-absent row is treated as converged
+  (`Error::NotFound`) rather than logged as a failure, removing benign warning
+  spam under load.
+
+### Changed
+
+- Extracted the cache-mirror logic into a `mirror_remote_to_memory` function so
+  the upsert/idempotency paths are covered by in-process regression tests.
+
 ## [0.2.0] - 2026-05-29
 
 ### Changed
