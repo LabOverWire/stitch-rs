@@ -1460,7 +1460,11 @@ async fn on_connected(inner: Arc<StoreInner>) {
     if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
         let sender: &dyn crate::offline_queue::MutationSender = remote.as_ref();
         let _ = queue.flush(sender).await;
-        let _ = queue.flush(sender).await;
+        if let Ok(retained) = queue.flush(sender).await
+            && retained > 0
+        {
+            inner.flush_notify.notify_one();
+        }
     }
     if let Some(remote) = &remote {
         let _ = remote
