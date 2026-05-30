@@ -88,8 +88,10 @@ A complete runnable example lives at [`examples/quickstart.rs`](./examples/quick
 - **Synchronous-feeling reads** for UI via `Store::read` / `Store::list`
 - **Durable local state** via `mqdb-agent::Database` on fjall
 - **Live multi-device sync** via MQTT5 with persisted sessions
-- **Offline tolerance** — mutations queue locally, drain on reconnect with
-  consolidation (insert + N updates → single insert, etc.)
+- **Offline tolerance** — mutations queue locally and drain with consolidation
+  (insert + N updates → single insert, etc.); a parked mutation whose direct
+  sync lost the create→update race is retried within ~250ms rather than waiting
+  for the next reconnect
 
 ## Status
 
