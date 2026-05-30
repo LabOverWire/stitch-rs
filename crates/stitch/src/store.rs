@@ -1284,6 +1284,16 @@ async fn handle_remote_mutation(
         return;
     }
 
+    mirror_remote_to_memory(inner, mutation, is_top_level).await;
+}
+
+async fn mirror_remote_to_memory(
+    inner: &Arc<StoreInner>,
+    mutation: SyncMutation,
+    is_top_level: bool,
+) {
+    let root_entity = &inner.config.scope.root_entity;
+    let scope_field = &inner.config.scope.scope_field;
     match mutation.op {
         Operation::Insert => {
             if let Some(mut data) = mutation.data {
@@ -1304,8 +1314,10 @@ async fn handle_remote_mutation(
                 if let Some(sid) = sid {
                     let id = mutation.id.clone();
                     data.insert("id".into(), Value::String(mutation.id));
-                    if let Err(err) =
-                        inner.memory.create(&mutation.entity, &sid, data, Origin::Remote).await
+                    if let Err(err) = inner
+                        .memory
+                        .create(&mutation.entity, &sid, data, Origin::Remote)
+                        .await
                     {
                         tracing::warn!(
                             entity = %mutation.entity,
@@ -1318,32 +1330,72 @@ async fn handle_remote_mutation(
             }
         }
         Operation::Update => {
-            if let Some(data) = mutation.data
-                && let Err(err) = inner
+            if let Some(data) = mutation.data {
+                match inner
                     .memory
-                    .update(&mutation.entity, &mutation.id, data, Origin::Remote)
+                    .update(&mutation.entity, &mutation.id, data.clone(), Origin::Remote)
                     .await
-            {
-                tracing::warn!(
-                    entity = %mutation.entity,
-                    id = %mutation.id,
-                    error = %err,
-                    "mirror remote update to memory cache failed"
-                );
+                {
+                    Ok(_) => {}
+                    Err(err) if err.is_not_found() => {
+                        let sid = if is_top_level {
+                            Some(String::new())
+                        } else {
+                            data.get(scope_field)
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    if mutation.entity == *root_entity {
+                                        Some(mutation.id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        };
+                        if let Some(sid) = sid {
+                            let mut data = data;
+                            data.insert("id".into(), Value::String(mutation.id.clone()));
+                            if let Err(err) = inner
+                                .memory
+                                .create(&mutation.entity, &sid, data, Origin::Remote)
+                                .await
+                            {
+                                tracing::warn!(
+                                    entity = %mutation.entity,
+                                    id = %mutation.id,
+                                    error = %err,
+                                    "mirror remote update upserted as insert and failed"
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            entity = %mutation.entity,
+                            id = %mutation.id,
+                            error = %err,
+                            "mirror remote update to memory cache failed"
+                        );
+                    }
+                }
             }
         }
         Operation::Delete => {
-            if let Err(err) = inner
+            match inner
                 .memory
                 .delete(&mutation.entity, &mutation.id, Origin::Remote)
                 .await
             {
-                tracing::warn!(
-                    entity = %mutation.entity,
-                    id = %mutation.id,
-                    error = %err,
-                    "mirror remote delete to memory cache failed"
-                );
+                Ok(()) => {}
+                Err(err) if err.is_not_found() => {}
+                Err(err) => {
+                    tracing::warn!(
+                        entity = %mutation.entity,
+                        id = %mutation.id,
+                        error = %err,
+                        "mirror remote delete to memory cache failed"
+                    );
+                }
             }
         }
     }
@@ -1537,6 +1589,90 @@ mod tests {
                 operation_id: None,
             },
         }
+    }
+
+    fn record(pairs: &[(&str, Value)]) -> Record {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn mirror_update_before_insert_upserts_the_row() {
+        let inner = fixture_inner(ConnectionStatus::Connected).await;
+        let mutation = SyncMutation {
+            op: Operation::Update,
+            entity: "task".to_string(),
+            id: "t1".to_string(),
+            data: Some(record(&[
+                ("title", Value::String("hello".to_string())),
+                ("projectId", Value::String("p1".to_string())),
+            ])),
+            operation_id: None,
+        };
+
+        mirror_remote_to_memory(&inner, mutation, false).await;
+
+        let got = inner.memory.read("task", "t1").await.unwrap();
+        assert!(
+            got.is_some(),
+            "an Update arriving before its Insert must upsert the row, not drop it"
+        );
+        let rec = got.unwrap();
+        assert_eq!(rec.get("title").and_then(Value::as_str), Some("hello"));
+        assert_eq!(rec.get("id").and_then(Value::as_str), Some("t1"));
+    }
+
+    #[tokio::test]
+    async fn mirror_insert_after_update_upsert_overwrites_idempotently() {
+        let inner = fixture_inner(ConnectionStatus::Connected).await;
+        let upsert = SyncMutation {
+            op: Operation::Update,
+            entity: "task".to_string(),
+            id: "t1".to_string(),
+            data: Some(record(&[
+                ("title", Value::String("from-update".to_string())),
+                ("projectId", Value::String("p1".to_string())),
+            ])),
+            operation_id: None,
+        };
+        mirror_remote_to_memory(&inner, upsert, false).await;
+
+        let insert = SyncMutation {
+            op: Operation::Insert,
+            entity: "task".to_string(),
+            id: "t1".to_string(),
+            data: Some(record(&[
+                ("title", Value::String("from-insert".to_string())),
+                ("projectId", Value::String("p1".to_string())),
+            ])),
+            operation_id: None,
+        };
+        mirror_remote_to_memory(&inner, insert, false).await;
+
+        let rec = inner.memory.read("task", "t1").await.unwrap().unwrap();
+        assert_eq!(
+            rec.get("title").and_then(Value::as_str),
+            Some("from-insert"),
+            "an Insert arriving after the Update already upserted the row must overwrite cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn mirror_delete_of_absent_row_is_noop() {
+        let inner = fixture_inner(ConnectionStatus::Connected).await;
+        let mutation = SyncMutation {
+            op: Operation::Delete,
+            entity: "task".to_string(),
+            id: "ghost".to_string(),
+            data: None,
+            operation_id: None,
+        };
+
+        mirror_remote_to_memory(&inner, mutation, false).await;
+
+        assert!(inner.memory.read("task", "ghost").await.unwrap().is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
