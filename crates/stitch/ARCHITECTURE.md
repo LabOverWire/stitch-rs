@@ -175,10 +175,29 @@ FK-safe replay order. Outcomes per attempt:
 | `Conflict + Insert` | switch to `sync_update` + drop |
 | anything else | drop + log |
 
+`flush` returns the number of rows it kept (retained as transient), so callers
+can tell a drained queue from one that needs another pass.
+
 A private `on_connected` task (in `src/store.rs`) flushes the queue twice on
 each `ConnectionStatus::Connected` event — first to replay, second to drain
 anything the first left as transient — then runs `sync_root_entity_list` and
-sets `initial_sync_done`.
+sets `initial_sync_done`. If the second flush still retains rows it wakes the
+flush loop (below) so they keep retrying.
+
+A private `flush_loop` task drains the queue while connected without waiting for
+a reconnect. `create`/`update`/`delete` wake it via a `tokio::sync::Notify`
+whenever a direct sync leaves a mutation parked — a transient failure, or (for
+`update`/`delete`) a `NotFound` from losing the create→update ordering race. The
+loop re-flushes after a 250ms backoff until the queue drains or the connection
+drops, so a mutation parked mid-session is retried in ~250ms instead of at the
+next reconnect.
+
+`initial_sync_done` is a within-session one-way latch: `false` until the first
+post-connect sync completes, then `true` across later reconnects and
+lag-triggered resyncs, cleared back to `false` only by `reset_for_logout`.
+Reconnects no longer bounce it to `false`, so readiness gates built on it stay
+stable under broker churn. Use `is_reconnecting` for a transient
+"currently resyncing" signal.
 
 A private `mutation_loop` task forwards inbound remote deliveries off the
 internal mutation bus into the cache. When a high write rate makes it fall

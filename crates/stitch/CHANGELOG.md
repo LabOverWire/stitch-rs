@@ -5,6 +5,29 @@ All notable changes to the `stitch` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-30
+
+### Fixed
+
+- Mutations whose direct `sync_update` lost the create→update ordering race were
+  parked in the offline queue and only retried on the next reconnect, starving
+  throughput while the connection stayed up. A new notify-driven `flush_loop`
+  task now drains the queue while connected: `create`/`update`/`delete` wake it
+  whenever a direct sync leaves a mutation parked, and it re-flushes after a
+  250ms backoff until the queue drains. `update` also treats a remote `NotFound`
+  like `delete` does — silenced and re-queued for recreate-from-local on flush —
+  removing the `remote update failed: entity not found` warning burst.
+- `initial_sync_done` is now a within-session one-way latch. `on_connected` no
+  longer resets it to `false` on every reconnect (only sets `true` after sync;
+  `reset_for_logout` still clears it), so readiness gates built on it stop
+  bouncing under broker churn.
+
+### Changed
+
+- `OfflineQueue::flush` returns `Result<usize>` (rows retained as transient) so
+  the flush loop can distinguish a drained queue from one needing another pass.
+  The trait is crate-internal, so no public-API break.
+
 ## [0.2.1] - 2026-05-30
 
 ### Fixed
