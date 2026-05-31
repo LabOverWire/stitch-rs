@@ -9,20 +9,32 @@ repository = "https://github.com/LabOverWire/stitch"
 readme = "README.md"
 
 [dependencies]
-arc-swap = "1.9.1"
 async-trait = "0.1.89"
-flume = "0.12.0"
-futures = "0.3.32"
-mqdb-agent = { version = "0.8.1", path = "../../../../MQDB/crates/mqdb-agent", default-features = false }
-mqdb-core = { version = "0.7.0", path = "../../../../MQDB/crates/mqdb-core" }
-mqtt5 = { version = "0.32.2", path = "../../../../mqtt-lib/crates/mqtt5" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
 tracing = "0.1.44"
 uuid = { version = "1.23.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arc-swap = "1.9.1"
+flume = "0.12.0"
+futures = "0.3.32"
+mqdb-agent = { version = "0.8.10", path = "../../../../MQDB/crates/mqdb-agent", default-features = false }
+mqdb-core = { version = "0.7.3", path = "../../../../MQDB/crates/mqdb-core" }
+mqtt5 = { version = "0.32.2", path = "../../../../mqtt-lib/crates/mqtt5" }
+tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+mqdb-core = { version = "0.7.3", path = "../../../../MQDB/crates/mqdb-core", default-features = false }
+mqdb-wasm = { version = "0.3.3", path = "../../../../MQDB/crates/mqdb-wasm" }
+serde-wasm-bindgen = "0.6"
+tokio = { version = "1.52.3", default-features = false, features = ["sync"] }
+uuid = { version = "1.23.1", features = ["v4", "v7", "js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"

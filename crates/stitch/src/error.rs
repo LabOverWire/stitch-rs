@@ -125,10 +125,20 @@ impl Error {
     #[must_use]
     pub fn is_corruption(&self) -> bool {
         match self {
-            Self::Mqdb { source, .. } => matches!(
-                source.as_ref(),
-                mqdb_core::error::Error::Corruption { .. } | mqdb_core::error::Error::Storage(_)
-            ),
+            Self::Mqdb { source, .. } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    matches!(
+                        source.as_ref(),
+                        mqdb_core::error::Error::Corruption { .. }
+                            | mqdb_core::error::Error::Storage(_)
+                    )
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    matches!(source.as_ref(), mqdb_core::error::Error::Corruption { .. })
+                }
+            }
             _ => false,
         }
     }

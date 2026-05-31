@@ -1,11 +1,9 @@
 use crate::config::{FieldType, StoreConfig};
 use crate::error::{Error, Result};
-use crate::types::Record;
 use mqdb_agent::Database;
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::schema::{FieldDefinition, FieldType as MqdbFieldType, Schema};
 use mqdb_core::storage::MemoryBackend;
-use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,14 +70,5 @@ pub(crate) fn map_field_type(ft: FieldType) -> MqdbFieldType {
         FieldType::Boolean => MqdbFieldType::Boolean,
         FieldType::Object => MqdbFieldType::Object,
         FieldType::Array => MqdbFieldType::Array,
-    }
-}
-
-pub(crate) fn value_to_record(value: Value) -> Result<Record> {
-    match value {
-        Value::Object(map) => Ok(map),
-        other => Err(Error::Config(format!(
-            "expected object record, got {other:?}"
-        ))),
     }
 }
