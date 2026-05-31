@@ -713,9 +713,11 @@ impl Store {
     /// remote is configured (so callers don't see stale local state during
     /// reconnect).
     #[cfg(target_arch = "wasm32")]
-    pub async fn list_root_entities(&self, _sort: Vec<SortField>) -> Result<Vec<Record>> {
+    pub async fn list_root_entities(&self, sort: Vec<SortField>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
-        inner.memory.list(&inner.config.scope.root_entity, "").await
+        let mut rows = inner.memory.list(&inner.config.scope.root_entity, "").await?;
+        sort_records(&mut rows, &sort);
+        Ok(rows)
     }
 
     /// List all root entities across all scopes, optionally sorted. Returns
@@ -1693,6 +1695,40 @@ fn sort_fields_to_orders(sort: &[SortField]) -> Vec<MqdbSortOrder> {
             },
         })
         .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sort_records(rows: &mut [Record], sort: &[crate::types::SortField]) {
+    use crate::types::SortDirection;
+    use std::cmp::Ordering;
+
+    fn compare(a: Option<&Value>, b: Option<&Value>) -> Ordering {
+        match (a, b) {
+            (Some(Value::Number(a)), Some(Value::Number(b))) => a
+                .as_f64()
+                .partial_cmp(&b.as_f64())
+                .unwrap_or(Ordering::Equal),
+            (Some(Value::String(a)), Some(Value::String(b))) => a.cmp(b),
+            (Some(Value::Bool(a)), Some(Value::Bool(b))) => a.cmp(b),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            _ => Ordering::Equal,
+        }
+    }
+
+    rows.sort_by(|a, b| {
+        for field in sort {
+            let ord = compare(a.get(&field.field), b.get(&field.field));
+            let ord = match field.direction {
+                SortDirection::Asc => ord,
+                SortDirection::Desc => ord.reverse(),
+            };
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    });
 }
 
 impl Drop for StoreInner {

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use stitch::config::{EntityDefinition, ScopeConfig};
 use stitch::types::Record;
 use stitch::{Origin, Store as CoreStore, StoreConfig, StoreEvent, StoreOptions};
+use tokio::sync::broadcast::error::RecvError;
 use wasm_bindgen::prelude::*;
 
 #[derive(Deserialize)]
@@ -161,11 +162,14 @@ impl Store {
     ) -> Result<(), JsValue> {
         let mut rx = self.inner.subscribe().map_err(err)?;
         wasm_bindgen_futures::spawn_local(async move {
-            while let Ok(event) = rx.recv().await {
-                if let StoreEvent::Mutation(mutation) = event
-                    && mutation.entity == entity
-                {
-                    let _ = callback.call0(&JsValue::NULL);
+            loop {
+                match rx.recv().await {
+                    Ok(StoreEvent::Mutation(mutation)) if mutation.entity == entity => {
+                        let _ = callback.call0(&JsValue::NULL);
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
                 }
             }
         });

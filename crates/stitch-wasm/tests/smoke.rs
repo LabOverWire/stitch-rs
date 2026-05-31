@@ -76,3 +76,46 @@ async fn subscribe_registers_in_browser() {
         .subscribe_to_entity("task".into(), callback)
         .expect("subscribe_to_entity");
 }
+
+#[wasm_bindgen_test]
+async fn subscribe_fires_on_matching_mutation_in_browser() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let store = stitch_wasm::create_store(config()).expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let hits = Rc::new(Cell::new(0u32));
+    let hits_cb = Rc::clone(&hits);
+    let closure = Closure::<dyn FnMut()>::new(move || hits_cb.set(hits_cb.get() + 1));
+    store
+        .subscribe_to_entity(
+            "task".into(),
+            closure.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+        )
+        .expect("subscribe_to_entity");
+
+    let row = js_sys::JSON::parse(r#"{"title":"hello"}"#).unwrap();
+    store
+        .create("task".into(), "p1".into(), row)
+        .await
+        .expect("create");
+
+    for _ in 0..50 {
+        if hits.get() > 0 {
+            break;
+        }
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        hits.get(),
+        1,
+        "subscription callback must fire exactly once for a matching mutation"
+    );
+    closure.forget();
+}
