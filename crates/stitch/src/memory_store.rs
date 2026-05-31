@@ -1,10 +1,9 @@
+use crate::backend::{DynDb, open_memory_db, value_to_record};
 use crate::config::StoreConfig;
-use crate::db_helpers::{open_memory_db, register_schemas, value_to_record};
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::rt::Shared;
 use crate::origin::Origin;
 use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent};
-use mqdb_agent::Database;
-use mqdb_core::types::{Filter, FilterOp, ScopeConfig as MqdbScopeConfig};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -14,13 +13,12 @@ pub struct MemoryStore {
     state: RwLock<State>,
     bus: broadcast::Sender<StoreEvent>,
     config: Arc<StoreConfig>,
-    mqdb_scope: MqdbScopeConfig,
     top_level: HashSet<String>,
     batch: Mutex<BatchState>,
 }
 
 struct State {
-    db: Arc<Database>,
+    db: DynDb,
     current_scope: Option<String>,
 }
 
@@ -32,13 +30,8 @@ struct BatchState {
 
 impl MemoryStore {
     pub async fn new(config: Arc<StoreConfig>) -> Result<Self> {
-        let db = open_memory_db().await?;
-        register_schemas(&db, &config).await?;
+        let db = open_memory_db(&config).await?;
         let (bus, _) = broadcast::channel(config.event_channel_capacity);
-        let mqdb_scope = MqdbScopeConfig::new(
-            config.scope.root_entity.clone(),
-            config.scope.scope_field.clone(),
-        );
         let top_level: HashSet<String> = config
             .top_level_entities
             .iter()
@@ -46,12 +39,11 @@ impl MemoryStore {
             .collect();
         Ok(Self {
             state: RwLock::new(State {
-                db: Arc::new(db),
+                db,
                 current_scope: None,
             }),
             bus,
             config,
-            mqdb_scope,
             top_level,
             batch: Mutex::new(BatchState::default()),
         })
@@ -87,8 +79,8 @@ impl MemoryStore {
         self.state.read().await.current_scope.clone()
     }
 
-    async fn db(&self) -> Arc<Database> {
-        Arc::clone(&self.state.read().await.db)
+    async fn db(&self) -> DynDb {
+        Shared::clone(&self.state.read().await.db)
     }
 
     pub async fn create(
@@ -107,17 +99,7 @@ impl MemoryStore {
         }
 
         let db = self.db().await;
-        let value = db
-            .create(
-                entity.to_string(),
-                Value::Object(data),
-                None,
-                None,
-                None,
-                &self.mqdb_scope,
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("create:{entity}"), e))?;
+        let value = db.create(entity, Value::Object(data)).await?;
 
         let record = value_to_record(value)?;
         let id = record
@@ -138,30 +120,16 @@ impl MemoryStore {
 
     pub async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>> {
         let db = self.db().await;
-        match db
-            .read(entity.to_string(), id.to_string(), Vec::new(), None)
-            .await
-        {
-            Ok(value) => Ok(Some(value_to_record(value)?)),
-            Err(mqdb_core::error::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(Error::mqdb(format!("read:{entity}"), e)),
+        match db.read(entity, id).await? {
+            Some(value) => Ok(Some(value_to_record(value)?)),
+            None => Ok(None),
         }
     }
 
     pub async fn list(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
         let db = self.db().await;
         let filters = self.list_filters(entity, scope_id);
-        let values = db
-            .list(
-                entity.to_string(),
-                filters,
-                Vec::new(),
-                None,
-                Vec::new(),
-                None,
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("list:{entity}"), e))?;
+        let values = db.list_eq(entity, &filters).await?;
         values.into_iter().map(value_to_record).collect()
     }
 
@@ -174,27 +142,7 @@ impl MemoryStore {
     ) -> Result<Record> {
         strip_nulls(&mut fields);
         let db = self.db().await;
-        let caller = mqdb_agent::CallerContext {
-            sender: None,
-            client_id: None,
-            scope_config: &self.mqdb_scope,
-        };
-        let updated = db
-            .update(
-                entity.to_string(),
-                id.to_string(),
-                Value::Object(fields),
-                None,
-                &caller,
-            )
-            .await
-            .map_err(|e| match e {
-                mqdb_core::error::Error::Conflict(_) => Error::Conflict {
-                    entity: entity.to_string(),
-                    id: id.to_string(),
-                },
-                other => Error::mqdb(format!("update:{entity}"), other),
-            })?;
+        let updated = db.update(entity, id, Value::Object(fields)).await?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {
             return Ok(record);
@@ -223,22 +171,7 @@ impl MemoryStore {
             .and_then(|r| self.resolve_scope(entity, r))
             .unwrap_or_default();
 
-        db.delete(
-            entity.to_string(),
-            id.to_string(),
-            None,
-            None,
-            &self.mqdb_scope,
-            &mqdb_core::types::OwnershipConfig::default(),
-        )
-        .await
-        .map_err(|e| match e {
-            mqdb_core::error::Error::Conflict(_) => Error::Conflict {
-                entity: entity.to_string(),
-                id: id.to_string(),
-            },
-            other => Error::mqdb(format!("delete:{entity}"), other),
-        })?;
+        db.delete(entity, id).await?;
 
         self.emit_mutation(MutationEvent {
             operation: Operation::Delete,
@@ -252,42 +185,17 @@ impl MemoryStore {
     }
 
     pub async fn load_scope(&self, scope_id: &str, bundle: ScopeBundle) -> Result<()> {
-        let fresh = open_memory_db().await?;
-        register_schemas(&fresh, &self.config).await?;
-        let fresh = Arc::new(fresh);
+        let fresh = open_memory_db(&self.config).await?;
 
         if let Some(root) = bundle.root {
             fresh
-                .create(
-                    self.config.scope.root_entity.clone(),
-                    Value::Object(root),
-                    None,
-                    None,
-                    None,
-                    &self.mqdb_scope,
-                )
-                .await
-                .map_err(|e| {
-                    Error::mqdb(
-                        format!("load_scope.create:{}", self.config.scope.root_entity),
-                        e,
-                    )
-                })?;
+                .create(&self.config.scope.root_entity, Value::Object(root))
+                .await?;
         }
 
         for (entity, records) in &bundle.children {
             for record in records {
-                fresh
-                    .create(
-                        entity.clone(),
-                        Value::Object(record.clone()),
-                        None,
-                        None,
-                        None,
-                        &self.mqdb_scope,
-                    )
-                    .await
-                    .map_err(|e| Error::mqdb(format!("load_scope.create:{entity}"), e))?;
+                fresh.create(entity, Value::Object(record.clone())).await?;
             }
         }
 
@@ -316,11 +224,10 @@ impl MemoryStore {
     }
 
     pub async fn clear_scope(&self, scope_id: &str) -> Result<()> {
-        let fresh = open_memory_db().await?;
-        register_schemas(&fresh, &self.config).await?;
+        let fresh = open_memory_db(&self.config).await?;
         {
             let mut state = self.state.write().await;
-            state.db = Arc::new(fresh);
+            state.db = fresh;
             if state.current_scope.as_deref() == Some(scope_id) {
                 state.current_scope = None;
             }
@@ -344,13 +251,12 @@ impl MemoryStore {
         let _ = self.bus.send(StoreEvent::Mutation(event));
     }
 
-    fn list_filters(&self, entity: &str, scope_id: &str) -> Vec<Filter> {
+    fn list_filters(&self, entity: &str, scope_id: &str) -> Vec<(String, Value)> {
         if entity == self.config.scope.root_entity || self.top_level.contains(entity) {
             Vec::new()
         } else {
-            vec![Filter::new(
+            vec![(
                 self.config.scope.scope_field.clone(),
-                FilterOp::Eq,
                 Value::String(scope_id.to_string()),
             )]
         }

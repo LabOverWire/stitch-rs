@@ -1,5 +1,6 @@
+use crate::backend::value_to_record;
 use crate::config::{PersistenceConfig, StoreConfig};
-use crate::db_helpers::{open_persistent_db, register_schemas, value_to_record};
+use crate::db_helpers::{open_persistent_db, register_schemas};
 use crate::error::{Error, Result};
 use crate::origin::Origin;
 use crate::types::{MutationEvent, Operation, Record, StoreEvent};

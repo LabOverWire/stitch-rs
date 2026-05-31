@@ -49,16 +49,24 @@ pub mod config;
 pub mod error;
 pub mod types;
 
+pub(crate) mod backend;
+pub(crate) mod rt;
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod db_helpers;
 
 #[doc(hidden)]
 pub mod memory_store;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod offline_queue;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod persistence;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod remote_sync;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod sync_engine;
 
