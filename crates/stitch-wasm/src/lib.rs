@@ -4,11 +4,13 @@
 //! when `createStore` is given a `persistence` option. MQTT remote sync lands
 //! in a later milestone.
 
+use futures::channel::oneshot;
+use futures::future::{Either, select};
 use serde::Deserialize;
 use std::collections::HashMap;
 use stitch::config::{EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig};
-use stitch::types::Record;
-use stitch::{Origin, Store as CoreStore, StoreConfig, StoreEvent, StoreOptions};
+use stitch::types::{ListFilter, MutationEvent, Operation, Record, SortDirection, SortField};
+use stitch::{Origin, Store as CoreStore, StoreConfig, StoreOptions};
 use tokio::sync::broadcast::error::RecvError;
 use wasm_bindgen::prelude::*;
 
@@ -72,6 +74,68 @@ fn record_from_js(js: &JsValue) -> Result<Record, JsValue> {
         serde_json::Value::Object(map) => Ok(map),
         other => Err(JsValue::from_str(&format!("expected object, got {other}"))),
     }
+}
+
+#[derive(Deserialize)]
+struct SortFieldDto {
+    field: String,
+    #[serde(default)]
+    direction: Option<String>,
+}
+
+impl From<SortFieldDto> for SortField {
+    fn from(dto: SortFieldDto) -> Self {
+        let direction = match dto.direction.as_deref() {
+            Some("desc") => SortDirection::Desc,
+            _ => SortDirection::Asc,
+        };
+        SortField {
+            field: dto.field,
+            direction,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ListFilterDto {
+    #[serde(default, rename = "scopeId")]
+    scope_id: Option<String>,
+    #[serde(default)]
+    sort: Vec<SortFieldDto>,
+    #[serde(default)]
+    projection: Vec<String>,
+}
+
+fn op_label(op: Operation) -> &'static str {
+    match op {
+        Operation::Insert => "insert",
+        Operation::Update => "update",
+        Operation::Delete => "delete",
+    }
+}
+
+/// Spawn a forwarder that drives `on_event` for each entity mutation until the
+/// returned unsubscribe function is called (or the channel closes). The returned
+/// `JsValue` is a one-shot JS function; calling it cancels the subscription.
+fn spawn_mutation_forwarder(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<MutationEvent>,
+    on_event: impl Fn(MutationEvent) + 'static,
+) -> JsValue {
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    wasm_bindgen_futures::spawn_local(async move {
+        futures::pin_mut!(cancel_rx);
+        loop {
+            let next = rx.recv();
+            futures::pin_mut!(next);
+            match select(next, &mut cancel_rx).await {
+                Either::Left((Some(event), _)) => on_event(event),
+                Either::Left((None, _)) | Either::Right(_) => break,
+            }
+        }
+    });
+    Closure::once_into_js(move || {
+        let _ = cancel_tx.send(());
+    })
 }
 
 /// Reactive state-sync store, browser flavour. Construct with [`create_store`],
@@ -268,8 +332,214 @@ impl Store {
         to_js(&serde_json::Value::Array(array))
     }
 
-    /// Invoke `callback` (no args) whenever a mutation for `entity` lands on the
-    /// memory bus.
+    /// List rows of `entity`, optionally filtered/sorted. `filter` is
+    /// `{ scopeId?, sort?: [{ field, direction }], projection?: [string] }`.
+    ///
+    /// # Errors
+    /// Returns an error if the read fails or `filter` is malformed.
+    pub async fn list(&self, entity: String, filter: JsValue) -> Result<JsValue, JsValue> {
+        let filter = if filter.is_undefined() || filter.is_null() {
+            None
+        } else {
+            let dto: ListFilterDto = serde_json::from_value(json_from_js(&filter)?).map_err(err)?;
+            Some(ListFilter {
+                scope_id: dto.scope_id,
+                sort: dto.sort.into_iter().map(SortField::from).collect(),
+                projection: dto.projection,
+            })
+        };
+        let rows = self.inner.list(&entity, filter).await.map_err(err)?;
+        let array = rows.into_iter().map(serde_json::Value::Object).collect();
+        to_js(&serde_json::Value::Array(array))
+    }
+
+    /// List all root entities across scopes, optionally sorted (`[{ field,
+    /// direction }]`).
+    ///
+    /// # Errors
+    /// Returns an error if the read fails or `sort` is malformed.
+    #[wasm_bindgen(js_name = "listRootEntities")]
+    pub async fn list_root_entities(&self, sort: JsValue) -> Result<JsValue, JsValue> {
+        let sort: Vec<SortField> = if sort.is_undefined() || sort.is_null() {
+            Vec::new()
+        } else {
+            let dtos: Vec<SortFieldDto> =
+                serde_json::from_value(json_from_js(&sort)?).map_err(err)?;
+            dtos.into_iter().map(SortField::from).collect()
+        };
+        let rows = self.inner.list_root_entities(sort).await.map_err(err)?;
+        let array = rows.into_iter().map(serde_json::Value::Object).collect();
+        to_js(&serde_json::Value::Array(array))
+    }
+
+    /// Count of rows of `entity` within `scopeId`.
+    ///
+    /// # Errors
+    /// Returns an error if the read fails.
+    #[wasm_bindgen(js_name = "getChildCount")]
+    pub async fn get_child_count(
+        &self,
+        entity: String,
+        scope_id: String,
+    ) -> Result<usize, JsValue> {
+        self.inner
+            .child_count(&entity, &scope_id)
+            .await
+            .map_err(err)
+    }
+
+    /// Snapshot of `entity` within `scopeId` as an object keyed by row id.
+    ///
+    /// # Errors
+    /// Returns an error if the read fails.
+    #[wasm_bindgen(js_name = "getSnapshotAsMap")]
+    pub async fn get_snapshot_as_map(
+        &self,
+        entity: String,
+        scope_id: String,
+    ) -> Result<JsValue, JsValue> {
+        let rows = self.inner.snapshot(&entity, &scope_id).await.map_err(err)?;
+        let mut map = serde_json::Map::new();
+        for row in rows {
+            let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);
+            if let Some(id) = id {
+                map.insert(id, serde_json::Value::Object(row));
+            }
+        }
+        to_js(&serde_json::Value::Object(map))
+    }
+
+    /// Unsubscribe from a scope's remote topics and clear it from the active
+    /// scope if it was current.
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    #[wasm_bindgen(js_name = "closeScope")]
+    pub async fn close_scope(&self, scope_id: String) -> Result<(), JsValue> {
+        self.inner.close_scope(&scope_id).await.map_err(err)
+    }
+
+    /// `true` once [`Store::initialize`] has completed.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        self.inner.ready()
+    }
+
+    /// `true` if durable IndexedDB persistence is configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "hasPersistence")]
+    pub fn has_persistence(&self) -> Result<bool, JsValue> {
+        self.inner.has_persistence().map_err(err)
+    }
+
+    /// `true` if remote sync is configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "hasRemote")]
+    pub fn has_remote(&self) -> Result<bool, JsValue> {
+        self.inner.has_remote().map_err(err)
+    }
+
+    /// `true` while the remote client is between connections.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "isReconnecting")]
+    pub fn is_reconnecting(&self) -> Result<bool, JsValue> {
+        self.inner.is_reconnecting().map_err(err)
+    }
+
+    /// Disconnect the remote client. Memory and persistence are unaffected.
+    ///
+    /// # Errors
+    /// Returns an error if the disconnect fails.
+    pub async fn disconnect(&self) -> Result<(), JsValue> {
+        self.inner.disconnect().await.map_err(err)
+    }
+
+    /// Reconnect the remote client, optionally with a fresh JWT ticket.
+    ///
+    /// # Errors
+    /// Returns an error if no remote is configured or the reconnect fails.
+    pub async fn reconnect(
+        &self,
+        server_url: String,
+        ticket: Option<String>,
+    ) -> Result<(), JsValue> {
+        self.inner.reconnect(&server_url, ticket).await.map_err(err)
+    }
+
+    /// Disconnect, clear auth + sync state. Persistence and the offline queue
+    /// stay alive; drop the store to fully reset.
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    #[wasm_bindgen(js_name = "resetForLogout")]
+    pub async fn reset_for_logout(&self) -> Result<(), JsValue> {
+        self.inner.reset_for_logout().await.map_err(err)
+    }
+
+    /// Disconnect the remote, close persistence, and abort background tasks.
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    pub async fn destroy(&self) -> Result<(), JsValue> {
+        self.inner.shutdown().await.map_err(err)
+    }
+
+    /// Defer memory-bus notifications until [`Store::end_batch`]; rapid bursts
+    /// collapse to one event per `(scope, entity)`.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "beginBatch")]
+    pub fn begin_batch(&self) -> Result<(), JsValue> {
+        self.inner.begin_batch().map_err(err)
+    }
+
+    /// Flush the batch opened by [`Store::begin_batch`].
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "endBatch")]
+    pub fn end_batch(&self) -> Result<(), JsValue> {
+        self.inner.end_batch().map_err(err)
+    }
+
+    /// Upsert into persistence directly, bypassing memory and remote.
+    ///
+    /// # Errors
+    /// Returns an error if the write fails.
+    #[wasm_bindgen(js_name = "updateLocalState")]
+    pub async fn update_local_state(
+        &self,
+        entity: String,
+        id: String,
+        fields: JsValue,
+    ) -> Result<(), JsValue> {
+        let record = record_from_js(&fields)?;
+        self.inner
+            .update_local_state(&entity, &id, record)
+            .await
+            .map_err(err)
+    }
+
+    /// Send an arbitrary MQTT request and await the broker's response.
+    ///
+    /// # Errors
+    /// Returns an error if no remote is configured or the request fails.
+    pub async fn request(&self, topic: String, payload: JsValue) -> Result<JsValue, JsValue> {
+        let payload = json_from_js(&payload)?;
+        let record = self.inner.request(&topic, payload).await.map_err(err)?;
+        to_js(&serde_json::Value::Object(record))
+    }
+
+    /// Subscribe to mutations for `entity`. The callback receives
+    /// `(data | null, op)` where `op` is `"insert" | "update" | "delete"`.
+    /// Returns an unsubscribe function.
     ///
     /// # Errors
     /// Returns an error if the store is not initialized.
@@ -278,20 +548,74 @@ impl Store {
         &self,
         entity: String,
         callback: js_sys::Function,
-    ) -> Result<(), JsValue> {
-        let mut rx = self.inner.subscribe().map_err(err)?;
+    ) -> Result<JsValue, JsValue> {
+        let rx = self.inner.subscribe_entity(&entity).map_err(err)?;
+        Ok(spawn_mutation_forwarder(rx, move |event| {
+            let data = match event.data {
+                Some(record) => to_js(&serde_json::Value::Object(record)).unwrap_or(JsValue::NULL),
+                None => JsValue::NULL,
+            };
+            let _ = callback.call2(
+                &JsValue::NULL,
+                &data,
+                &JsValue::from_str(op_label(event.operation)),
+            );
+        }))
+    }
+
+    /// Subscribe to mutations for `(scopeId, entity)`. The callback takes no
+    /// args (a "scope changed" signal). Returns an unsubscribe function.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "subscribeToScope")]
+    pub fn subscribe_to_scope(
+        &self,
+        scope_id: String,
+        entity: String,
+        callback: js_sys::Function,
+    ) -> Result<JsValue, JsValue> {
+        let rx = self
+            .inner
+            .subscribe_scope_entity(&scope_id, &entity)
+            .map_err(err)?;
+        Ok(spawn_mutation_forwarder(rx, move |_event| {
+            let _ = callback.call0(&JsValue::NULL);
+        }))
+    }
+
+    /// Subscribe to remote connection-status changes; the callback receives the
+    /// status string. Returns an unsubscribe function (a no-op when no remote is
+    /// configured).
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "subscribeToConnectionStatus")]
+    pub fn subscribe_to_connection_status(
+        &self,
+        callback: js_sys::Function,
+    ) -> Result<JsValue, JsValue> {
+        let Some(mut rx) = self.inner.subscribe_connection_status().map_err(err)? else {
+            return Ok(Closure::once_into_js(|| {}));
+        };
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         wasm_bindgen_futures::spawn_local(async move {
+            futures::pin_mut!(cancel_rx);
             loop {
-                match rx.recv().await {
-                    Ok(StoreEvent::Mutation(mutation)) if mutation.entity == entity => {
-                        let _ = callback.call0(&JsValue::NULL);
+                let next = rx.recv();
+                futures::pin_mut!(next);
+                match select(next, &mut cancel_rx).await {
+                    Either::Left((Ok(status), _)) => {
+                        let _ = callback
+                            .call1(&JsValue::NULL, &JsValue::from_str(&format!("{status:?}")));
                     }
-                    Ok(_) => {}
-                    Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => break,
+                    Either::Left((Err(RecvError::Lagged(_)), _)) => {}
+                    Either::Left((Err(RecvError::Closed), _)) | Either::Right(_) => break,
                 }
             }
         });
-        Ok(())
+        Ok(Closure::once_into_js(move || {
+            let _ = cancel_tx.send(());
+        }))
     }
 }

@@ -255,6 +255,16 @@ impl Store {
         self.inner.get().is_some()
     }
 
+    /// `true` if durable persistence is configured.
+    pub fn has_persistence(&self) -> Result<bool> {
+        Ok(self.inner()?.persistence.is_some())
+    }
+
+    /// `true` if remote sync is configured.
+    pub fn has_remote(&self) -> Result<bool> {
+        Ok(self.inner()?.remote.is_some())
+    }
+
     /// `true` once the first post-connect sync has finished, and stays `true`
     /// across later reconnects and lag-triggered resyncs (a one-way latch). It
     /// resets to `false` only on [`Store::reset_for_logout`]. When no remote is
@@ -780,7 +790,6 @@ impl Store {
 
     /// Disconnect the remote MQTT client. Pending requests are drained with
     /// [`Error::ConnectionClosed`]. Memory and persistence are unaffected.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn disconnect(&self) -> Result<()> {
         if let Some(remote) = &self.inner()?.remote {
             let _ = remote.disconnect().await;
@@ -804,7 +813,6 @@ impl Store {
     }
 
     /// Reconnect the remote client, optionally with a fresh auth ticket.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
@@ -904,7 +912,6 @@ impl Store {
     /// Send an arbitrary MQTT request and await the broker's response.
     /// Returns `Error::Config` if no remote is configured. For built-in CRUD,
     /// prefer the typed methods on `Store`.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn request(&self, topic: &str, payload: Value) -> Result<Record> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
