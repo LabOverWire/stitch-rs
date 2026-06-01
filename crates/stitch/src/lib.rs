@@ -60,7 +60,6 @@ pub mod memory_store;
 #[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod offline_queue;
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod persistence;
 #[cfg(not(target_arch = "wasm32"))]

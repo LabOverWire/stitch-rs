@@ -1,4 +1,3 @@
-use crate::db_helpers::register_entity_schema;
 use crate::error::Result;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
@@ -310,7 +309,9 @@ pub struct PersistentOfflineQueue {
 impl PersistentOfflineQueue {
     pub async fn new(persistence: Arc<PersistenceLayer>, root_entity: String) -> Result<Self> {
         let pending_def = pending_sync_definition();
-        register_entity_schema(&persistence.database(), PENDING_ENTITY, &pending_def).await?;
+        persistence
+            .register_schema(PENDING_ENTITY, &pending_def)
+            .await?;
         Ok(Self {
             persistence,
             root_entity,

@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::rt::Shared;
 use crate::origin::Origin;
 use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent};
+use mqdb_core::types::{Filter, FilterOp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -129,7 +130,9 @@ impl MemoryStore {
     pub async fn list(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
         let db = self.db().await;
         let filters = self.list_filters(entity, scope_id);
-        let values = db.list_eq(entity, &filters).await?;
+        let values = db
+            .list(entity, filters, Vec::new(), None, Vec::new())
+            .await?;
         values.into_iter().map(value_to_record).collect()
     }
 
@@ -251,12 +254,13 @@ impl MemoryStore {
         let _ = self.bus.send(StoreEvent::Mutation(event));
     }
 
-    fn list_filters(&self, entity: &str, scope_id: &str) -> Vec<(String, Value)> {
+    fn list_filters(&self, entity: &str, scope_id: &str) -> Vec<Filter> {
         if entity == self.config.scope.root_entity || self.top_level.contains(entity) {
             Vec::new()
         } else {
-            vec![(
+            vec![Filter::new(
                 self.config.scope.scope_field.clone(),
+                FilterOp::Eq,
                 Value::String(scope_id.to_string()),
             )]
         }

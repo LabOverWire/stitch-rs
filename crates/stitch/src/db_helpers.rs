@@ -3,17 +3,7 @@ use crate::error::{Error, Result};
 use mqdb_agent::Database;
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::schema::{FieldDefinition, FieldType as MqdbFieldType, Schema};
-use mqdb_core::storage::MemoryBackend;
 use std::path::Path;
-use std::sync::Arc;
-
-pub(crate) async fn open_memory_db() -> Result<Database> {
-    let backend: Arc<dyn mqdb_core::storage::StorageBackend> = Arc::new(MemoryBackend::new());
-    let config = DatabaseConfig::new("stitch-memory").without_background_tasks();
-    Database::open_with_backend(backend, config)
-        .await
-        .map_err(|e| Error::mqdb("open_memory_db", e))
-}
 
 pub(crate) async fn open_persistent_db(path: &Path, passphrase: Option<&str>) -> Result<Database> {
     let mut config = DatabaseConfig::new(path.to_path_buf()).without_background_tasks();

@@ -1,7 +1,8 @@
 use super::{Db, DynDb};
-use crate::config::{FieldType, SchemaField, StoreConfig};
+use crate::config::{EntityDefinition, FieldType, PersistenceConfig, SchemaField, StoreConfig};
 use crate::error::{Error, Result};
 use crate::rt::Shared;
+use mqdb_core::types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
 use mqdb_wasm::WasmDatabase;
 use serde_json::{Value, json};
 use wasm_bindgen::JsValue;
@@ -34,6 +35,28 @@ fn field_type_str(ft: FieldType) -> &'static str {
     }
 }
 
+fn filter_op_str(op: &FilterOp) -> &'static str {
+    match op {
+        FilterOp::Eq => "eq",
+        FilterOp::Neq => "neq",
+        FilterOp::Lt => "lt",
+        FilterOp::Lte => "lte",
+        FilterOp::Gt => "gt",
+        FilterOp::Gte => "gte",
+        FilterOp::In => "in",
+        FilterOp::Like => "like",
+        FilterOp::IsNull => "is_null",
+        FilterOp::IsNotNull => "is_not_null",
+    }
+}
+
+fn sort_dir_str(dir: &SortDirection) -> &'static str {
+    match dir {
+        SortDirection::Asc => "asc",
+        SortDirection::Desc => "desc",
+    }
+}
+
 fn schema_js(fields: &[SchemaField]) -> Value {
     let fields: Vec<Value> = fields
         .iter()
@@ -51,18 +74,38 @@ fn schema_js(fields: &[SchemaField]) -> Value {
     json!({ "fields": fields })
 }
 
-pub(crate) async fn open_memory(config: &StoreConfig) -> Result<DynDb> {
-    let db = WasmDatabase::new();
+async fn register_all(db: &WasmDb, config: &StoreConfig) -> Result<()> {
     for (name, def) in config
         .entities
         .iter()
         .chain(config.local_only_entities.iter())
     {
-        let schema = to_js(&schema_js(&def.fields))?;
-        db.add_schema(name.clone(), schema)
-            .map_err(|e| js_err("add_schema", &e))?;
+        db.register_schema(name, def).await?;
     }
-    Ok(Shared::new(WasmDb { db }))
+    Ok(())
+}
+
+pub(crate) async fn open_memory(config: &StoreConfig) -> Result<DynDb> {
+    let db = WasmDb {
+        db: WasmDatabase::new(),
+    };
+    register_all(&db, config).await?;
+    Ok(Shared::new(db))
+}
+
+pub(crate) async fn open_persistent(
+    config: &StoreConfig,
+    persistence: &PersistenceConfig,
+) -> Result<DynDb> {
+    let name = persistence.db_path.to_string_lossy();
+    let inner = match persistence.passphrase.as_deref() {
+        Some(pass) => WasmDatabase::open_encrypted(&name, pass).await,
+        None => WasmDatabase::open_persistent(&name).await,
+    }
+    .map_err(|e| js_err("open_persistent", &e))?;
+    let db = WasmDb { db: inner };
+    register_all(&db, config).await?;
+    Ok(Shared::new(db))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -107,12 +150,37 @@ impl Db for WasmDb {
             .map_err(|e| js_err("delete", &e))
     }
 
-    async fn list_eq(&self, entity: &str, filters: &[(String, Value)]) -> Result<Vec<Value>> {
+    async fn list(
+        &self,
+        entity: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        projection: Vec<String>,
+    ) -> Result<Vec<Value>> {
         let filter_js: Vec<Value> = filters
             .iter()
-            .map(|(field, value)| json!({ "field": field, "op": "eq", "value": value }))
+            .map(|f| json!({ "field": f.field, "op": filter_op_str(&f.op), "value": f.value }))
             .collect();
-        let options = to_js(&json!({ "filters": filter_js }))?;
+        let mut options = serde_json::Map::new();
+        options.insert("filters".into(), Value::Array(filter_js));
+        if !sort.is_empty() {
+            let sort_js: Vec<Value> = sort
+                .iter()
+                .map(|s| json!({ "field": s.field, "direction": sort_dir_str(&s.direction) }))
+                .collect();
+            options.insert("sort".into(), Value::Array(sort_js));
+        }
+        if let Some(p) = pagination {
+            options.insert("pagination".into(), json!({ "offset": p.offset, "limit": p.limit }));
+        }
+        if !projection.is_empty() {
+            options.insert(
+                "projection".into(),
+                Value::Array(projection.into_iter().map(Value::String).collect()),
+            );
+        }
+        let options = to_js(&Value::Object(options))?;
         let out = self
             .db
             .list(entity.to_string(), options)
@@ -123,4 +191,32 @@ impl Db for WasmDb {
             other => Err(Error::Config(format!("list returned non-array: {other:?}"))),
         }
     }
+
+    async fn register_schema(&self, name: &str, def: &EntityDefinition) -> Result<()> {
+        let schema = to_js(&schema_js(&def.fields))?;
+        if self.db.is_memory_backend() {
+            self.db
+                .add_schema(name.to_string(), schema)
+                .map_err(|e| js_err("add_schema", &e))?;
+            for index_field in &def.indexes {
+                self.db
+                    .add_index(name.to_string(), vec![index_field.clone()])
+                    .map_err(|e| js_err("add_index", &e))?;
+            }
+        } else {
+            self.db
+                .add_schema_async(name.to_string(), schema)
+                .await
+                .map_err(|e| js_err("add_schema_async", &e))?;
+            for index_field in &def.indexes {
+                self.db
+                    .add_index_async(name.to_string(), vec![index_field.clone()])
+                    .await
+                    .map_err(|e| js_err("add_index_async", &e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn close(&self) {}
 }

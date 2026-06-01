@@ -1,18 +1,25 @@
 use super::{Db, DynDb};
-use crate::config::StoreConfig;
-use crate::db_helpers::register_schemas;
+use crate::config::{EntityDefinition, PersistenceConfig, StoreConfig};
+use crate::db_helpers::{open_persistent_db, register_entity_schema, register_schemas};
 use crate::error::{Error, Result};
 use crate::rt::Shared;
 use mqdb_agent::{CallerContext, Database};
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::storage::MemoryBackend;
-use mqdb_core::types::{Filter, FilterOp, OwnershipConfig, ScopeConfig as MqdbScopeConfig};
+use mqdb_core::types::{Filter, OwnershipConfig, Pagination, ScopeConfig as MqdbScopeConfig, SortOrder};
 use serde_json::Value;
 use std::sync::Arc;
 
 pub(crate) struct NativeDb {
     db: Database,
     scope: MqdbScopeConfig,
+}
+
+fn scope_of(config: &StoreConfig) -> MqdbScopeConfig {
+    MqdbScopeConfig::new(
+        config.scope.root_entity.clone(),
+        config.scope.scope_field.clone(),
+    )
 }
 
 pub(crate) async fn open_memory(config: &StoreConfig) -> Result<DynDb> {
@@ -22,11 +29,22 @@ pub(crate) async fn open_memory(config: &StoreConfig) -> Result<DynDb> {
         .await
         .map_err(|e| Error::mqdb("open_memory_db", e))?;
     register_schemas(&db, config).await?;
-    let scope = MqdbScopeConfig::new(
-        config.scope.root_entity.clone(),
-        config.scope.scope_field.clone(),
-    );
-    Ok(Shared::new(NativeDb { db, scope }))
+    Ok(Shared::new(NativeDb {
+        db,
+        scope: scope_of(config),
+    }))
+}
+
+pub(crate) async fn open_persistent(
+    config: &StoreConfig,
+    persistence: &PersistenceConfig,
+) -> Result<DynDb> {
+    let db = open_persistent_db(&persistence.db_path, persistence.passphrase.as_deref()).await?;
+    register_schemas(&db, config).await?;
+    Ok(Shared::new(NativeDb {
+        db,
+        scope: scope_of(config),
+    }))
 }
 
 #[async_trait::async_trait]
@@ -88,14 +106,25 @@ impl Db for NativeDb {
             })
     }
 
-    async fn list_eq(&self, entity: &str, filters: &[(String, Value)]) -> Result<Vec<Value>> {
-        let filters: Vec<Filter> = filters
-            .iter()
-            .map(|(field, value)| Filter::new(field.clone(), FilterOp::Eq, value.clone()))
-            .collect();
+    async fn list(
+        &self,
+        entity: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        projection: Vec<String>,
+    ) -> Result<Vec<Value>> {
         self.db
-            .list(entity.to_string(), filters, Vec::new(), None, Vec::new(), None)
+            .list(entity.to_string(), filters, sort, pagination, projection, None)
             .await
             .map_err(|e| Error::mqdb(format!("list:{entity}"), e))
+    }
+
+    async fn register_schema(&self, name: &str, def: &EntityDefinition) -> Result<()> {
+        register_entity_schema(&self.db, name, def).await
+    }
+
+    fn close(&self) {
+        self.db.shutdown();
     }
 }

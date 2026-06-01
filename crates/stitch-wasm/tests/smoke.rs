@@ -1,6 +1,7 @@
 //! In-browser smoke test for the wasm `Store`. Drives the in-memory store
-//! through create/read/snapshot and registers a subscription, proving the
-//! `mqdb-wasm`-backed core runs under real WebAssembly. Run with
+//! through create/read/snapshot, registers a subscription, and exercises
+//! IndexedDB persistence (plaintext + encrypted) across a store reopen,
+//! proving the `mqdb-wasm`-backed core runs under real WebAssembly. Run with
 //! `wasm-pack test --headless --chrome crates/stitch-wasm`.
 
 #![cfg(target_arch = "wasm32")]
@@ -25,7 +26,7 @@ fn config() -> JsValue {
 
 #[wasm_bindgen_test]
 async fn create_read_snapshot_in_browser() {
-    let store = stitch_wasm::create_store(config()).expect("create_store");
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
     store.initialize().await.expect("initialize");
 
     let first = js_sys::JSON::parse(r#"{"title":"first"}"#).unwrap();
@@ -53,7 +54,7 @@ async fn create_read_snapshot_in_browser() {
 
 #[wasm_bindgen_test]
 async fn scope_isolation_in_browser() {
-    let store = stitch_wasm::create_store(config()).expect("create_store");
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
     store.initialize().await.expect("initialize");
 
     let a = js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap();
@@ -69,7 +70,7 @@ async fn scope_isolation_in_browser() {
 
 #[wasm_bindgen_test]
 async fn subscribe_registers_in_browser() {
-    let store = stitch_wasm::create_store(config()).expect("create_store");
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
     store.initialize().await.expect("initialize");
     let callback = js_sys::Function::new_no_args("");
     store
@@ -84,7 +85,7 @@ async fn subscribe_fires_on_matching_mutation_in_browser() {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
-    let store = stitch_wasm::create_store(config()).expect("create_store");
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
     store.initialize().await.expect("initialize");
 
     let hits = Rc::new(Cell::new(0u32));
@@ -118,4 +119,78 @@ async fn subscribe_fires_on_matching_mutation_in_browser() {
         "subscription callback must fire exactly once for a matching mutation"
     );
     closure.forget();
+}
+
+fn persist_options(db_name: &str) -> JsValue {
+    js_sys::JSON::parse(&format!(r#"{{"persistence":{{"dbName":"{db_name}"}}}}"#)).unwrap()
+}
+
+fn encrypted_options(db_name: &str, passphrase: &str) -> JsValue {
+    js_sys::JSON::parse(&format!(
+        r#"{{"persistence":{{"dbName":"{db_name}","passphrase":"{passphrase}"}}}}"#
+    ))
+    .unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn persistence_survives_reopen_in_browser() {
+    let id = {
+        let store = stitch_wasm::create_store(config(), persist_options("stitch-m2-reopen"))
+            .expect("create_store");
+        store.initialize().await.expect("initialize");
+        let row = js_sys::JSON::parse(r#"{"title":"durable"}"#).unwrap();
+        store
+            .create("task".into(), "p1".into(), row)
+            .await
+            .expect("create")
+    };
+
+    let store = stitch_wasm::create_store(config(), persist_options("stitch-m2-reopen"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let got = store
+        .read_local_state("task".into(), id)
+        .await
+        .expect("read_local_state");
+    assert!(!got.is_null(), "persisted row must survive a store reopen");
+
+    store
+        .replace_scope("p1".into())
+        .await
+        .expect("replace_scope");
+    let rows = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).await.unwrap());
+    assert_eq!(
+        rows.length(),
+        1,
+        "reopened store rehydrates the task from IndexedDB"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn encrypted_persistence_round_trip_in_browser() {
+    let id = {
+        let store =
+            stitch_wasm::create_store(config(), encrypted_options("stitch-m2-enc", "s3cret"))
+                .expect("create_store");
+        store.initialize().await.expect("initialize");
+        let row = js_sys::JSON::parse(r#"{"title":"secret"}"#).unwrap();
+        store
+            .create("task".into(), "p1".into(), row)
+            .await
+            .expect("create")
+    };
+
+    let store = stitch_wasm::create_store(config(), encrypted_options("stitch-m2-enc", "s3cret"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let got = store
+        .read_local_state("task".into(), id)
+        .await
+        .expect("read_local_state");
+    assert!(
+        !got.is_null(),
+        "encrypted persisted row must round-trip with the correct passphrase"
+    );
 }
