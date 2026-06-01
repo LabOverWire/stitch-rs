@@ -1,11 +1,12 @@
 //! Browser bindings for [`stitch`]. Exposes a `createStore` factory and a
-//! `Store` class to JavaScript via `wasm-bindgen`, backed by the in-memory
-//! `mqdb-wasm` store. IndexedDB persistence and MQTT remote sync land in later
-//! milestones; this milestone covers the in-memory core.
+//! `Store` class to JavaScript via `wasm-bindgen`. The store runs the
+//! `mqdb-wasm` core: in-memory by default, or durable IndexedDB persistence
+//! when `createStore` is given a `persistence` option. MQTT remote sync lands
+//! in a later milestone.
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use stitch::config::{EntityDefinition, ScopeConfig};
+use stitch::config::{EntityDefinition, PersistenceConfig, ScopeConfig};
 use stitch::types::Record;
 use stitch::{Origin, Store as CoreStore, StoreConfig, StoreEvent, StoreOptions};
 use tokio::sync::broadcast::error::RecvError;
@@ -25,6 +26,20 @@ struct ScopeDto {
 struct ConfigDto {
     entities: HashMap<String, EntityDefinition>,
     scope: ScopeDto,
+}
+
+#[derive(Deserialize)]
+struct PersistenceDto {
+    #[serde(rename = "dbName")]
+    db_name: String,
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct OptionsDto {
+    #[serde(default)]
+    persistence: Option<PersistenceDto>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> JsValue {
@@ -58,11 +73,21 @@ pub struct Store {
 /// Build an unopened [`Store`] from a config object
 /// (`{ entities, scope: { rootEntity, childEntities, scopeField } }`).
 ///
+/// Pass an optional second argument to enable durable IndexedDB persistence:
+/// `{ persistence: { dbName, passphrase? } }`. With `passphrase` the store is
+/// AES-GCM encrypted; without it, plaintext IndexedDB. Omit the argument for an
+/// in-memory store.
+///
 /// # Errors
-/// Returns an error if the config object is malformed.
+/// Returns an error if the config or options object is malformed.
 #[wasm_bindgen(js_name = "createStore")]
-pub fn create_store(config: JsValue) -> Result<Store, JsValue> {
+pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue> {
     let dto: ConfigDto = serde_json::from_value(json_from_js(&config)?).map_err(err)?;
+    let opts: OptionsDto = if options.is_undefined() || options.is_null() {
+        OptionsDto::default()
+    } else {
+        serde_json::from_value(json_from_js(&options)?).map_err(err)?
+    };
     let cfg = StoreConfig::new(
         dto.entities,
         ScopeConfig {
@@ -71,8 +96,15 @@ pub fn create_store(config: JsValue) -> Result<Store, JsValue> {
             scope_field: dto.scope.scope_field,
         },
     );
+    let store_options = StoreOptions {
+        persistence: opts.persistence.map(|p| PersistenceConfig {
+            db_path: p.db_name.into(),
+            passphrase: p.passphrase,
+        }),
+        remote: None,
+    };
     Ok(Store {
-        inner: CoreStore::new(cfg, StoreOptions::default()),
+        inner: CoreStore::new(cfg, store_options),
     })
 }
 
@@ -135,6 +167,36 @@ impl Store {
             .delete(&entity, &id, Origin::Local)
             .await
             .map_err(err)
+    }
+
+    /// Read a row straight from durable persistence, bypassing the in-memory
+    /// cache. Returns `null` if absent. Falls back to memory when the store has
+    /// no persistence configured.
+    ///
+    /// # Errors
+    /// Returns an error if the read fails.
+    #[wasm_bindgen(js_name = "readLocalState")]
+    pub async fn read_local_state(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
+        match self
+            .inner
+            .read_local_state(&entity, &id)
+            .await
+            .map_err(err)?
+        {
+            Some(record) => to_js(&serde_json::Value::Object(record)),
+            None => Ok(JsValue::NULL),
+        }
+    }
+
+    /// Switch the active scope, loading its rows from persistence into the
+    /// in-memory cache. Use after reopening a persistent store to rehydrate a
+    /// scope's snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the load fails.
+    #[wasm_bindgen(js_name = "replaceScope")]
+    pub async fn replace_scope(&self, scope_id: String) -> Result<(), JsValue> {
+        self.inner.replace_scope(&scope_id).await.map_err(err)
     }
 
     /// Snapshot of all rows for `entity` within `scopeId`. Equivalent to TS

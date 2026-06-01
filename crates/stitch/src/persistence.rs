@@ -1,48 +1,48 @@
-use crate::backend::value_to_record;
-use crate::config::{PersistenceConfig, StoreConfig};
-use crate::db_helpers::{open_persistent_db, register_schemas};
-use crate::error::{Error, Result};
+use crate::backend::{DynDb, open_persistent_db, value_to_record};
+use crate::config::{EntityDefinition, PersistenceConfig, StoreConfig};
+use crate::error::Result;
 use crate::origin::Origin;
 use crate::types::{MutationEvent, Operation, Record, StoreEvent};
-use arc_swap::ArcSwap;
-use mqdb_agent::Database;
-use mqdb_core::types::{Filter, FilterOp, Pagination, ScopeConfig as MqdbScopeConfig, SortOrder};
+use mqdb_core::types::{Filter, FilterOp, Pagination, SortOrder};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Durable local store: fjall natively, IndexedDB on wasm. Routes all record
+/// access through the backend [`Db`] trait; owns the mutation bus and
+/// scope-resolution logic shared by both platforms.
 pub struct PersistenceLayer {
-    db: ArcSwap<Database>,
+    #[cfg(not(target_arch = "wasm32"))]
+    db: std::sync::RwLock<DynDb>,
+    #[cfg(target_arch = "wasm32")]
+    db: DynDb,
     bus: tokio::sync::broadcast::Sender<StoreEvent>,
     config: Arc<StoreConfig>,
+    #[cfg(not(target_arch = "wasm32"))]
     persistence_config: PersistenceConfig,
-    mqdb_scope: MqdbScopeConfig,
     top_level: HashSet<String>,
     suppress: AtomicBool,
 }
 
 impl PersistenceLayer {
     pub async fn open(persistence: &PersistenceConfig, config: Arc<StoreConfig>) -> Result<Self> {
-        let db =
-            open_persistent_db(&persistence.db_path, persistence.passphrase.as_deref()).await?;
-        register_schemas(&db, &config).await?;
+        let db = open_persistent_db(&config, persistence).await?;
         let (bus, _) = tokio::sync::broadcast::channel(config.event_channel_capacity);
-        let mqdb_scope = MqdbScopeConfig::new(
-            config.scope.root_entity.clone(),
-            config.scope.scope_field.clone(),
-        );
         let top_level: HashSet<String> = config
             .top_level_entities
             .iter()
             .map(|t| t.entity.clone())
             .collect();
         Ok(Self {
-            db: ArcSwap::new(Arc::new(db)),
+            #[cfg(not(target_arch = "wasm32"))]
+            db: std::sync::RwLock::new(db),
+            #[cfg(target_arch = "wasm32")]
+            db,
             bus,
             config,
+            #[cfg(not(target_arch = "wasm32"))]
             persistence_config: persistence.clone(),
-            mqdb_scope,
             top_level,
             suppress: AtomicBool::new(false),
         })
@@ -56,26 +56,36 @@ impl PersistenceLayer {
         self.suppress.store(suppress, Ordering::SeqCst);
     }
 
-    pub fn database(&self) -> Arc<Database> {
-        self.db.load_full()
+    #[cfg(not(target_arch = "wasm32"))]
+    fn db(&self) -> DynDb {
+        self.db.read().expect("persistence db lock").clone()
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn db(&self) -> DynDb {
+        crate::rt::Shared::clone(&self.db)
+    }
+
+    /// Register an extra entity schema on the durable store (e.g. the offline
+    /// queue's pending-mutation table).
+    pub async fn register_schema(&self, name: &str, def: &EntityDefinition) -> Result<()> {
+        self.db().register_schema(name, def).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn recover(&self) -> Result<()> {
-        let placeholder = crate::db_helpers::open_memory_db().await?;
-        let old = self.db.swap(Arc::new(placeholder));
-        old.shutdown();
+        let placeholder = crate::backend::open_memory_db(&self.config).await?;
+        let old = {
+            let mut guard = self.db.write().expect("persistence db lock");
+            std::mem::replace(&mut *guard, placeholder)
+        };
+        old.close();
         drop(old);
 
         for attempt in 0..10 {
-            match open_persistent_db(
-                &self.persistence_config.db_path,
-                self.persistence_config.passphrase.as_deref(),
-            )
-            .await
-            {
+            match open_persistent_db(&self.config, &self.persistence_config).await {
                 Ok(fresh) => {
-                    register_schemas(&fresh, &self.config).await?;
-                    self.db.store(Arc::new(fresh));
+                    *self.db.write().expect("persistence db lock") = fresh;
                     return Ok(());
                 }
                 Err(err) if attempt < 9 => {
@@ -89,19 +99,7 @@ impl PersistenceLayer {
     }
 
     pub async fn create(&self, entity: &str, data: Record, origin: Origin) -> Result<Record> {
-        let db = self.database();
-        let value = db
-            .create(
-                entity.to_string(),
-                Value::Object(data),
-                None,
-                None,
-                None,
-                &self.mqdb_scope,
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("persistence.create:{entity}"), e))?;
-
+        let value = self.db().create(entity, Value::Object(data)).await?;
         let record = value_to_record(value)?;
         let id = record
             .get("id")
@@ -121,14 +119,9 @@ impl PersistenceLayer {
     }
 
     pub async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>> {
-        let db = self.database();
-        match db
-            .read(entity.to_string(), id.to_string(), Vec::new(), None)
-            .await
-        {
-            Ok(value) => Ok(Some(value_to_record(value)?)),
-            Err(mqdb_core::error::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(Error::mqdb(format!("persistence.read:{entity}"), e)),
+        match self.db().read(entity, id).await? {
+            Some(value) => Ok(Some(value_to_record(value)?)),
+            None => Ok(None),
         }
     }
 
@@ -139,22 +132,7 @@ impl PersistenceLayer {
         fields: Record,
         origin: Origin,
     ) -> Result<Record> {
-        let caller = mqdb_agent::CallerContext {
-            sender: None,
-            client_id: None,
-            scope_config: &self.mqdb_scope,
-        };
-        let db = self.database();
-        let updated = db
-            .update(
-                entity.to_string(),
-                id.to_string(),
-                Value::Object(fields),
-                None,
-                &caller,
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("persistence.update:{entity}"), e))?;
+        let updated = self.db().update(entity, id, Value::Object(fields)).await?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {
             return Ok(record);
@@ -182,17 +160,7 @@ impl PersistenceLayer {
             .and_then(|r| self.resolve_scope(entity, r))
             .unwrap_or_default();
 
-        let db = self.database();
-        db.delete(
-            entity.to_string(),
-            id.to_string(),
-            None,
-            None,
-            &self.mqdb_scope,
-            &mqdb_core::types::OwnershipConfig::default(),
-        )
-        .await
-        .map_err(|e| Error::mqdb(format!("persistence.delete:{entity}"), e))?;
+        self.db().delete(entity, id).await?;
 
         self.emit_mutation(MutationEvent {
             operation: Operation::Delete,
@@ -224,18 +192,10 @@ impl PersistenceLayer {
         pagination: Option<Pagination>,
         projection: Vec<String>,
     ) -> Result<Vec<Record>> {
-        let db = self.database();
-        let values = db
-            .list(
-                entity.to_string(),
-                filters,
-                sort,
-                pagination,
-                projection,
-                None,
-            )
-            .await
-            .map_err(|e| Error::mqdb(format!("persistence.list:{entity}"), e))?;
+        let values = self
+            .db()
+            .list(entity, filters, sort, pagination, projection)
+            .await?;
         values.into_iter().map(value_to_record).collect()
     }
 
@@ -259,7 +219,7 @@ impl PersistenceLayer {
     }
 
     pub fn close(&self) {
-        self.database().shutdown();
+        self.db().close();
     }
 
     fn emit_mutation(&self, event: MutationEvent) {
