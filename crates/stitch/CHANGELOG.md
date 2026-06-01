@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MQTT v5 JWT enhanced-auth now works in the browser**: the wasm remote adapter
+  sends the JWT as the CONNECT `authentication_data` (method `"JWT"`) and answers
+  any broker `AUTH(Continue)` challenge with a no-op (matching native
+  `JwtAuthHandler`'s `Success`). `RemoteConfig` gained a static `ticket: Option<String>`
+  (used when no `get_ticket` provider is set), surfaced as
+  `createStore(config, { remote: { url, ticket } })`. Per-connect token refresh
+  via an async JS provider on wasm is a future enhancement.
+
+
 - The **durable offline queue is now cross-platform** (`wasm32` too): writes made
   in the browser while disconnected are buffered (in IndexedDB via the persistent
   queue, or in memory) and replayed to the broker on reconnect. The

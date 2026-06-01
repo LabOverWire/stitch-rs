@@ -272,3 +272,21 @@ async fn encrypted_persistence_round_trip_in_browser() {
         "encrypted persisted row must round-trip with the correct passphrase"
     );
 }
+
+#[wasm_bindgen_test]
+async fn remote_with_jwt_connects_without_panicking() {
+    let opts = js_sys::JSON::parse(
+        r#"{"remote":{"url":"ws://127.0.0.1:1","ticket":"header.payload.sig"}}"#,
+    )
+    .unwrap();
+    let store = stitch_wasm::create_store(config(), opts).expect("create_store");
+    store
+        .initialize()
+        .await
+        .expect("initialize with a JWT ticket sets enhanced auth and attempts connect");
+    let status = store.connection_status().expect("connection_status");
+    assert_ne!(
+        status, "Connected",
+        "must not report Connected against a dead broker"
+    );
+}
