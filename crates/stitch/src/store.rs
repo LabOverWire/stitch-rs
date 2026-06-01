@@ -18,14 +18,12 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, broadcast};
 
+use crate::offline_queue::{InMemoryOfflineQueue, PersistentOfflineQueue};
 use crate::queue::OfflineQueue;
 use crate::remote_sync::{LocalAccessor, RemoteSyncLayer};
 use crate::sync_engine::MutationDelivery;
 use crate::types::{Operation, SyncMutation};
 use async_trait::async_trait;
-
-#[cfg(not(target_arch = "wasm32"))]
-use crate::offline_queue::{InMemoryOfflineQueue, PersistentOfflineQueue};
 
 /// Reactive state-sync facade over an in-memory cache, fjall persistence, and
 /// MQTT5 remote sync. Construct with [`Store::new`], call [`Store::initialize`]
@@ -52,14 +50,12 @@ struct StoreInner {
     memory: Shared<MemoryStore>,
     persistence: Option<Shared<PersistenceLayer>>,
     remote: Option<Shared<RemoteSyncLayer>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    queue: Option<Arc<dyn OfflineQueue>>,
+    queue: Option<Shared<dyn OfflineQueue>>,
     state: Mutex<StoreState>,
     #[cfg(not(target_arch = "wasm32"))]
     reconnect_validator: Mutex<Option<ReconnectValidator>>,
     replace_scope_lock: tokio::sync::Mutex<()>,
     tasks: Mutex<Vec<JoinHandle>>,
-    #[cfg(not(target_arch = "wasm32"))]
     flush_notify: tokio::sync::Notify,
 }
 
@@ -242,7 +238,6 @@ impl Store {
     pub fn set_authenticated_user(&self, user_id: Option<String>) -> Result<()> {
         let inner = self.inner()?;
         inner.state.lock().unwrap().authenticated_user = user_id.clone();
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(q) = &inner.queue {
             q.set_authenticated_user(user_id);
         }
@@ -329,7 +324,6 @@ impl Store {
             let _ = persistence.create(entity, data.clone(), origin).await;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(queue) = &inner.queue
             && has_sync_target
             && !origin.skips_remote()
@@ -352,18 +346,14 @@ impl Store {
             && has_sync_target
         {
             match remote.sync_create(entity, &effective_scope, data).await {
-                Ok(_) =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Ok(_) => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue
                             .remove(entity, &id, &effective_scope, Operation::Insert)
                             .await;
                     }
                 }
-                Err(err) if err.is_ownership() =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Err(err) if err.is_ownership() => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue
                             .remove(entity, &id, &effective_scope, Operation::Insert)
@@ -371,7 +361,6 @@ impl Store {
                     }
                 }
                 Err(err) if err.is_transient() => {
-                    #[cfg(not(target_arch = "wasm32"))]
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -464,7 +453,6 @@ impl Store {
             return Ok(());
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(queue) = &inner.queue
             && !origin.skips_remote()
         {
@@ -485,22 +473,17 @@ impl Store {
             && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_update(entity, &scope_id, id, fields).await {
-                Ok(()) =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Ok(()) => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
-                Err(err) if err.is_ownership() =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Err(err) if err.is_ownership() => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
                 Err(err) if err.is_not_found() || err.is_transient() => {
-                    #[cfg(not(target_arch = "wasm32"))]
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -574,7 +557,6 @@ impl Store {
             return Ok(());
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(queue) = &inner.queue
             && !origin.skips_remote()
         {
@@ -595,22 +577,17 @@ impl Store {
             && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_delete(entity, &scope_id, id).await {
-                Ok(()) =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Ok(()) => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
-                Err(err) if err.is_ownership() =>
-                {
-                    #[cfg(not(target_arch = "wasm32"))]
+                Err(err) if err.is_ownership() => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
                 Err(err) if err.is_not_found() || err.is_transient() => {
-                    #[cfg(not(target_arch = "wasm32"))]
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -703,6 +680,17 @@ impl Store {
     /// in-memory cache. Equivalent to TS `getSnapshot`.
     pub async fn snapshot(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
         self.inner()?.memory.list(entity, scope_id).await
+    }
+
+    /// Number of offline-queued mutations buffered for `scope_id`. `0` when no
+    /// offline queue is configured (no remote). Counts only the authenticated
+    /// user's pending writes.
+    pub async fn pending_count(&self, scope_id: &str) -> Result<usize> {
+        let inner = self.inner()?;
+        match &inner.queue {
+            Some(queue) => Ok(queue.pending_for_scope(scope_id).await?.len()),
+            None => Ok(0),
+        }
     }
 
     /// Count of rows of an entity within a scope. Uses persistence when
@@ -950,7 +938,6 @@ impl Store {
             state.last_connection_status = ConnectionStatus::Offline;
             state.has_been_connected = false;
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(queue) = &inner.queue {
             queue.set_authenticated_user(None);
         }
@@ -1002,13 +989,12 @@ impl StoreInner {
             None
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let queue: Option<Arc<dyn OfflineQueue>> = match (&persistence, remote.is_some()) {
-            (Some(p), true) => Some(Arc::new(
-                PersistentOfflineQueue::new(Arc::clone(p), config.scope.root_entity.clone())
+        let queue: Option<Shared<dyn OfflineQueue>> = match (&persistence, remote.is_some()) {
+            (Some(p), true) => Some(Shared::new(
+                PersistentOfflineQueue::new(Shared::clone(p), config.scope.root_entity.clone())
                     .await?,
             )),
-            (None, true) => Some(Arc::new(InMemoryOfflineQueue::new(
+            (None, true) => Some(Shared::new(InMemoryOfflineQueue::new(
                 config.scope.root_entity.clone(),
             ))),
             _ => None,
@@ -1019,7 +1005,6 @@ impl StoreInner {
             memory,
             persistence,
             remote,
-            #[cfg(not(target_arch = "wasm32"))]
             queue,
             state: Mutex::new(StoreState {
                 current_scope: None,
@@ -1032,7 +1017,6 @@ impl StoreInner {
             reconnect_validator: Mutex::new(None),
             replace_scope_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
-            #[cfg(not(target_arch = "wasm32"))]
             flush_notify: tokio::sync::Notify::new(),
         });
 
@@ -1050,11 +1034,8 @@ impl StoreInner {
             inner.tasks.lock().unwrap().push(mutation_task);
             inner.tasks.lock().unwrap().push(status_task);
 
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let flush_task = rt::spawn(flush_loop(Shared::clone(&inner)));
-                inner.tasks.lock().unwrap().push(flush_task);
-            }
+            let flush_task = rt::spawn(flush_loop(Shared::clone(&inner)));
+            inner.tasks.lock().unwrap().push(flush_task);
 
             if let Some(remote_cfg) = &options.remote {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1278,10 +1259,7 @@ async fn resync_after_lag(inner: &Shared<StoreInner>, remote: &dyn RemoteSyncOps
     }
     let user = inner.state.lock().unwrap().authenticated_user.clone();
     let accessor = inner.local_accessor();
-    #[cfg(not(target_arch = "wasm32"))]
     let queue_ref = inner.queue.as_deref();
-    #[cfg(target_arch = "wasm32")]
-    let queue_ref: Option<&dyn OfflineQueue> = None;
     if let Err(err) = remote
         .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
         .await
@@ -1311,8 +1289,7 @@ async fn status_loop(inner: Shared<StoreInner>, mut rx: broadcast::Receiver<Conn
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn flush_loop(inner: Arc<StoreInner>) {
+async fn flush_loop(inner: Shared<StoreInner>) {
     const RETAIN_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
     loop {
         inner.flush_notify.notified().await;
@@ -1337,7 +1314,7 @@ async fn flush_loop(inner: Arc<StoreInner>) {
             if retained == 0 {
                 break;
             }
-            tokio::time::sleep(RETAIN_BACKOFF).await;
+            rt::sleep(RETAIN_BACKOFF).await;
         }
     }
 }
@@ -1541,10 +1518,7 @@ async fn on_connected(inner: Shared<StoreInner>) {
     let remote = inner.remote.clone();
     let accessor = inner.local_accessor();
 
-    #[cfg(not(target_arch = "wasm32"))]
     let queue_ref = inner.queue.as_deref();
-    #[cfg(target_arch = "wasm32")]
-    let queue_ref: Option<&dyn OfflineQueue> = None;
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -1554,15 +1528,15 @@ async fn on_connected(inner: Shared<StoreInner>) {
         {
             tracing::warn!(error = %err, "reconnect validator failed");
         }
+    }
 
-        if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
-            let sender: &dyn crate::queue::MutationSender = remote.as_ref();
-            let _ = queue.flush(sender).await;
-            if let Ok(retained) = queue.flush(sender).await
-                && retained > 0
-            {
-                inner.flush_notify.notify_one();
-            }
+    if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
+        let sender: &dyn crate::queue::MutationSender = remote.as_ref();
+        let _ = queue.flush(sender).await;
+        if let Ok(retained) = queue.flush(sender).await
+            && retained > 0
+        {
+            inner.flush_notify.notify_one();
         }
     }
 

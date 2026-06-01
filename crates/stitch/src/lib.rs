@@ -58,7 +58,6 @@ pub(crate) mod db_helpers;
 
 #[doc(hidden)]
 pub mod memory_store;
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod offline_queue;
 #[doc(hidden)]

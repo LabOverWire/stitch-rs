@@ -2,6 +2,7 @@ use crate::error::Result;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
 pub use crate::queue::{MutationSender, OfflineQueue};
+use crate::rt::{Shared, new_id, now_millis};
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
 use mqdb_core::types::{Filter, FilterOp};
@@ -10,6 +11,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const PENDING_ENTITY: &str = "pending_sync";
+
+#[cfg(not(target_arch = "wasm32"))]
+type RemoveFuture = futures::future::BoxFuture<'static, ()>;
+#[cfg(target_arch = "wasm32")]
+type RemoveFuture = futures::future::LocalBoxFuture<'static, ()>;
+
+/// Box a queue-removal future for the platform: a `Send` `BoxFuture` natively, a
+/// `!Send` `LocalBoxFuture` on wasm (the persistent queue captures `Rc`).
+#[cfg(not(target_arch = "wasm32"))]
+fn box_fut(fut: impl std::future::Future<Output = ()> + Send + 'static) -> RemoveFuture {
+    use futures::FutureExt;
+    fut.boxed()
+}
+#[cfg(target_arch = "wasm32")]
+fn box_fut(fut: impl std::future::Future<Output = ()> + 'static) -> RemoveFuture {
+    use futures::FutureExt;
+    fut.boxed_local()
+}
 
 #[derive(Debug, Clone)]
 struct ConsolidatedMutation {
@@ -37,14 +56,6 @@ fn parse_op(label: &str) -> Option<Operation> {
         "delete" => Some(Operation::Delete),
         _ => None,
     }
-}
-
-fn now_millis() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -159,9 +170,8 @@ async fn flush_consolidated(
     consolidated: Vec<ConsolidatedMutation>,
     sender: &dyn MutationSender,
     root_entity: &str,
-    mut remove_records: impl FnMut(Vec<String>) -> futures::future::BoxFuture<'static, ()>,
+    mut remove_records: impl FnMut(Vec<String>) -> RemoveFuture,
 ) -> usize {
-    use futures::FutureExt;
     let mut retained = 0usize;
     for mutation in consolidated {
         let attempt = match mutation.op {
@@ -258,7 +268,7 @@ async fn flush_consolidated(
 
         match outcome {
             FlushOutcome::Drop => {
-                remove_records(mutation.record_ids).boxed().await;
+                remove_records(mutation.record_ids).await;
             }
             FlushOutcome::Keep => {
                 retained += 1;
@@ -274,14 +284,14 @@ enum FlushOutcome {
 }
 
 pub struct PersistentOfflineQueue {
-    persistence: Arc<PersistenceLayer>,
+    persistence: Shared<PersistenceLayer>,
     root_entity: String,
     authenticated_user: Mutex<Option<String>>,
     flushing: Mutex<bool>,
 }
 
 impl PersistentOfflineQueue {
-    pub async fn new(persistence: Arc<PersistenceLayer>, root_entity: String) -> Result<Self> {
+    pub async fn new(persistence: Shared<PersistenceLayer>, root_entity: String) -> Result<Self> {
         let pending_def = pending_sync_definition();
         persistence
             .register_schema(PENDING_ENTITY, &pending_def)
@@ -307,7 +317,8 @@ impl PersistentOfflineQueue {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl OfflineQueue for PersistentOfflineQueue {
     async fn queue(&self, mutation: PendingMutation) -> Result<()> {
         let Some(user) = self.current_user() else {
@@ -319,7 +330,7 @@ impl OfflineQueue for PersistentOfflineQueue {
             );
             return Ok(());
         };
-        let row_id = uuid::Uuid::now_v7().to_string();
+        let row_id = new_id();
         let created_at = if mutation.created_at == 0 {
             now_millis()
         } else {
@@ -462,16 +473,14 @@ impl PersistentOfflineQueue {
             return Ok(0);
         }
         let consolidated = consolidate(rows);
-        let persistence = Arc::clone(&self.persistence);
+        let persistence = Shared::clone(&self.persistence);
         let remove = move |ids: Vec<String>| {
-            let persistence = Arc::clone(&persistence);
-            use futures::FutureExt;
-            async move {
+            let persistence = Shared::clone(&persistence);
+            box_fut(async move {
                 for id in ids {
                     let _ = persistence.delete(PENDING_ENTITY, &id, Origin::Local).await;
                 }
-            }
-            .boxed()
+            })
         };
         let retained = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
         Ok(retained)
@@ -495,11 +504,12 @@ impl InMemoryOfflineQueue {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl OfflineQueue for InMemoryOfflineQueue {
     async fn queue(&self, mutation: PendingMutation) -> Result<()> {
         let row = StoredRow {
-            record_id: uuid::Uuid::now_v7().to_string(),
+            record_id: new_id(),
             op: mutation.op,
             entity: mutation.entity,
             entity_id: mutation.id,
@@ -547,11 +557,9 @@ impl OfflineQueue for InMemoryOfflineQueue {
         let remove_set_clone = Arc::clone(&remove_set);
         let remove = move |ids: Vec<String>| {
             let set = Arc::clone(&remove_set_clone);
-            use futures::FutureExt;
-            async move {
+            box_fut(async move {
                 set.lock().expect("remove_set lock").extend(ids);
-            }
-            .boxed()
+            })
         };
         let retained = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
         let flushed: Vec<String> = remove_set.lock().expect("remove_set lock").clone();

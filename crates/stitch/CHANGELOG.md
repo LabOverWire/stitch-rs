@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The **durable offline queue is now cross-platform** (`wasm32` too): writes made
+  in the browser while disconnected are buffered (in IndexedDB via the persistent
+  queue, or in memory) and replayed to the broker on reconnect. The
+  `OfflineQueue`/`MutationSender` traits gained the `?Send` wasm split, the
+  concrete queues route time/id through `rt::now_millis`/`rt::new_id`, and
+  `rt::sleep` backs the flush-retry loop. `stitch-wasm` exposes
+  `setAuthenticatedUser` (the queue scopes writes per user) and
+  `pendingMutationCount(scopeId)`.
+
+
 - `wasm32` builds now support **remote MQTT sync over WebSocket** via
   `mqtt5-wasm`. The MQTT client sits behind an `MqttClientApi` trait, so
   `SyncEngine`'s request/response, scope-fetch, and live-mutation logic is shared

@@ -1,8 +1,6 @@
 use crate::config::StoreConfig;
 use crate::error::Result;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::queue::MutationSender;
-use crate::queue::OfflineQueue;
+use crate::queue::{MutationSender, OfflineQueue};
 use crate::rt::Shared;
 use crate::sync_engine::{MutationDelivery, SyncEngine};
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
@@ -387,8 +385,8 @@ impl RemoteSyncLayer {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl MutationSender for RemoteSyncLayer {
     async fn sync_create(&self, entity: &str, scope_id: &str, data: Record) -> Result<()> {
         self.sync_create(entity, scope_id, data).await.map(|_| ())
