@@ -146,6 +146,28 @@ impl Store {
         Ok(format!("{status:?}"))
     }
 
+    /// Set (or clear, with `null`/`undefined`) the authenticated user. Offline
+    /// writes are scoped to this user and are dropped while it is unset, so call
+    /// this before issuing writes you want queued for replay.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "setAuthenticatedUser")]
+    pub fn set_authenticated_user(&self, user_id: Option<String>) -> Result<(), JsValue> {
+        self.inner.set_authenticated_user(user_id).map_err(err)
+    }
+
+    /// Number of offline-queued mutations buffered for `scopeId` (the
+    /// authenticated user's pending writes). `0` when no remote/queue is
+    /// configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "pendingMutationCount")]
+    pub async fn pending_mutation_count(&self, scope_id: String) -> Result<usize, JsValue> {
+        self.inner.pending_count(&scope_id).await.map_err(err)
+    }
+
     /// Insert a row into `entity` under `scopeId`. Returns the new row's id.
     ///
     /// # Errors

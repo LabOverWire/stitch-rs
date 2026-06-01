@@ -136,6 +136,53 @@ fn remote_options(url: &str) -> JsValue {
     js_sys::JSON::parse(&format!(r#"{{"remote":{{"url":"{url}"}}}}"#)).unwrap()
 }
 
+fn persist_remote_options(db_name: &str, url: &str) -> JsValue {
+    js_sys::JSON::parse(&format!(
+        r#"{{"persistence":{{"dbName":"{db_name}"}},"remote":{{"url":"{url}"}}}}"#
+    ))
+    .unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn offline_write_queues_and_survives_reopen_in_browser() {
+    let opts = || persist_remote_options("stitch-m31-queue", "ws://127.0.0.1:1");
+
+    {
+        let store = stitch_wasm::create_store(config(), opts()).expect("create_store");
+        store.initialize().await.expect("initialize");
+        store
+            .set_authenticated_user(Some("u1".into()))
+            .expect("set user");
+        let row = js_sys::JSON::parse(r#"{"title":"queued"}"#).unwrap();
+        store
+            .create("task".into(), "p1".into(), row)
+            .await
+            .expect("create while offline");
+        let pending = store
+            .pending_mutation_count("p1".into())
+            .await
+            .expect("pending count");
+        assert!(
+            pending >= 1,
+            "a write made while disconnected must be queued"
+        );
+    }
+
+    let store = stitch_wasm::create_store(config(), opts()).expect("create_store");
+    store.initialize().await.expect("initialize");
+    store
+        .set_authenticated_user(Some("u1".into()))
+        .expect("set user");
+    let pending = store
+        .pending_mutation_count("p1".into())
+        .await
+        .expect("pending count");
+    assert!(
+        pending >= 1,
+        "the queued offline write must survive a reopen via IndexedDB"
+    );
+}
+
 #[wasm_bindgen_test]
 async fn remote_connect_failure_is_graceful_in_browser() {
     let store = stitch_wasm::create_store(config(), remote_options("ws://127.0.0.1:1"))

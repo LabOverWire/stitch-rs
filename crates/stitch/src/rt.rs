@@ -85,3 +85,32 @@ pub(crate) async fn timeout<F: Future>(
         Either::Right(((), _)) => Err(()),
     }
 }
+
+/// Milliseconds since the Unix epoch. Native reads `SystemTime`; wasm reads
+/// `Date.now()` (`SystemTime` panics on `wasm32-unknown-unknown`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now_millis() -> u64 {
+    js_sys::Date::now() as u64
+}
+
+/// Sleep for `duration`. Native uses `tokio::time`; wasm uses a `gloo_timers`
+/// browser timer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    tokio::time::sleep(duration).await;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    let millis = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
+    gloo_timers::future::TimeoutFuture::new(millis).await;
+}
