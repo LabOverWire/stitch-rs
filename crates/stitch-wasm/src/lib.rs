@@ -41,6 +41,8 @@ struct RemoteDto {
     url: String,
     #[serde(default, rename = "clientId")]
     client_id: Option<String>,
+    #[serde(default)]
+    ticket: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -84,9 +86,10 @@ pub struct Store {
 ///
 /// Pass an optional second argument to enable durable IndexedDB persistence
 /// and/or remote MQTT-over-WebSocket sync:
-/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId? } }`.
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket? } }`.
 /// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
-/// must be a `ws://`/`wss://` endpoint; `initialize` then connects and live
+/// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
+/// enhanced auth when the broker requires it. `initialize` then connects and live
 /// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
 /// for an in-memory store.
 ///
@@ -114,7 +117,11 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
             db_path: p.db_name.into(),
             passphrase: p.passphrase,
         }),
-        remote: opts.remote.map(|r| RemoteConfig::new(r.url)),
+        remote: opts.remote.map(|r| {
+            let mut cfg = RemoteConfig::new(r.url);
+            cfg.ticket = r.ticket;
+            cfg
+        }),
     };
     let inner = match client_id {
         Some(id) => CoreStore::with_client_id(cfg, store_options, id),

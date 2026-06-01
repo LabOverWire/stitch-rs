@@ -1041,10 +1041,10 @@ impl StoreInner {
                 #[cfg(not(target_arch = "wasm32"))]
                 let ticket = match &remote_cfg.get_ticket {
                     Some(provider) => Some(provider().await?),
-                    None => None,
+                    None => remote_cfg.ticket.clone(),
                 };
                 #[cfg(target_arch = "wasm32")]
-                let ticket: Option<String> = None;
+                let ticket: Option<String> = remote_cfg.ticket.clone();
                 let _ = remote.connect(&remote_cfg.server_url, ticket).await;
             }
         }

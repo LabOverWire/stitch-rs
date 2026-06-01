@@ -33,15 +33,27 @@ fn js_err(ctx: &str, e: &JsValue) -> Error {
 #[async_trait::async_trait(?Send)]
 impl MqttClientApi for WasmMqttClientAdapter {
     async fn connect(&self, url: &str, args: ConnectArgs) -> Result<ConnectOutcome> {
-        if args.jwt_ticket.is_some() {
-            tracing::warn!(
-                "stitch wasm remote: JWT auth is not yet supported; connecting without a ticket"
-            );
-        }
         let mut opts = WasmConnectOptions::new();
         opts.set_cleanStart(args.clean_start);
         opts.set_keepAlive(u16::try_from(args.keep_alive_secs).unwrap_or(u16::MAX));
         opts.set_sessionExpiryInterval(Some(args.session_expiry_secs));
+        if let Some(ticket) = &args.jwt_ticket {
+            // MQTT v5 enhanced auth: the JWT travels as the CONNECT auth data,
+            // mirroring the native `JwtAuthHandler`. A broker `AUTH(Continue)`
+            // challenge is answered by doing nothing (never call `respond_auth`),
+            // matching the native handler's `Success` — but a callback must be
+            // registered or `mqtt5-wasm` errors when a challenge arrives.
+            opts.set_authenticationMethod(Some("JWT".into()));
+            opts.set_authenticationData(ticket.as_bytes());
+            let on_challenge = Closure::<dyn FnMut()>::new(|| {});
+            self.client.on_auth_challenge(
+                on_challenge
+                    .as_ref()
+                    .unchecked_ref::<js_sys::Function>()
+                    .clone(),
+            );
+            self.callbacks.borrow_mut().push(on_challenge);
+        }
         self.client
             .connect_with_options(url, &opts)
             .await
