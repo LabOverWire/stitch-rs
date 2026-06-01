@@ -23,7 +23,11 @@ pub fn peer_id_from_fingerprint(fingerprint: &str) -> Option<PeerId> {
         out[count] = u8::from_str_radix(byte_hex, 16).ok()?;
         count += 1;
     }
-    if count == PEER_ID_LEN { Some(out) } else { None }
+    if count == PEER_ID_LEN {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -187,10 +191,7 @@ async fn bridge(
         let rx = node.register_session();
         let _ = session::run(node.state(), recv, send, rx, pull_interval).await;
     }
-    connected
-        .lock()
-        .expect("connected lock")
-        .remove(&remote_id);
+    connected.lock().expect("connected lock").remove(&remote_id);
 }
 
 #[cfg(test)]

@@ -20,10 +20,19 @@ async fn state_survives_reopen() {
 
     {
         let store = Store::open(peer(1), &path).unwrap();
-        store.create("task", "t1", json!({"title": "alpha"})).await.unwrap();
-        store.create("task", "t2", json!({"title": "beta"})).await.unwrap();
+        store
+            .create("task", "t1", json!({"title": "alpha"}))
+            .await
+            .unwrap();
+        store
+            .create("task", "t2", json!({"title": "beta"}))
+            .await
+            .unwrap();
         store.delete("task", "t2").await;
-        assert_eq!(store.read("task", "t1").await, Some(json!({"title": "alpha"})));
+        assert_eq!(
+            store.read("task", "t1").await,
+            Some(json!({"title": "alpha"}))
+        );
         assert_eq!(store.read("task", "t2").await, None);
     }
 

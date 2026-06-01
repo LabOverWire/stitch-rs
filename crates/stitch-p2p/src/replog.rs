@@ -8,7 +8,10 @@ pub type Cursors = HashMap<PeerId, u64>;
 pub enum RecordOutcome {
     Appended,
     Duplicate,
-    Gap { expected: u64, got: u64 },
+    Gap {
+        expected: u64,
+        got: u64,
+    },
     /// The frame failed authentication/authorization and was not recorded.
     Rejected,
 }
@@ -103,7 +106,9 @@ impl ReplLog {
         let Some(log) = self.observed.get_mut(origin) else {
             return 0;
         };
-        let drop = usize::try_from(up_to - base).unwrap_or(usize::MAX).min(log.len());
+        let drop = usize::try_from(up_to - base)
+            .unwrap_or(usize::MAX)
+            .min(log.len());
         log.drain(..drop);
         self.base.insert(*origin, base + drop as u64);
         drop
@@ -152,12 +157,20 @@ mod tests {
         log.record(frame(2, 3));
 
         assert_eq!(log.truncate(&peer(2), 2), 2);
-        assert_eq!(log.cursor_for(&peer(2)), 3, "cursor unchanged after truncate");
+        assert_eq!(
+            log.cursor_for(&peer(2)),
+            3,
+            "cursor unchanged after truncate"
+        );
         assert_eq!(log.next_seq(&peer(2)), 4);
 
         let mut from2 = Cursors::new();
         from2.insert(peer(2), 2);
-        assert_eq!(log.delta_since(&from2).len(), 1, "only seq 3 remains to serve");
+        assert_eq!(
+            log.delta_since(&from2).len(),
+            1,
+            "only seq 3 remains to serve"
+        );
 
         assert_eq!(
             log.record(frame(2, 4)),
@@ -188,7 +201,10 @@ mod tests {
         log.record(frame(2, 1));
         assert_eq!(
             log.record(frame(2, 3)),
-            RecordOutcome::Gap { expected: 2, got: 3 }
+            RecordOutcome::Gap {
+                expected: 2,
+                got: 3
+            }
         );
         assert_eq!(log.cursor_for(&peer(2)), 1);
     }

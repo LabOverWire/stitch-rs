@@ -63,7 +63,10 @@ fn schema_js(fields: &[SchemaField]) -> Value {
         .map(|f| {
             let mut obj = serde_json::Map::new();
             obj.insert("name".into(), Value::String(f.name.clone()));
-            obj.insert("type".into(), Value::String(field_type_str(f.r#type).into()));
+            obj.insert(
+                "type".into(),
+                Value::String(field_type_str(f.r#type).into()),
+            );
             obj.insert("required".into(), Value::Bool(f.required));
             if let Some(default) = &f.default {
                 obj.insert("default".into(), default.clone());
@@ -172,7 +175,10 @@ impl Db for WasmDb {
             options.insert("sort".into(), Value::Array(sort_js));
         }
         if let Some(p) = pagination {
-            options.insert("pagination".into(), json!({ "offset": p.offset, "limit": p.limit }));
+            options.insert(
+                "pagination".into(),
+                json!({ "offset": p.offset, "limit": p.limit }),
+            );
         }
         if !projection.is_empty() {
             options.insert(

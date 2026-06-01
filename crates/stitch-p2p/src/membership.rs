@@ -276,10 +276,7 @@ mod tests {
     #[test]
     fn unrooted_records_are_ignored() {
         // 2 and 3 grant each other but neither is rooted in the owner.
-        let records = vec![
-            (pid(2), pid(3), Role::Admin),
-            (pid(3), pid(2), Role::Admin),
-        ];
+        let records = vec![(pid(2), pid(3), Role::Admin), (pid(3), pid(2), Role::Admin)];
         let set = authorized_members(pid(1), &records);
         assert_eq!(set.len(), 1);
         assert_eq!(set.get(&pid(1)), Some(&Role::Owner));

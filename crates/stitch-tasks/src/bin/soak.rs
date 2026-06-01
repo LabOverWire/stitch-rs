@@ -30,10 +30,14 @@ async fn main() {
     let (_, report) = run_chaos(cfg).await;
     let elapsed = start.elapsed();
 
-    println!("  ops:        add {} / rename {} / toggle {} / remove {}",
-        report.adds, report.renames, report.toggles, report.removes);
-    println!("  chaos:      {} partitions, {} heals, {} revokes",
-        report.partitions, report.heals, report.revokes);
+    println!(
+        "  ops:        add {} / rename {} / toggle {} / remove {}",
+        report.adds, report.renames, report.toggles, report.removes
+    );
+    println!(
+        "  chaos:      {} partitions, {} heals, {} revokes",
+        report.partitions, report.heals, report.revokes
+    );
     println!("  final board: {} tasks", report.final_tasks);
     println!("  elapsed:    {:.2?}", elapsed);
     if report.converged {

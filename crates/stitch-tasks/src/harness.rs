@@ -74,7 +74,10 @@ impl Cluster {
     /// Owner invites every other peer as a member.
     pub async fn invite_all(&self) {
         for i in 1..self.boards.len() {
-            self.boards[0].store().invite(self.ids[i], Role::Member).await;
+            self.boards[0]
+                .store()
+                .invite(self.ids[i], Role::Member)
+                .await;
         }
     }
 
@@ -236,7 +239,9 @@ pub async fn run_chaos(cfg: Chaos) -> (Chaos, ChaosReport) {
                 report.adds += 1;
             }
             1 => {
-                board.rename(&id, &format!("r-{}", rng.random::<u16>())).await;
+                board
+                    .rename(&id, &format!("r-{}", rng.random::<u16>()))
+                    .await;
                 report.renames += 1;
             }
             2 => {

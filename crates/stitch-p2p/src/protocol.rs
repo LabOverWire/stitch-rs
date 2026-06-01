@@ -28,7 +28,10 @@ pub enum ProtocolError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncMessage {
     /// The sender's peer id and its per-origin cursors.
-    Hello { from: PeerId, cursors: Cursors },
+    Hello {
+        from: PeerId,
+        cursors: Cursors,
+    },
     Delta(Vec<WriteFrame>),
 }
 

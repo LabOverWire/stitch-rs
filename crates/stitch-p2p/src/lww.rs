@@ -120,7 +120,11 @@ impl Applier {
     /// The visible record plus the peer id that authored the winning write.
     #[must_use]
     pub fn visible_with_author(&self, entity: &str, id: &str) -> Option<(Vec<u8>, PeerId)> {
-        match &self.cells.get(&(entity.to_string(), id.to_string()))?.current {
+        match &self
+            .cells
+            .get(&(entity.to_string(), id.to_string()))?
+            .current
+        {
             Some(w) if !w.op.is_delete() => Some((w.data.clone(), w.stamp.peer)),
             _ => None,
         }
@@ -164,8 +168,14 @@ mod tests {
     #[test]
     fn newer_write_wins() {
         let mut a = Applier::new();
-        assert_eq!(a.merge(write(1, 1, Op::Insert, b"a")), MergeOutcome::Applied);
-        assert_eq!(a.merge(write(2, 1, Op::Update, b"b")), MergeOutcome::Applied);
+        assert_eq!(
+            a.merge(write(1, 1, Op::Insert, b"a")),
+            MergeOutcome::Applied
+        );
+        assert_eq!(
+            a.merge(write(2, 1, Op::Update, b"b")),
+            MergeOutcome::Applied
+        );
         assert_eq!(a.visible("task", "t1"), Some(&b"b"[..]));
     }
 

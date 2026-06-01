@@ -1,8 +1,8 @@
 use crate::config::StoreConfig;
 use crate::error::Result;
-use crate::queue::OfflineQueue;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::queue::MutationSender;
+use crate::queue::OfflineQueue;
 use crate::rt::Shared;
 use crate::sync_engine::{MutationDelivery, SyncEngine};
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};

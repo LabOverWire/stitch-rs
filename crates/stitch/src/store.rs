@@ -225,7 +225,10 @@ impl Store {
         let inner = self.inner()?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Ok(inner.remote.as_ref().map(|r| r.subscribe_connection_status()))
+            Ok(inner
+                .remote
+                .as_ref()
+                .map(|r| r.subscribe_connection_status()))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -349,7 +352,8 @@ impl Store {
             && has_sync_target
         {
             match remote.sync_create(entity, &effective_scope, data).await {
-                Ok(_) => {
+                Ok(_) =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue
@@ -357,7 +361,8 @@ impl Store {
                             .await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
+                Err(err) if err.is_ownership() =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue
@@ -480,13 +485,15 @@ impl Store {
             && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_update(entity, &scope_id, id, fields).await {
-                Ok(()) => {
+                Ok(()) =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
+                Err(err) if err.is_ownership() =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
@@ -588,13 +595,15 @@ impl Store {
             && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_delete(entity, &scope_id, id).await {
-                Ok(()) => {
+                Ok(()) =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
+                Err(err) if err.is_ownership() =>
+                {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
@@ -679,7 +688,10 @@ impl Store {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let mut rows = inner.memory.list(&inner.config.scope.root_entity, "").await?;
+            let mut rows = inner
+                .memory
+                .list(&inner.config.scope.root_entity, "")
+                .await?;
             sort_records(&mut rows, &sort);
             Ok(rows)
         }
@@ -1029,8 +1041,11 @@ impl StoreInner {
             let status_rx = remote.subscribe_connection_status();
 
             let remote_ops: Shared<dyn RemoteSyncOps> = remote.clone();
-            let mutation_task =
-                rt::spawn(mutation_loop(Shared::clone(&inner), remote_ops, mutation_rx));
+            let mutation_task = rt::spawn(mutation_loop(
+                Shared::clone(&inner),
+                remote_ops,
+                mutation_rx,
+            ));
             let status_task = rt::spawn(status_loop(Shared::clone(&inner), status_rx));
             inner.tasks.lock().unwrap().push(mutation_task);
             inner.tasks.lock().unwrap().push(status_task);
@@ -1302,8 +1317,8 @@ async fn flush_loop(inner: Arc<StoreInner>) {
     loop {
         inner.flush_notify.notified().await;
         loop {
-            let connected = inner.state.lock().unwrap().last_connection_status
-                == ConnectionStatus::Connected;
+            let connected =
+                inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected;
             if !connected {
                 break;
             }
@@ -1333,7 +1348,10 @@ async fn handle_remote_mutation(
     mutation: SyncMutation,
 ) {
     let accessor = inner.local_accessor();
-    let persisted = match remote.apply_mutation_to_db(mutation.clone(), &accessor).await {
+    let persisted = match remote
+        .apply_mutation_to_db(mutation.clone(), &accessor)
+        .await
+    {
         Ok(applied) => applied,
         Err(err) => {
             tracing::warn!(
@@ -1716,7 +1734,11 @@ mod tests {
                 scope_field: "projectId".to_string(),
             },
         ));
-        let memory = Arc::new(MemoryStore::new(Arc::clone(&config)).await.expect("memory store"));
+        let memory = Arc::new(
+            MemoryStore::new(Arc::clone(&config))
+                .await
+                .expect("memory store"),
+        );
         Arc::new(StoreInner {
             config,
             memory,

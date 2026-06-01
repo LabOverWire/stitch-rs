@@ -129,7 +129,9 @@ impl SyncNode {
     }
 
     /// Subscribe to visible-state mutations (local and remote).
-    pub async fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::sync_state::MutationEvent> {
+    pub async fn subscribe(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::sync_state::MutationEvent> {
         self.state.lock().await.subscribe()
     }
 

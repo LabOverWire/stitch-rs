@@ -109,10 +109,18 @@ impl MqttClientApi for WasmMqttClientAdapter {
         let on_disconnect = Closure::<dyn FnMut()>::new(move || {
             (*on_disconnect_handler)(ConnectionStatus::Disconnected, false);
         });
-        self.client
-            .on_connect(on_connect.as_ref().unchecked_ref::<js_sys::Function>().clone());
-        self.client
-            .on_disconnect(on_disconnect.as_ref().unchecked_ref::<js_sys::Function>().clone());
+        self.client.on_connect(
+            on_connect
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+        );
+        self.client.on_disconnect(
+            on_disconnect
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+        );
         self.callbacks.borrow_mut().push(on_connect);
         self.callbacks.borrow_mut().push(on_disconnect);
         Ok(())

@@ -137,7 +137,8 @@ impl SyncState {
     /// records into the log, and merges into the applier — without re-persisting
     /// or emitting events.
     pub fn replay(&mut self, frame: WriteFrame) {
-        self.clock.observe(frame.stamp.hlc, frame.stamp.hlc.physical);
+        self.clock
+            .observe(frame.stamp.hlc, frame.stamp.hlc.physical);
         if self.log.record(frame.clone()) == RecordOutcome::Appended {
             self.applier.merge(frame.into_stamped());
         }
@@ -322,7 +323,11 @@ mod tests {
         cursors.insert(peer(1), 2);
         a.note_peer_cursors(peer(2), cursors);
 
-        assert_eq!(a.reclaim(&[peer(2)]), 2, "both delivered everywhere → reclaim");
+        assert_eq!(
+            a.reclaim(&[peer(2)]),
+            2,
+            "both delivered everywhere → reclaim"
+        );
         // Visible state is retained; only the log prefix is dropped.
         assert_eq!(a.visible("task", "t1"), Some(&b"a"[..]));
         assert_eq!(a.visible("task", "t2"), Some(&b"b"[..]));

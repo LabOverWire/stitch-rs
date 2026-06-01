@@ -346,7 +346,10 @@ async fn concurrent_updates_to_same_record_converge_without_conflict() {
 
     let final_task = store.read("task", "t1").await.unwrap().unwrap();
     let title = final_task.get("title").and_then(Value::as_str).unwrap();
-    assert!(title.starts_with("title-"), "unexpected final title: {title}");
+    assert!(
+        title.starts_with("title-"),
+        "unexpected final title: {title}"
+    );
     assert_eq!(
         final_task.get("projectId").and_then(Value::as_str),
         Some("p1"),

@@ -178,10 +178,13 @@ mod tests {
         let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
 
         // Write on A *after* the session is live; push it through A's outbound.
-        let frame = a_state
-            .lock()
-            .await
-            .local_write(now_millis(), Op::Insert, "task", "late", b"v".to_vec());
+        let frame = a_state.lock().await.local_write(
+            now_millis(),
+            Op::Insert,
+            "task",
+            "late",
+            b"v".to_vec(),
+        );
         a_tx.send(frame).unwrap();
 
         let ok = wait_until(Duration::from_secs(2), || async {

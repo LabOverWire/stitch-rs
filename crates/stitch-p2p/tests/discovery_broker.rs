@@ -9,7 +9,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command};
 use std::sync::Arc;
 use std::time::Duration;
-use stitch_p2p::{Op, SyncNode, Swarm, peer_id_from_fingerprint};
+use stitch_p2p::{Op, Swarm, SyncNode, peer_id_from_fingerprint};
 
 struct BrokerGuard(Child);
 
@@ -132,7 +132,10 @@ async fn two_peers_discover_and_sync_over_broker() {
     swarm_b.abort();
 
     assert!(converged, "peers did not converge over broker within 30s");
-    assert_eq!(node_a.visible("task", "t2").await, Some(b"from-bob".to_vec()));
+    assert_eq!(
+        node_a.visible("task", "t2").await,
+        Some(b"from-bob".to_vec())
+    );
     assert_eq!(
         node_b.visible("task", "t1").await,
         Some(b"from-alice".to_vec())

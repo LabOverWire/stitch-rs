@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use mqp2p::{Peer, PeerConfig};
 use stitch_p2p::membership::Role;
 use stitch_p2p::{Identity, Op, Store, Swarm, SyncNode, WriteOrigin};
-use stitch_tasks::{TaskBoard, Task};
+use stitch_tasks::{Task, TaskBoard};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
@@ -140,10 +140,17 @@ async fn run_peer(args: &[String]) {
             let detail = task_detail(&event.data);
             let line = match event.origin {
                 WriteOrigin::Local => {
-                    format!("EVT {watch_name}  {} {}  {detail}", op_symbol(event.op), event.id)
+                    format!(
+                        "EVT {watch_name}  {} {}  {detail}",
+                        op_symbol(event.op),
+                        event.id
+                    )
                 }
                 WriteOrigin::Remote => {
-                    format!("EVT {watch_name}  <- {}  {detail}  (synced from peer)", event.id)
+                    format!(
+                        "EVT {watch_name}  <- {}  {detail}  (synced from peer)",
+                        event.id
+                    )
                 }
             };
             emit(line.trim_end());
@@ -401,7 +408,9 @@ async fn run_orchestrator() {
     let _ = ev_tx.send("-- B edits t1 offline; meanwhile C edits t1 and adds t2 --".into());
     peer_mut(&mut peers, "B").send("done t1 true").await;
     peer_mut(&mut peers, "C").send("rename t1 ship v2").await;
-    peer_mut(&mut peers, "C").send("add t2 write changelog").await;
+    peer_mut(&mut peers, "C")
+        .send("add t2 write changelog")
+        .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let _ = ev_tx.send("-- heal: B comes back online and re-syncs --".into());

@@ -62,8 +62,14 @@ async fn member_writes_visible_outsider_filtered() {
     owner.invite(member_pid, Role::Member).await;
 
     // Each writes a record under its own identity.
-    member.create("task", "m", json!({"by": "member"})).await.unwrap();
-    outsider.create("task", "o", json!({"by": "outsider"})).await.unwrap();
+    member
+        .create("task", "m", json!({"by": "member"}))
+        .await
+        .unwrap();
+    outsider
+        .create("task", "o", json!({"by": "outsider"}))
+        .await
+        .unwrap();
 
     // Wire a hub through the owner: owner<->member, owner<->outsider.
     let (om_o, om_m) = tokio::io::duplex(64 * 1024);

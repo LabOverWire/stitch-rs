@@ -6,7 +6,9 @@ use crate::rt::Shared;
 use mqdb_agent::{CallerContext, Database};
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::storage::MemoryBackend;
-use mqdb_core::types::{Filter, OwnershipConfig, Pagination, ScopeConfig as MqdbScopeConfig, SortOrder};
+use mqdb_core::types::{
+    Filter, OwnershipConfig, Pagination, ScopeConfig as MqdbScopeConfig, SortOrder,
+};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -115,7 +117,14 @@ impl Db for NativeDb {
         projection: Vec<String>,
     ) -> Result<Vec<Value>> {
         self.db
-            .list(entity.to_string(), filters, sort, pagination, projection, None)
+            .list(
+                entity.to_string(),
+                filters,
+                sort,
+                pagination,
+                projection,
+                None,
+            )
             .await
             .map_err(|e| Error::mqdb(format!("list:{entity}"), e))
     }

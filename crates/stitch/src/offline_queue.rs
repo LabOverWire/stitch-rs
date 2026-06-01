@@ -729,7 +729,10 @@ mod tests {
             if self.fail_create_transient {
                 return Err(Error::Timeout(10));
             }
-            self.creates.lock().unwrap().push((entity.to_string(), data));
+            self.creates
+                .lock()
+                .unwrap()
+                .push((entity.to_string(), data));
             Ok(())
         }
 

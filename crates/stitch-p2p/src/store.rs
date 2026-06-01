@@ -124,12 +124,7 @@ impl Store {
     }
 
     /// Insert or replace a record.
-    pub async fn create(
-        &self,
-        entity: &str,
-        id: &str,
-        record: Value,
-    ) -> Result<(), StoreError> {
+    pub async fn create(&self, entity: &str, id: &str, record: Value) -> Result<(), StoreError> {
         let data = serde_json::to_vec(&record)?;
         self.node.local_write(Op::Insert, entity, id, data).await;
         Ok(())
@@ -169,7 +164,9 @@ impl Store {
 
     /// Delete a record (writes a tombstone).
     pub async fn delete(&self, entity: &str, id: &str) {
-        self.node.local_write(Op::Delete, entity, id, Vec::new()).await;
+        self.node
+            .local_write(Op::Delete, entity, id, Vec::new())
+            .await;
     }
 
     /// All visible records of an entity, filtered to authorized authors when the
@@ -294,7 +291,10 @@ mod tests {
     #[tokio::test]
     async fn update_merges_fields() {
         let store = Store::new(peer(1));
-        store.create("task", "t1", json!({"title": "hi", "done": false})).await.unwrap();
+        store
+            .create("task", "t1", json!({"title": "hi", "done": false}))
+            .await
+            .unwrap();
         let mut fields = Map::new();
         fields.insert("done".into(), json!(true));
         store.update("task", "t1", fields).await.unwrap();
