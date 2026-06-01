@@ -132,6 +132,37 @@ fn encrypted_options(db_name: &str, passphrase: &str) -> JsValue {
     .unwrap()
 }
 
+fn remote_options(url: &str) -> JsValue {
+    js_sys::JSON::parse(&format!(r#"{{"remote":{{"url":"{url}"}}}}"#)).unwrap()
+}
+
+#[wasm_bindgen_test]
+async fn remote_connect_failure_is_graceful_in_browser() {
+    let store = stitch_wasm::create_store(config(), remote_options("ws://127.0.0.1:1"))
+        .expect("create_store");
+    store
+        .initialize()
+        .await
+        .expect("initialize succeeds even when the broker is unreachable");
+
+    let status = store.connection_status().expect("connection_status");
+    assert_ne!(
+        status, "Connected",
+        "must not report Connected against a dead broker"
+    );
+
+    let row = js_sys::JSON::parse(r#"{"title":"offline"}"#).unwrap();
+    let id = store
+        .create("task".into(), "p1".into(), row)
+        .await
+        .expect("local create works without a broker");
+    let got = store.read("task".into(), id).await.expect("read");
+    assert!(
+        !got.is_null(),
+        "local create/read works with a configured-but-unreachable remote"
+    );
+}
+
 #[wasm_bindgen_test]
 async fn persistence_survives_reopen_in_browser() {
     let id = {

@@ -1,9 +1,10 @@
 use crate::config::StoreConfig;
 use crate::error::{Error, Result};
+use crate::mqtt_client::{
+    ConnectArgs, ConnectionHandler, DynMqttClient, IncomingMessage, PublishArgs, new_client,
+};
+use crate::rt;
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
-use mqtt5::client::{ConnectionEvent, DisconnectReason, JwtAuthHandler};
-use mqtt5::types::{ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions};
-use mqtt5::{MqttClient, QoS};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,7 @@ pub struct SyncEngine {
     config: Arc<StoreConfig>,
     prefix: String,
     response_prefix: String,
-    client: MqttClient,
+    client: DynMqttClient,
     state: Arc<EngineState>,
     request_timeout: Duration,
 }
@@ -91,7 +92,7 @@ impl SyncEngine {
             top_level_patterns,
         });
 
-        let client = MqttClient::new(&client_id);
+        let client = new_client(&client_id);
         Self::wire_connection_events(&client, Arc::clone(&state)).await?;
 
         Ok(Self {
@@ -128,23 +129,14 @@ impl SyncEngine {
             .connection_status
             .send(ConnectionStatus::Connecting);
 
-        let mut options = ConnectOptions::new(&self.client_id)
-            .with_clean_start(self.config.clean_start)
-            .with_keep_alive(Duration::from_secs(60))
-            .with_session_expiry_interval(self.config.session_expiry_secs);
+        let args = ConnectArgs {
+            clean_start: self.config.clean_start,
+            keep_alive_secs: 60,
+            session_expiry_secs: self.config.session_expiry_secs,
+            jwt_ticket: ticket,
+        };
 
-        if let Some(ref t) = ticket {
-            options = options.with_authentication_method("JWT");
-            self.client
-                .set_auth_handler(JwtAuthHandler::new(t.clone()))
-                .await;
-        }
-
-        let result = self
-            .client
-            .connect_with_options(server_url, options)
-            .await
-            .map_err(|e| Error::Mqtt(format!("connect:{server_url}: {e}")))?;
+        let result = self.client.connect(server_url, args).await?;
 
         if !result.session_present {
             self.subscribe_to_response_topic().await?;
@@ -159,10 +151,7 @@ impl SyncEngine {
     }
 
     pub async fn disconnect(&self) -> Result<()> {
-        self.client
-            .disconnect()
-            .await
-            .map_err(|e| Error::Mqtt(format!("disconnect: {e}")))?;
+        self.client.disconnect().await?;
         self.cleanup_on_disconnect();
         Ok(())
     }
@@ -210,7 +199,7 @@ impl SyncEngine {
         });
 
         let (root_record, child_results) =
-            tokio::join!(root_future, futures::future::try_join_all(child_futures),);
+            futures::join!(root_future, futures::future::try_join_all(child_futures));
         let root_record = root_record?;
         let mut children: std::collections::BTreeMap<String, Vec<Record>> =
             std::collections::BTreeMap::new();
@@ -406,34 +395,24 @@ impl SyncEngine {
             .unwrap()
             .insert(request_id.clone(), tx);
 
-        let props = PublishProperties {
-            response_topic: Some(response_topic),
-            correlation_data: Some(request_id.as_bytes().to_vec()),
+        let args = PublishArgs {
+            response_topic,
+            correlation_data: request_id.as_bytes().to_vec(),
             user_properties: vec![(ORIGIN_USER_PROPERTY.to_string(), self.client_id.clone())],
-            ..PublishProperties::default()
-        };
-        let opts = PublishOptions {
-            qos: QoS::AtLeastOnce,
-            retain: false,
-            properties: props,
-            skip_codec: false,
         };
 
         let body = serde_json::to_vec(&payload)?;
-        let publish = self
-            .client
-            .publish_with_options(topic.to_string(), body, opts)
-            .await;
+        let publish = self.client.publish(topic.to_string(), body, args).await;
         if let Err(e) = publish {
             self.state
                 .pending_requests
                 .lock()
                 .unwrap()
                 .remove(&request_id);
-            return Err(Error::Mqtt(format!("publish:{topic}: {e}")));
+            return Err(e);
         }
 
-        let timeout = tokio::time::timeout(self.request_timeout, rx).await;
+        let timeout = rt::timeout(self.request_timeout, rx).await;
         match timeout {
             Ok(Ok(result)) => match result? {
                 Value::Object(m) => Ok(m),
@@ -456,17 +435,14 @@ impl SyncEngine {
     async fn subscribe_to_response_topic(&self) -> Result<()> {
         let pattern = format!("{}/{}/#", self.response_prefix, self.client_id);
         let state = Arc::clone(&self.state);
-        let options = SubscribeOptions {
-            qos: QoS::AtLeastOnce,
-            ..SubscribeOptions::default()
-        };
         self.client
-            .subscribe_with_options(pattern, options, move |msg: Message| {
-                handle_response(&state, msg);
-            })
+            .subscribe(
+                pattern,
+                Box::new(move |msg: IncomingMessage| {
+                    handle_response(&state, msg);
+                }),
+            )
             .await
-            .map_err(|e| Error::Mqtt(format!("subscribe_response: {e}")))?;
-        Ok(())
     }
 
     fn snapshot_subscribed_scopes(&self) -> Vec<String> {
@@ -485,26 +461,26 @@ impl SyncEngine {
             self.prefix, self.config.scope.root_entity
         );
         let state = Arc::clone(&self.state);
-        let options = SubscribeOptions {
-            qos: QoS::AtLeastOnce,
-            ..SubscribeOptions::default()
-        };
         self.client
-            .subscribe_with_options(root_wildcard, options.clone(), move |msg: Message| {
-                handle_root_wildcard_message(&state, msg);
-            })
-            .await
-            .map_err(|e| Error::Mqtt(format!("subscribe_root_wildcard: {e}")))?;
+            .subscribe(
+                root_wildcard,
+                Box::new(move |msg: IncomingMessage| {
+                    handle_root_wildcard_message(&state, msg);
+                }),
+            )
+            .await?;
 
         for tl in &self.state.top_level_patterns {
             let state = Arc::clone(&self.state);
             let entity = tl.entity.clone();
             self.client
-                .subscribe_with_options(tl.pattern.clone(), options.clone(), move |msg: Message| {
-                    handle_top_level_message(&state, &entity, msg);
-                })
-                .await
-                .map_err(|e| Error::Mqtt(format!("subscribe_top_level:{}: {e}", tl.entity)))?;
+                .subscribe(
+                    tl.pattern.clone(),
+                    Box::new(move |msg: IncomingMessage| {
+                        handle_top_level_message(&state, &entity, msg);
+                    }),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -515,41 +491,24 @@ impl SyncEngine {
             self.prefix, self.config.scope.root_entity, scope_id
         );
         let state = Arc::clone(&self.state);
-        let options = SubscribeOptions {
-            qos: QoS::AtLeastOnce,
-            ..SubscribeOptions::default()
-        };
         self.client
-            .subscribe_with_options(pattern, options, move |msg: Message| {
-                handle_scope_message(&state, msg);
-            })
+            .subscribe(
+                pattern,
+                Box::new(move |msg: IncomingMessage| {
+                    handle_scope_message(&state, msg);
+                }),
+            )
             .await
-            .map_err(|e| Error::Mqtt(format!("subscribe_scope:{scope_id}: {e}")))?;
-        Ok(())
     }
 
-    async fn wire_connection_events(client: &MqttClient, state: Arc<EngineState>) -> Result<()> {
-        client
-            .on_connection_event(move |event| {
-                let (status, auth_failure) = match event {
-                    ConnectionEvent::Connecting => (ConnectionStatus::Connecting, false),
-                    ConnectionEvent::Connected { .. } => (ConnectionStatus::Connected, false),
-                    ConnectionEvent::Disconnected {
-                        reason: DisconnectReason::AuthFailure,
-                    } => (ConnectionStatus::Error, true),
-                    ConnectionEvent::Disconnected { .. } => (ConnectionStatus::Disconnected, false),
-                    ConnectionEvent::Reconnecting { .. } => (ConnectionStatus::Connecting, false),
-                    ConnectionEvent::ReconnectFailed { .. } => (ConnectionStatus::Error, false),
-                };
-                let _ = state.connection_status.send(status);
-                if auth_failure && let Some(handler) = state.session_invalid.lock().unwrap().clone()
-                {
-                    handler();
-                }
-            })
-            .await
-            .map_err(|e| Error::Mqtt(format!("on_connection_event: {e}")))?;
-        Ok(())
+    async fn wire_connection_events(client: &DynMqttClient, state: Arc<EngineState>) -> Result<()> {
+        let handler: ConnectionHandler = Box::new(move |status, auth_failure| {
+            let _ = state.connection_status.send(status);
+            if auth_failure && let Some(handler) = state.session_invalid.lock().unwrap().clone() {
+                handler();
+            }
+        });
+        client.on_connection_event(handler).await
     }
 
     pub fn set_session_invalid_handler<F>(&self, handler: F)
@@ -587,7 +546,7 @@ impl SyncEngine {
     }
 }
 
-fn handle_response(state: &EngineState, msg: Message) {
+fn handle_response(state: &EngineState, msg: IncomingMessage) {
     let expected = format!("{}/{}/", state.response_prefix, state.client_id);
     let Some(request_id) = msg.topic.strip_prefix(&expected) else {
         return;
@@ -603,7 +562,7 @@ fn handle_response(state: &EngineState, msg: Message) {
     let _ = sender.send(result);
 }
 
-fn handle_scope_message(state: &EngineState, msg: Message) {
+fn handle_scope_message(state: &EngineState, msg: IncomingMessage) {
     if own_user_property(state, &msg) {
         return;
     }
@@ -638,7 +597,7 @@ fn handle_scope_message(state: &EngineState, msg: Message) {
         .send(MutationDelivery { scope_id, mutation });
 }
 
-fn handle_root_wildcard_message(state: &EngineState, msg: Message) {
+fn handle_root_wildcard_message(state: &EngineState, msg: IncomingMessage) {
     if own_user_property(state, &msg) {
         return;
     }
@@ -678,7 +637,7 @@ fn handle_root_wildcard_message(state: &EngineState, msg: Message) {
     });
 }
 
-fn handle_top_level_message(state: &EngineState, entity: &str, msg: Message) {
+fn handle_top_level_message(state: &EngineState, entity: &str, msg: IncomingMessage) {
     if own_user_property(state, &msg) {
         return;
     }
@@ -710,9 +669,8 @@ fn handle_top_level_message(state: &EngineState, entity: &str, msg: Message) {
     });
 }
 
-fn own_user_property(state: &EngineState, msg: &Message) -> bool {
-    msg.properties
-        .user_properties
+fn own_user_property(state: &EngineState, msg: &IncomingMessage) -> bool {
+    msg.user_properties
         .iter()
         .any(|(k, v)| k == ORIGIN_USER_PROPERTY && v == &state.client_id)
 }

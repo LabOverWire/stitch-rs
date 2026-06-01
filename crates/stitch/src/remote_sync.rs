@@ -1,6 +1,9 @@
 use crate::config::StoreConfig;
 use crate::error::Result;
-use crate::offline_queue::{MutationSender, OfflineQueue};
+use crate::queue::OfflineQueue;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::queue::MutationSender;
+use crate::rt::Shared;
 use crate::sync_engine::{MutationDelivery, SyncEngine};
 use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
 use async_trait::async_trait;
@@ -9,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 pub trait LocalAccessor: Send + Sync {
     async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>>;
@@ -18,15 +22,25 @@ pub trait LocalAccessor: Send + Sync {
     async fn delete(&self, entity: &str, id: &str) -> Result<()>;
 }
 
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+pub trait LocalAccessor {
+    async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>>;
+    async fn list(&self, entity: &str, scope_id: Option<&str>) -> Result<Vec<Record>>;
+    async fn create(&self, entity: &str, data: Record) -> Result<()>;
+    async fn update(&self, entity: &str, id: &str, fields: Record) -> Result<()>;
+    async fn delete(&self, entity: &str, id: &str) -> Result<()>;
+}
+
 pub struct RemoteSyncLayer {
     config: Arc<StoreConfig>,
-    sync: Arc<SyncEngine>,
+    sync: Shared<SyncEngine>,
     top_level: HashSet<String>,
 }
 
 impl RemoteSyncLayer {
     pub async fn new(client_id: String, config: Arc<StoreConfig>) -> Result<Self> {
-        let sync = Arc::new(SyncEngine::new(client_id, Arc::clone(&config)).await?);
+        let sync = Shared::new(SyncEngine::new(client_id, Arc::clone(&config)).await?);
         let top_level: HashSet<String> = config
             .top_level_entities
             .iter()
@@ -39,8 +53,8 @@ impl RemoteSyncLayer {
         })
     }
 
-    pub fn engine(&self) -> Arc<SyncEngine> {
-        Arc::clone(&self.sync)
+    pub fn engine(&self) -> Shared<SyncEngine> {
+        Shared::clone(&self.sync)
     }
 
     pub fn subscribe_mutations(&self) -> broadcast::Receiver<MutationDelivery> {
@@ -373,6 +387,7 @@ impl RemoteSyncLayer {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl MutationSender for RemoteSyncLayer {
     async fn sync_create(&self, entity: &str, scope_id: &str, data: Record) -> Result<()> {

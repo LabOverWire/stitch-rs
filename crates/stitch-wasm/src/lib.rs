@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use stitch::config::{EntityDefinition, PersistenceConfig, ScopeConfig};
+use stitch::config::{EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig};
 use stitch::types::Record;
 use stitch::{Origin, Store as CoreStore, StoreConfig, StoreEvent, StoreOptions};
 use tokio::sync::broadcast::error::RecvError;
@@ -36,10 +36,19 @@ struct PersistenceDto {
     passphrase: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct RemoteDto {
+    url: String,
+    #[serde(default, rename = "clientId")]
+    client_id: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 struct OptionsDto {
     #[serde(default)]
     persistence: Option<PersistenceDto>,
+    #[serde(default)]
+    remote: Option<RemoteDto>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> JsValue {
@@ -73,10 +82,13 @@ pub struct Store {
 /// Build an unopened [`Store`] from a config object
 /// (`{ entities, scope: { rootEntity, childEntities, scopeField } }`).
 ///
-/// Pass an optional second argument to enable durable IndexedDB persistence:
-/// `{ persistence: { dbName, passphrase? } }`. With `passphrase` the store is
-/// AES-GCM encrypted; without it, plaintext IndexedDB. Omit the argument for an
-/// in-memory store.
+/// Pass an optional second argument to enable durable IndexedDB persistence
+/// and/or remote MQTT-over-WebSocket sync:
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId? } }`.
+/// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
+/// must be a `ws://`/`wss://` endpoint; `initialize` then connects and live
+/// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
+/// for an in-memory store.
 ///
 /// # Errors
 /// Returns an error if the config or options object is malformed.
@@ -96,26 +108,42 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
             scope_field: dto.scope.scope_field,
         },
     );
+    let client_id = opts.remote.as_ref().and_then(|r| r.client_id.clone());
     let store_options = StoreOptions {
         persistence: opts.persistence.map(|p| PersistenceConfig {
             db_path: p.db_name.into(),
             passphrase: p.passphrase,
         }),
-        remote: None,
+        remote: opts.remote.map(|r| RemoteConfig::new(r.url)),
     };
-    Ok(Store {
-        inner: CoreStore::new(cfg, store_options),
-    })
+    let inner = match client_id {
+        Some(id) => CoreStore::with_client_id(cfg, store_options, id),
+        None => CoreStore::new(cfg, store_options),
+    };
+    Ok(Store { inner })
 }
 
 #[wasm_bindgen]
 impl Store {
-    /// Open the in-memory store. Idempotent.
+    /// Open the store (in-memory + persistence) and, when a remote is
+    /// configured, connect to the broker. Idempotent.
     ///
     /// # Errors
     /// Returns an error if the underlying database fails to open.
     pub async fn initialize(&self) -> Result<(), JsValue> {
         self.inner.initialize().await.map_err(err)
+    }
+
+    /// Current remote connection status as a string (`"Offline"`,
+    /// `"Connecting"`, `"Connected"`, `"Disconnected"`, `"Error"`). `"Offline"`
+    /// when no remote is configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "connectionStatus")]
+    pub fn connection_status(&self) -> Result<String, JsValue> {
+        let status = self.inner.connection_status().map_err(err)?;
+        Ok(format!("{status:?}"))
     }
 
     /// Insert a row into `entity` under `scopeId`. Returns the new row's id.

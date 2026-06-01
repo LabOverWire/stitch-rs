@@ -50,6 +50,7 @@ pub mod error;
 pub mod types;
 
 pub(crate) mod backend;
+pub(crate) mod mqtt_client;
 pub(crate) mod rt;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -62,10 +63,10 @@ pub mod memory_store;
 pub mod offline_queue;
 #[doc(hidden)]
 pub mod persistence;
-#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod queue;
 #[doc(hidden)]
 pub mod remote_sync;
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod sync_engine;
 
