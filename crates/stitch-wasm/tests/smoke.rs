@@ -290,3 +290,117 @@ async fn remote_with_jwt_connects_without_panicking() {
         "must not report Connected against a dead broker"
     );
 }
+
+#[wasm_bindgen_test]
+async fn list_child_count_snapshot_map_in_browser() {
+    use wasm_bindgen::JsCast;
+
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
+    store.initialize().await.expect("initialize");
+    for (scope, title) in [("p1", "a"), ("p1", "b"), ("p2", "c")] {
+        let row = js_sys::JSON::parse(&format!(r#"{{"title":"{title}"}}"#)).unwrap();
+        store
+            .create("task".into(), scope.into(), row)
+            .await
+            .expect("create");
+    }
+
+    let filter = js_sys::JSON::parse(r#"{"scopeId":"p1"}"#).unwrap();
+    let listed = js_sys::Array::from(&store.list("task".into(), filter).await.expect("list"));
+    assert_eq!(listed.length(), 2, "list filters by scope");
+
+    let count = store
+        .get_child_count("task".into(), "p1".into())
+        .await
+        .expect("child count");
+    assert_eq!(count, 2, "getChildCount matches the scope's rows");
+
+    let map = store
+        .get_snapshot_as_map("task".into(), "p1".into())
+        .await
+        .expect("snapshot map");
+    let keys = js_sys::Object::keys(&map.dyn_into::<js_sys::Object>().unwrap());
+    assert_eq!(keys.length(), 2, "getSnapshotAsMap is keyed by row id");
+}
+
+#[wasm_bindgen_test]
+async fn subscribe_passes_data_op_and_unsubscribe_stops_in_browser() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    async fn yield_microtasks(n: usize) {
+        for _ in 0..n {
+            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+                .await
+                .unwrap();
+        }
+    }
+
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let events: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let ev = Rc::clone(&events);
+    let cb = Closure::<dyn FnMut(JsValue, JsValue)>::new(move |data: JsValue, op: JsValue| {
+        let op = op.as_string().unwrap_or_default();
+        ev.borrow_mut().push(format!("{op}:{}", !data.is_null()));
+    });
+    let unsub = store
+        .subscribe_to_entity(
+            "task".into(),
+            cb.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+        )
+        .expect("subscribe");
+    cb.forget();
+
+    store
+        .create(
+            "task".into(),
+            "p1".into(),
+            js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap(),
+        )
+        .await
+        .expect("create");
+    yield_microtasks(50).await;
+    assert_eq!(
+        events.borrow().as_slice(),
+        &["insert:true".to_string()],
+        "subscribeToEntity delivers (data, op)"
+    );
+
+    let unsub: js_sys::Function = unsub.unchecked_into();
+    unsub.call0(&JsValue::NULL).expect("unsubscribe");
+    yield_microtasks(20).await;
+    store
+        .create(
+            "task".into(),
+            "p1".into(),
+            js_sys::JSON::parse(r#"{"title":"b"}"#).unwrap(),
+        )
+        .await
+        .expect("create2");
+    yield_microtasks(30).await;
+    assert_eq!(
+        events.borrow().len(),
+        1,
+        "no further callbacks after unsubscribe"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn update_local_state_round_trip_in_browser() {
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
+    store.initialize().await.expect("initialize");
+    let fields = js_sys::JSON::parse(r#"{"projectId":"p1","title":"draft"}"#).unwrap();
+    store
+        .update_local_state("task".into(), "t1".into(), fields)
+        .await
+        .expect("update_local_state");
+    let got = store
+        .read_local_state("task".into(), "t1".into())
+        .await
+        .expect("read_local_state");
+    assert!(!got.is_null(), "updateLocalState upserts and reads back");
+}

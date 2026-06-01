@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`stitch-wasm` now mirrors the framework-agnostic TS `@laboverwire/stitch`
+  core Store API**: added `list`, `listRootEntities`, `getChildCount`,
+  `getSnapshotAsMap`, `closeScope`, `disconnect`, `reconnect`, `isReconnecting`,
+  `ready`, `beginBatch`/`endBatch`, `request`, `updateLocalState`,
+  `resetForLogout`, `destroy`, `hasPersistence`/`hasRemote`, plus
+  `subscribeToScope` and `subscribeToConnectionStatus`. The `subscribe*` methods
+  now return an unsubscribe function, and `subscribeToEntity` delivers
+  `(data, op)` to its callback. `Store::{disconnect,reconnect,request}` are now
+  cross-platform; added `Store::{has_persistence,has_remote}`. (Deferred:
+  `setSessionInvalidHandler`/`setReconnectValidator` on wasm, `loadScope`/
+  `clearScope`, the sessionStorage user-cache helpers, and the React/Vue subpath
+  bindings.)
+
+
 - **MQTT v5 JWT enhanced-auth now works in the browser**: the wasm remote adapter
   sends the JWT as the CONNECT `authentication_data` (method `"JWT"`) and answers
   any broker `AUTH(Continue)` challenge with a no-op (matching native
