@@ -5,8 +5,8 @@ exerciser. Each member crate has its own README.
 
 | Crate | Path | What it is |
 |---|---|---|
-| [`stitch`](crates/stitch) | `crates/stitch` | Reactive store with **server-authoritative** sync: in-memory cache, fjall persistence, MQTT/MQDB remote sync, version-LWW. The Rust port of `@laboverwire/stitch`. Compiles for both native and `wasm32` — the browser build runs the in-memory cache plus durable IndexedDB persistence (plaintext or AES-GCM encrypted) via `mqdb-wasm`; remote MQTT sync is native-only for now. |
-| [`stitch-wasm`](crates/stitch-wasm) | `crates/stitch-wasm` | **Browser bindings** (`wasm-bindgen`) over `stitch`: a `createStore` factory and `Store` class for JavaScript, intended as a drop-in for the TypeScript `@laboverwire/stitch` core. Exposes the in-memory store and IndexedDB persistence (`createStore(config, { persistence: { dbName, passphrase? } })`); WebSocket MQTT sync is an upcoming milestone. |
+| [`stitch`](crates/stitch) | `crates/stitch` | Reactive store with **server-authoritative** sync: in-memory cache, fjall persistence, MQTT/MQDB remote sync, version-LWW. The Rust port of `@laboverwire/stitch`. Compiles for both native and `wasm32` — the browser build runs the in-memory cache, durable IndexedDB persistence (plaintext or AES-GCM encrypted) via `mqdb-wasm`, and remote MQTT sync over WebSocket via `mqtt5-wasm`. (Browser remote is the core sync path; JWT enhanced-auth and the durable offline queue remain native-only for now.) |
+| [`stitch-wasm`](crates/stitch-wasm) | `crates/stitch-wasm` | **Browser bindings** (`wasm-bindgen`) over `stitch`: a `createStore` factory and `Store` class for JavaScript, intended as a drop-in for the TypeScript `@laboverwire/stitch` core. Exposes the in-memory store, IndexedDB persistence, and remote sync: `createStore(config, { persistence: { dbName, passphrase? }, remote: { url, clientId? } })` (remote `url` is a `ws://`/`wss://` MQTT endpoint). |
 | [`stitch-p2p`](crates/stitch-p2p) | `crates/stitch-p2p` | **Pure peer-to-peer** sync engine: multi-leader, HLC last-writer-wins, signed writes, owner-controlled membership, tombstone reclamation. Protocols are TLA+-verified (`crates/stitch-p2p/spec`). |
 | [`stitch-tasks`](crates/stitch-tasks) | `crates/stitch-tasks` | A collaborative task board on `stitch-p2p`, with two ways to exercise it: a chaos/soak harness that drives N peers to convergence under partitions and membership churn, and a narrated multi-process `demo` that syncs three real peers over a broker + QUIC. |
 
@@ -30,3 +30,11 @@ cargo run -p stitch-tasks --bin demo   # narrated 3-peer sync over broker + QUIC
 cargo check -p stitch --target wasm32-unknown-unknown
 wasm-pack test --headless --chrome crates/stitch-wasm   # in-browser smoke test
 ```
+
+Browser remote sync (manual end-to-end): run an `mqtt5` broker with a WebSocket
+listener, then point a browser store at it —
+`createStore(config, { remote: { url: "ws://localhost:<ws-port>" } })`,
+`await store.initialize()` — and two tabs on the same scope converge live. The
+headless `wasm-pack` suite cannot host a broker, so it only asserts the wasm
+client builds and fails gracefully when the broker is unreachable; the native
+broker-backed `tests/wire.rs` covers the sync engine itself.

@@ -18,16 +18,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, broadcast};
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::offline_queue::{InMemoryOfflineQueue, OfflineQueue, PersistentOfflineQueue};
-#[cfg(not(target_arch = "wasm32"))]
+use crate::queue::OfflineQueue;
 use crate::remote_sync::{LocalAccessor, RemoteSyncLayer};
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync_engine::MutationDelivery;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::types::{Operation, SyncMutation};
-#[cfg(not(target_arch = "wasm32"))]
 use async_trait::async_trait;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::offline_queue::{InMemoryOfflineQueue, PersistentOfflineQueue};
 
 /// Reactive state-sync facade over an in-memory cache, fjall persistence, and
 /// MQTT5 remote sync. Construct with [`Store::new`], call [`Store::initialize`]
@@ -53,8 +51,7 @@ struct StoreInner {
     config: Arc<StoreConfig>,
     memory: Shared<MemoryStore>,
     persistence: Option<Shared<PersistenceLayer>>,
-    #[cfg(not(target_arch = "wasm32"))]
-    remote: Option<Arc<RemoteSyncLayer>>,
+    remote: Option<Shared<RemoteSyncLayer>>,
     #[cfg(not(target_arch = "wasm32"))]
     queue: Option<Arc<dyn OfflineQueue>>,
     state: Mutex<StoreState>,
@@ -316,7 +313,6 @@ impl Store {
             data.entry(inner.config.scope.scope_field.clone())
                 .or_insert_with(|| Value::String(effective_scope.clone()));
         }
-        #[cfg(not(target_arch = "wasm32"))]
         let has_sync_target = !effective_scope.is_empty() || is_top_level;
 
         inner
@@ -347,7 +343,6 @@ impl Store {
                 .await?;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(remote) = &inner.remote
             && !origin.skips_remote()
             && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
@@ -355,6 +350,7 @@ impl Store {
         {
             match remote.sync_create(entity, &effective_scope, data).await {
                 Ok(_) => {
+                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue
                             .remove(entity, &id, &effective_scope, Operation::Insert)
@@ -362,6 +358,7 @@ impl Store {
                     }
                 }
                 Err(err) if err.is_ownership() => {
+                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(queue) = &inner.queue {
                         let _ = queue
                             .remove(entity, &id, &effective_scope, Operation::Insert)
@@ -369,6 +366,7 @@ impl Store {
                     }
                 }
                 Err(err) if err.is_transient() => {
+                    #[cfg(not(target_arch = "wasm32"))]
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -457,49 +455,49 @@ impl Store {
             return Ok(());
         }
 
+        let Some(scope_id) = scope_id else {
+            return Ok(());
+        };
+
         #[cfg(not(target_arch = "wasm32"))]
+        if let Some(queue) = &inner.queue
+            && !origin.skips_remote()
         {
-            let Some(scope_id) = scope_id else {
-                return Ok(());
-            };
+            queue
+                .queue(crate::types::PendingMutation {
+                    op: Operation::Update,
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    scope_id: scope_id.clone(),
+                    data: Some(fields.clone()),
+                    created_at: 0,
+                })
+                .await?;
+        }
 
-            if let Some(queue) = &inner.queue
-                && !origin.skips_remote()
-            {
-                queue
-                    .queue(crate::types::PendingMutation {
-                        op: Operation::Update,
-                        entity: entity.to_string(),
-                        id: id.to_string(),
-                        scope_id: scope_id.clone(),
-                        data: Some(fields.clone()),
-                        created_at: 0,
-                    })
-                    .await?;
-            }
-
-            if let Some(remote) = &inner.remote
-                && !origin.skips_remote()
-                && inner.state.lock().unwrap().last_connection_status
-                    == ConnectionStatus::Connected
-            {
-                match remote.sync_update(entity, &scope_id, id, fields).await {
-                    Ok(()) => {
-                        if let Some(queue) = &inner.queue {
-                            let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
-                        }
+        if let Some(remote) = &inner.remote
+            && !origin.skips_remote()
+            && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
+        {
+            match remote.sync_update(entity, &scope_id, id, fields).await {
+                Ok(()) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
-                    Err(err) if err.is_ownership() => {
-                        if let Some(queue) = &inner.queue {
-                            let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
-                        }
+                }
+                Err(err) if err.is_ownership() => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
-                    Err(err) if err.is_not_found() || err.is_transient() => {
-                        inner.flush_notify.notify_one();
-                    }
-                    Err(err) => {
-                        tracing::warn!(entity = %entity, id = %id, error = %err, "remote update failed");
-                    }
+                }
+                Err(err) if err.is_not_found() || err.is_transient() => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    inner.flush_notify.notify_one();
+                }
+                Err(err) => {
+                    tracing::warn!(entity = %entity, id = %id, error = %err, "remote update failed");
                 }
             }
         }
@@ -565,49 +563,49 @@ impl Store {
             return Ok(());
         }
 
+        let Some(scope_id) = scope_id else {
+            return Ok(());
+        };
+
         #[cfg(not(target_arch = "wasm32"))]
+        if let Some(queue) = &inner.queue
+            && !origin.skips_remote()
         {
-            let Some(scope_id) = scope_id else {
-                return Ok(());
-            };
+            queue
+                .queue(crate::types::PendingMutation {
+                    op: Operation::Delete,
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    scope_id: scope_id.clone(),
+                    data: None,
+                    created_at: 0,
+                })
+                .await?;
+        }
 
-            if let Some(queue) = &inner.queue
-                && !origin.skips_remote()
-            {
-                queue
-                    .queue(crate::types::PendingMutation {
-                        op: Operation::Delete,
-                        entity: entity.to_string(),
-                        id: id.to_string(),
-                        scope_id: scope_id.clone(),
-                        data: None,
-                        created_at: 0,
-                    })
-                    .await?;
-            }
-
-            if let Some(remote) = &inner.remote
-                && !origin.skips_remote()
-                && inner.state.lock().unwrap().last_connection_status
-                    == ConnectionStatus::Connected
-            {
-                match remote.sync_delete(entity, &scope_id, id).await {
-                    Ok(()) => {
-                        if let Some(queue) = &inner.queue {
-                            let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
-                        }
+        if let Some(remote) = &inner.remote
+            && !origin.skips_remote()
+            && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
+        {
+            match remote.sync_delete(entity, &scope_id, id).await {
+                Ok(()) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
-                    Err(err) if err.is_ownership() => {
-                        if let Some(queue) = &inner.queue {
-                            let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
-                        }
+                }
+                Err(err) if err.is_ownership() => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
-                    Err(err) if err.is_not_found() || err.is_transient() => {
-                        inner.flush_notify.notify_one();
-                    }
-                    Err(err) => {
-                        tracing::warn!(entity = %entity, id = %id, error = %err, "remote delete failed");
-                    }
+                }
+                Err(err) if err.is_not_found() || err.is_transient() => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    inner.flush_notify.notify_one();
+                }
+                Err(err) => {
+                    tracing::warn!(entity = %entity, id = %id, error = %err, "remote delete failed");
                 }
             }
         }
@@ -974,8 +972,6 @@ impl StoreInner {
         options: &StoreOptions,
         client_id: &str,
     ) -> Result<Shared<Self>> {
-        #[cfg(target_arch = "wasm32")]
-        let _ = client_id;
         let memory = Shared::new(MemoryStore::new(Arc::clone(&config)).await?);
 
         let persistence = if let Some(pcfg) = &options.persistence {
@@ -986,9 +982,8 @@ impl StoreInner {
             None
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
         let remote = if options.remote.is_some() {
-            Some(Arc::new(
+            Some(Shared::new(
                 RemoteSyncLayer::new(client_id.to_string(), Arc::clone(&config)).await?,
             ))
         } else {
@@ -1011,7 +1006,6 @@ impl StoreInner {
             config: Arc::clone(&config),
             memory,
             persistence,
-            #[cfg(not(target_arch = "wasm32"))]
             remote,
             #[cfg(not(target_arch = "wasm32"))]
             queue,
@@ -1030,26 +1024,31 @@ impl StoreInner {
             flush_notify: tokio::sync::Notify::new(),
         });
 
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(remote) = &inner.remote {
             let mutation_rx = remote.subscribe_mutations();
             let status_rx = remote.subscribe_connection_status();
 
-            let remote_ops: Arc<dyn RemoteSyncOps> = remote.clone();
+            let remote_ops: Shared<dyn RemoteSyncOps> = remote.clone();
             let mutation_task =
-                rt::spawn(mutation_loop(Arc::clone(&inner), remote_ops, mutation_rx));
-            let status_task = rt::spawn(status_loop(Arc::clone(&inner), status_rx));
-            let flush_task = rt::spawn(flush_loop(Arc::clone(&inner)));
-
+                rt::spawn(mutation_loop(Shared::clone(&inner), remote_ops, mutation_rx));
+            let status_task = rt::spawn(status_loop(Shared::clone(&inner), status_rx));
             inner.tasks.lock().unwrap().push(mutation_task);
             inner.tasks.lock().unwrap().push(status_task);
-            inner.tasks.lock().unwrap().push(flush_task);
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let flush_task = rt::spawn(flush_loop(Shared::clone(&inner)));
+                inner.tasks.lock().unwrap().push(flush_task);
+            }
 
             if let Some(remote_cfg) = &options.remote {
+                #[cfg(not(target_arch = "wasm32"))]
                 let ticket = match &remote_cfg.get_ticket {
                     Some(provider) => Some(provider().await?),
                     None => None,
                 };
+                #[cfg(target_arch = "wasm32")]
+                let ticket: Option<String> = None;
                 let _ = remote.connect(&remote_cfg.server_url, ticket).await;
             }
         }
@@ -1119,21 +1118,19 @@ impl StoreInner {
         Ok(ScopeBundle { root, children })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn local_accessor(self: &Arc<Self>) -> InnerLocalAccessor {
+    fn local_accessor(self: &Shared<Self>) -> InnerLocalAccessor {
         InnerLocalAccessor {
-            inner: Arc::clone(self),
+            inner: Shared::clone(self),
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct InnerLocalAccessor {
-    inner: Arc<StoreInner>,
+    inner: Shared<StoreInner>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl LocalAccessor for InnerLocalAccessor {
     async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>> {
         if let Some(p) = &self.inner.persistence {
@@ -1202,9 +1199,9 @@ impl LocalAccessor for InnerLocalAccessor {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
-trait RemoteSyncOps: Send + Sync {
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+trait RemoteSyncOps: crate::backend::MaybeSendSync {
     async fn apply_mutation_to_db(
         &self,
         mutation: SyncMutation,
@@ -1219,8 +1216,8 @@ trait RemoteSyncOps: Send + Sync {
     ) -> Result<()>;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RemoteSyncOps for RemoteSyncLayer {
     async fn apply_mutation_to_db(
         &self,
@@ -1240,10 +1237,9 @@ impl RemoteSyncOps for RemoteSyncLayer {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn mutation_loop(
-    inner: Arc<StoreInner>,
-    remote: Arc<dyn RemoteSyncOps>,
+    inner: Shared<StoreInner>,
+    remote: Shared<dyn RemoteSyncOps>,
     mut rx: broadcast::Receiver<MutationDelivery>,
 ) {
     loop {
@@ -1261,14 +1257,16 @@ async fn mutation_loop(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn resync_after_lag(inner: &Arc<StoreInner>, remote: &dyn RemoteSyncOps) {
+async fn resync_after_lag(inner: &Shared<StoreInner>, remote: &dyn RemoteSyncOps) {
     if inner.state.lock().unwrap().last_connection_status != ConnectionStatus::Connected {
         return;
     }
     let user = inner.state.lock().unwrap().authenticated_user.clone();
     let accessor = inner.local_accessor();
+    #[cfg(not(target_arch = "wasm32"))]
     let queue_ref = inner.queue.as_deref();
+    #[cfg(target_arch = "wasm32")]
+    let queue_ref: Option<&dyn OfflineQueue> = None;
     if let Err(err) = remote
         .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
         .await
@@ -1277,8 +1275,7 @@ async fn resync_after_lag(inner: &Arc<StoreInner>, remote: &dyn RemoteSyncOps) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<ConnectionStatus>) {
+async fn status_loop(inner: Shared<StoreInner>, mut rx: broadcast::Receiver<ConnectionStatus>) {
     loop {
         match rx.recv().await {
             Ok(status) => {
@@ -1290,7 +1287,7 @@ async fn status_loop(inner: Arc<StoreInner>, mut rx: broadcast::Receiver<Connect
                     }
                 }
                 if status == ConnectionStatus::Connected {
-                    on_connected(Arc::clone(&inner)).await;
+                    on_connected(Shared::clone(&inner)).await;
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1314,7 +1311,7 @@ async fn flush_loop(inner: Arc<StoreInner>) {
             else {
                 break;
             };
-            let sender: &dyn crate::offline_queue::MutationSender = remote.as_ref();
+            let sender: &dyn crate::queue::MutationSender = remote.as_ref();
             let retained = match queue.flush(sender).await {
                 Ok(retained) => retained,
                 Err(err) => {
@@ -1330,9 +1327,8 @@ async fn flush_loop(inner: Arc<StoreInner>) {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn handle_remote_mutation(
-    inner: &Arc<StoreInner>,
+    inner: &Shared<StoreInner>,
     remote: &dyn RemoteSyncOps,
     mutation: SyncMutation,
 ) {
@@ -1408,9 +1404,8 @@ async fn handle_remote_mutation(
     mirror_remote_to_memory(inner, mutation, is_top_level).await;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn mirror_remote_to_memory(
-    inner: &Arc<StoreInner>,
+    inner: &Shared<StoreInner>,
     mutation: SyncMutation,
     is_top_level: bool,
 ) {
@@ -1523,29 +1518,36 @@ async fn mirror_remote_to_memory(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn on_connected(inner: Arc<StoreInner>) {
+async fn on_connected(inner: Shared<StoreInner>) {
     let user = inner.state.lock().unwrap().authenticated_user.clone();
-    let queue_ref = inner.queue.as_deref();
     let remote = inner.remote.clone();
     let accessor = inner.local_accessor();
 
-    let validator = inner.reconnect_validator.lock().unwrap().clone();
-    if let Some(validator) = validator
-        && let Err(err) = validator().await
-    {
-        tracing::warn!(error = %err, "reconnect validator failed");
-    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let queue_ref = inner.queue.as_deref();
+    #[cfg(target_arch = "wasm32")]
+    let queue_ref: Option<&dyn OfflineQueue> = None;
 
-    if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
-        let sender: &dyn crate::offline_queue::MutationSender = remote.as_ref();
-        let _ = queue.flush(sender).await;
-        if let Ok(retained) = queue.flush(sender).await
-            && retained > 0
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let validator = inner.reconnect_validator.lock().unwrap().clone();
+        if let Some(validator) = validator
+            && let Err(err) = validator().await
         {
-            inner.flush_notify.notify_one();
+            tracing::warn!(error = %err, "reconnect validator failed");
+        }
+
+        if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
+            let sender: &dyn crate::queue::MutationSender = remote.as_ref();
+            let _ = queue.flush(sender).await;
+            if let Ok(retained) = queue.flush(sender).await
+                && retained > 0
+            {
+                inner.flush_notify.notify_one();
+            }
         }
     }
+
     if let Some(remote) = &remote {
         let _ = remote
             .sync_root_entity_list(&accessor, queue_ref, user.as_deref())

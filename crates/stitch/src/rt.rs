@@ -59,3 +59,29 @@ where
     wasm_bindgen_futures::spawn_local(future);
     JoinHandle
 }
+
+/// Await `future` with a timeout. Native uses `tokio::time`; wasm races it
+/// against a `gloo_timers` browser timer (tokio's timer is unavailable on
+/// `wasm32-unknown-unknown`). `Err(())` on elapse.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn timeout<F: Future>(
+    duration: std::time::Duration,
+    future: F,
+) -> Result<F::Output, ()> {
+    tokio::time::timeout(duration, future).await.map_err(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn timeout<F: Future>(
+    duration: std::time::Duration,
+    future: F,
+) -> Result<F::Output, ()> {
+    use futures::future::{Either, select};
+    let millis = u32::try_from(duration.as_millis()).unwrap_or(u32::MAX);
+    let timer = std::pin::pin!(gloo_timers::future::TimeoutFuture::new(millis));
+    let future = std::pin::pin!(future);
+    match select(future, timer).await {
+        Either::Left((output, _)) => Ok(output),
+        Either::Right(((), _)) => Err(()),
+    }
+}

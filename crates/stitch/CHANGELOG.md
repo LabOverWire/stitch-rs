@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wasm32` builds now support **remote MQTT sync over WebSocket** via
+  `mqtt5-wasm`. The MQTT client sits behind an `MqttClientApi` trait, so
+  `SyncEngine`'s request/response, scope-fetch, and live-mutation logic is shared
+  across native (`mqtt5::MqttClient`, TCP/TLS) and wasm
+  (`mqtt5_wasm::WasmMqttClient`, `ws://`/`wss://`). This is the core sync path —
+  connect/subscribe/publish, live mutation delivery into the cache, scope
+  fetch/open, and reconnect. JWT enhanced-auth and the durable offline queue stay
+  native-only for now (a connect-time ticket is ignored on wasm with a warning).
+- `stitch-wasm`: `createStore(config, { remote: { url, clientId? } })` enables
+  remote sync, plus a `connectionStatus()` getter. `initialize()` connects when a
+  remote is configured.
 - `wasm32` builds now support durable **IndexedDB persistence** via `mqdb-wasm`,
   matching the native fjall persistence layer. The record store sits behind a
   backend `Db` trait, so `PersistenceLayer` is shared across native and wasm; on

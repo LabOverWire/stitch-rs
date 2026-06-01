@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
+pub use crate::queue::{MutationSender, OfflineQueue};
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
 use mqdb_core::types::{Filter, FilterOp};
@@ -9,33 +10,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const PENDING_ENTITY: &str = "pending_sync";
-
-#[async_trait]
-pub trait MutationSender: Send + Sync {
-    async fn sync_create(&self, entity: &str, scope_id: &str, data: Record) -> Result<()>;
-    async fn sync_update(&self, entity: &str, scope_id: &str, id: &str, data: Record)
-    -> Result<()>;
-    async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()>;
-    async fn read_entity(&self, entity: &str, id: &str) -> Result<Option<Record>>;
-    async fn delete_entity(&self, entity: &str, id: &str) -> Result<()>;
-}
-
-#[async_trait]
-pub trait OfflineQueue: Send + Sync {
-    async fn queue(&self, mutation: PendingMutation) -> Result<()>;
-    async fn remove(
-        &self,
-        entity: &str,
-        entity_id: &str,
-        scope_id: &str,
-        op: Operation,
-    ) -> Result<()>;
-    async fn flush(&self, sender: &dyn MutationSender) -> Result<usize>;
-    async fn clear(&self) -> Result<()>;
-    async fn pending_for_scope(&self, scope_id: &str) -> Result<Vec<PendingMutation>>;
-    async fn has_pending_insert(&self, entity: &str, entity_id: &str) -> Result<bool>;
-    fn set_authenticated_user(&self, user_id: Option<String>);
-}
 
 #[derive(Debug, Clone)]
 struct ConsolidatedMutation {
