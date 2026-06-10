@@ -1,0 +1,30 @@
+[package]
+name = "mqp2p"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Peer-to-peer transport (QUIC + NAT traversal) over an MQTT signaling channel."
+repository = "https://github.com/LabOverWire/stitch-rs"
+publish = false
+
+[dependencies]
+mqtt5 = "0.31"
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = { version = "1.14", features = ["std"] }
+rcgen = "0.13"
+ring = "0.17"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+flume = { version = "0.12", features = ["async"] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+rand = "0.10.0"
