@@ -301,3 +301,114 @@ async fn delete_unknown_returns_not_found() {
         .unwrap_err();
     assert!(err.is_not_found(), "expected NotFound, got {err:?}");
 }
+
+#[tokio::test]
+async fn create_accepts_null_optional_field_and_lists_record() {
+    // Regression for chorale M-FS1 V1 (2026-06-17): a record with
+    // `null` set on an optional Number field used to fail the mqdb
+    // schema validator inside persistence.create with
+    // `expected type Number, got null`. `Store::create` discarded
+    // that error (memory still had the record), so subsequent
+    // `Store::list` returned empty until restart while `Store::read`
+    // succeeded. Fix: mirror `memory_store::strip_nulls` in
+    // `persistence::create`.
+    use std::collections::HashMap;
+    let mut entities = HashMap::new();
+    entities.insert(
+        "project".to_string(),
+        EntityDefinition {
+            fields: vec![SchemaField {
+                name: "id".to_string(),
+                r#type: FieldType::String,
+                required: true,
+                default: None,
+            }],
+            ..EntityDefinition::default()
+        },
+    );
+    entities.insert(
+        "note".to_string(),
+        EntityDefinition {
+            fields: vec![
+                SchemaField {
+                    name: "id".to_string(),
+                    r#type: FieldType::String,
+                    required: true,
+                    default: None,
+                },
+                SchemaField {
+                    name: "projectId".to_string(),
+                    r#type: FieldType::String,
+                    required: true,
+                    default: None,
+                },
+                SchemaField {
+                    name: "body".to_string(),
+                    r#type: FieldType::String,
+                    required: true,
+                    default: None,
+                },
+                SchemaField {
+                    name: "read_at".to_string(),
+                    r#type: FieldType::Number,
+                    required: false,
+                    default: None,
+                },
+            ],
+            ..EntityDefinition::default()
+        },
+    );
+    let cfg = Arc::new(StoreConfig::new(
+        entities,
+        ScopeConfig {
+            root_entity: "project".to_string(),
+            child_entities: vec!["note".to_string()],
+            scope_field: "projectId".to_string(),
+        },
+    ));
+    let dir = TempDir::new().unwrap();
+    let persistence = PersistenceConfig {
+        db_path: dir.path().join("db"),
+        passphrase: None,
+    };
+    let layer = PersistenceLayer::open(&persistence, cfg).await.unwrap();
+
+    layer
+        .create(
+            "project",
+            make_record(&[("id", json!("p1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    layer
+        .create(
+            "note",
+            make_record(&[
+                ("id", json!("n1")),
+                ("projectId", json!("p1")),
+                ("body", json!("hello")),
+                ("read_at", Value::Null),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .expect("create with null optional field must succeed");
+
+    let got = layer.read("note", "n1").await.unwrap();
+    assert!(got.is_some(), "read after create must return the record");
+
+    let listed = layer
+        .list_by_scope("note", "p1")
+        .await
+        .expect("list_by_scope must succeed");
+    assert_eq!(
+        listed.len(),
+        1,
+        "list_by_scope must return the created record (regression: was 0 before strip_nulls)",
+    );
+    assert_eq!(
+        listed[0].get("id").and_then(Value::as_str),
+        Some("n1"),
+    );
+}
