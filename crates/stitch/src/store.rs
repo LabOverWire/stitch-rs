@@ -826,15 +826,22 @@ impl Store {
         persistence.recover().await
     }
 
-    /// Reconnect the remote client, optionally with a fresh auth ticket.
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    /// Reconnect the remote client, optionally with a fresh auth ticket
+    /// or fresh username + password.
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
             return Err(Error::Config(
                 "reconnect requires remote configuration".into(),
             ));
         };
-        remote.reconnect(server_url, ticket).await
+        remote.reconnect(server_url, ticket, username, password).await
     }
 
     /// Register a callback fired when the broker returns
@@ -1066,7 +1073,14 @@ impl StoreInner {
                 };
                 #[cfg(target_arch = "wasm32")]
                 let ticket: Option<String> = remote_cfg.ticket.clone();
-                let _ = remote.connect(&remote_cfg.server_url, ticket).await;
+                let _ = remote
+                    .connect(
+                        &remote_cfg.server_url,
+                        ticket,
+                        remote_cfg.username.clone(),
+                        remote_cfg.password.clone(),
+                    )
+                    .await;
             }
         }
 

@@ -36,6 +36,14 @@ impl MqttClientApi for NativeMqttClient {
             self.client
                 .set_auth_handler(JwtAuthHandler::new(ticket.clone()))
                 .await;
+        } else if let (Some(user), Some(pass)) = (&args.username, &args.password) {
+            // Classic MQTT username+password CONNECT. Used when the
+            // broker is in `AuthMethod::Password` mode rather than
+            // `AuthMethod::Jwt` (mqdb-agent defaults to Password if
+            // `MQDB_JWT_ALGORITHM` isn't set). No enhanced auth
+            // method advertised — the broker reads creds from the
+            // CONNECT packet's username/password properties.
+            options = options.with_credentials(user.clone(), pass.clone());
         }
 
         let result = self

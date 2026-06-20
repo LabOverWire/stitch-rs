@@ -53,6 +53,12 @@ impl MqttClientApi for WasmMqttClientAdapter {
                     .clone(),
             );
             self.callbacks.borrow_mut().push(on_challenge);
+        } else if let (Some(user), Some(pass)) = (&args.username, &args.password) {
+            // Classic MQTT password auth on the wasm path. Mirrors the
+            // native branch in `mqtt_client/native.rs`. Used when the
+            // broker is in `AuthMethod::Password` mode (no JWT).
+            opts.set_username(Some(user.clone()));
+            opts.set_password(Some(pass.as_bytes()));
         }
         self.client
             .connect_with_options(url, &opts)

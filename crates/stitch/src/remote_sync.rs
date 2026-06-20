@@ -63,16 +63,32 @@ impl RemoteSyncLayer {
         self.sync.connection_status()
     }
 
-    pub async fn connect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
-        self.sync.connect(server_url, ticket).await
+    pub async fn connect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
+        self.sync
+            .connect(server_url, ticket, username, password)
+            .await
     }
 
     pub async fn disconnect(&self) -> Result<()> {
         self.sync.disconnect().await
     }
 
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
-        self.sync.reconnect(server_url, ticket).await
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
+        self.sync
+            .reconnect(server_url, ticket, username, password)
+            .await
     }
 
     pub fn set_session_invalid_handler<F>(&self, handler: F)

@@ -123,7 +123,13 @@ impl SyncEngine {
         self.client.is_connected().await
     }
 
-    pub async fn connect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    pub async fn connect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let _ = self
             .state
             .connection_status
@@ -134,6 +140,8 @@ impl SyncEngine {
             keep_alive_secs: 60,
             session_expiry_secs: self.config.session_expiry_secs,
             jwt_ticket: ticket,
+            username,
+            password,
         };
 
         let result = self.client.connect(server_url, args).await?;
@@ -522,9 +530,15 @@ impl SyncEngine {
         *self.state.session_invalid.lock().unwrap() = None;
     }
 
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let _ = self.client.disconnect().await;
-        self.connect(server_url, ticket).await
+        self.connect(server_url, ticket, username, password).await
     }
 
     fn cleanup_on_disconnect(&self) {
