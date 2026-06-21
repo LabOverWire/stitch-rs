@@ -45,6 +45,10 @@ struct RemoteDto {
     client_id: Option<String>,
     #[serde(default)]
     ticket: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -150,10 +154,12 @@ pub struct Store {
 ///
 /// Pass an optional second argument to enable durable IndexedDB persistence
 /// and/or remote MQTT-over-WebSocket sync:
-/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket? } }`.
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
 /// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
 /// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
-/// enhanced auth when the broker requires it. `initialize` then connects and live
+/// enhanced auth, and `remote.username` + `remote.password` drive classic MQTT
+/// password auth when the broker isn't in JWT mode (ticket takes precedence).
+/// `initialize` then connects and live
 /// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
 /// for an in-memory store.
 ///
@@ -184,6 +190,8 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
         remote: opts.remote.map(|r| {
             let mut cfg = RemoteConfig::new(r.url);
             cfg.ticket = r.ticket;
+            cfg.username = r.username;
+            cfg.password = r.password;
             cfg
         }),
     };
@@ -460,7 +468,8 @@ impl Store {
         self.inner.disconnect().await.map_err(err)
     }
 
-    /// Reconnect the remote client, optionally with a fresh JWT ticket.
+    /// Reconnect the remote client, optionally with a fresh JWT ticket or
+    /// fresh username + password.
     ///
     /// # Errors
     /// Returns an error if no remote is configured or the reconnect fails.
@@ -468,8 +477,13 @@ impl Store {
         &self,
         server_url: String,
         ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
     ) -> Result<(), JsValue> {
-        self.inner.reconnect(&server_url, ticket).await.map_err(err)
+        self.inner
+            .reconnect(&server_url, ticket, username, password)
+            .await
+            .map_err(err)
     }
 
     /// Disconnect, clear auth + sync state. Persistence and the offline queue

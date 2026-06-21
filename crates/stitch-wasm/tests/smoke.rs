@@ -292,6 +292,49 @@ async fn remote_with_jwt_connects_without_panicking() {
 }
 
 #[wasm_bindgen_test]
+async fn remote_with_password_connects_without_panicking() {
+    let opts = js_sys::JSON::parse(
+        r#"{"remote":{"url":"ws://127.0.0.1:1","username":"alice","password":"s3cret"}}"#,
+    )
+    .unwrap();
+    let store = stitch_wasm::create_store(config(), opts)
+        .expect("create_store must parse username/password remote options");
+    store
+        .initialize()
+        .await
+        .expect("initialize with username+password sets classic auth and attempts connect");
+    let status = store.connection_status().expect("connection_status");
+    assert_ne!(
+        status, "Connected",
+        "must not report Connected against a dead broker"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn reconnect_with_password_args_is_callable_in_browser() {
+    let store = stitch_wasm::create_store(config(), remote_options("ws://127.0.0.1:1"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+    let result = store
+        .reconnect(
+            "ws://127.0.0.1:1".to_string(),
+            None,
+            Some("alice".to_string()),
+            Some("s3cret".to_string()),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "reconnect to a dead broker drives the classic-auth path and fails gracefully with an error, not a panic"
+    );
+    let status = store.connection_status().expect("connection_status");
+    assert_ne!(
+        status, "Connected",
+        "must not report Connected against a dead broker"
+    );
+}
+
+#[wasm_bindgen_test]
 async fn list_child_count_snapshot_map_in_browser() {
     use wasm_bindgen::JsCast;
 

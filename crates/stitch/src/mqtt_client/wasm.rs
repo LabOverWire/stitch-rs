@@ -58,7 +58,7 @@ impl MqttClientApi for WasmMqttClientAdapter {
             // native branch in `mqtt_client/native.rs`. Used when the
             // broker is in `AuthMethod::Password` mode (no JWT).
             opts.set_username(Some(user.clone()));
-            opts.set_password(Some(pass.as_bytes()));
+            opts.set_password(pass.as_bytes());
         }
         self.client
             .connect_with_options(url, &opts)

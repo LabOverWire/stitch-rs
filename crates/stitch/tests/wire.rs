@@ -162,7 +162,10 @@ async fn offline_create_flushes_after_connect() {
         .await
         .unwrap();
 
-    store_a.reconnect(&broker.url(), None).await.unwrap();
+    store_a
+        .reconnect(&broker.url(), None, None, None)
+        .await
+        .unwrap();
     wait_for_connected(&store_a).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -723,7 +726,10 @@ async fn reconnect_validator_fires_on_connected() {
 
     store.disconnect().await.unwrap();
     sleep(Duration::from_millis(100)).await;
-    store.reconnect(&broker.url(), None).await.unwrap();
+    store
+        .reconnect(&broker.url(), None, None, None)
+        .await
+        .unwrap();
     wait_for_connected(&store).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
