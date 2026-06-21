@@ -127,14 +127,6 @@ impl PersistenceLayer {
         }
     }
 
-    /// Drop null fields from a record. Mirrors `memory_store::strip_nulls`
-    /// — without this, `read_at: null` (and any other "set this optional
-    /// field to absent") write fails the mqdb schema validator with
-    /// `expected type Number, got null`, which silently strands the
-    /// write because `Store::create` discards `persistence.create`'s
-    /// result. The memory layer accepted it; persistence didn't; lists
-    /// returned empty until the next restart re-read from the journal.
-    /// Discovered via chorale M-FS1 V1 harness (2026-06-17).
     pub async fn update(
         &self,
         entity: &str,
@@ -142,6 +134,8 @@ impl PersistenceLayer {
         fields: Record,
         origin: Origin,
     ) -> Result<Record> {
+        let mut fields = fields;
+        strip_nulls(&mut fields);
         let updated = self.db().update(entity, id, Value::Object(fields)).await?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {

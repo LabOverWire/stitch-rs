@@ -466,8 +466,15 @@ impl Store {
                         .ok();
                 }
             }
-            if scope_id.is_some() {
-                let _ = persistence.update(entity, id, fields.clone(), origin).await;
+            if scope_id.is_some()
+                && let Err(e) = persistence.update(entity, id, fields.clone(), origin).await
+            {
+                tracing::warn!(
+                    entity,
+                    id,
+                    error = %e,
+                    "Store::update: persistence.update failed (memory still updated; list reads will miss this change until restart)",
+                );
             }
         } else if existing.is_none() {
             return Ok(());
@@ -841,7 +848,9 @@ impl Store {
                 "reconnect requires remote configuration".into(),
             ));
         };
-        remote.reconnect(server_url, ticket, username, password).await
+        remote
+            .reconnect(server_url, ticket, username, password)
+            .await
     }
 
     /// Register a callback fired when the broker returns
