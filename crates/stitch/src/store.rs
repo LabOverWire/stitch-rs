@@ -328,15 +328,6 @@ impl Store {
             .create(entity, &effective_scope, data.clone(), origin)
             .await?;
 
-        // Persistence failure is not fatal — memory already has the
-        // record. But we surface the error so the operator sees
-        // stranded writes in their tracing log (without this,
-        // `Store::list` returns empty for any entity whose
-        // persistence.create rejected the payload, with no signal that
-        // anything went wrong). Discovered via chorale M-FS1 V1 when
-        // `read_at: null` was silently rejected by the schema
-        // validator; root cause fixed in persistence.rs (strip_nulls),
-        // but the warn stays as a backstop against future asymmetries.
         if let Some(persistence) = &inner.persistence
             && !origin.skips_persistence()
             && let Err(e) = persistence.create(entity, data.clone(), origin).await

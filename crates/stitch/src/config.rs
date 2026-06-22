@@ -135,19 +135,9 @@ pub type TicketFuture =
 
 pub type TicketProvider = Arc<dyn Fn() -> TicketFuture + Send + Sync>;
 
-/// MQTT broker connection settings for remote sync. When provided to
-/// [`StoreOptions::remote`], the store connects to `server_url` and
-/// authenticates one of two ways:
-///
-/// 1. **JWT enhanced auth** when `get_ticket` or `ticket` is set. The
-///    broker must be in `AuthMethod::Jwt` mode (mqdb: `MQDB_JWT_ALGORITHM`
-///    set). `get_ticket` (a per-connect provider, native) is used if set,
-///    otherwise the static `ticket`. The static `ticket` is the path
-///    browser builds use (no `Send` async provider).
-/// 2. **Classic MQTT password auth** when `username` + `password` are
-///    set and no JWT is configured. The broker must be in
-///    `AuthMethod::Password` mode (mqdb default with `MQDB_PASSWD`).
-///    JWT takes precedence when both are set.
+/// MQTT broker connection settings for remote sync. Authenticates with a JWT
+/// (`get_ticket` or `ticket`) when set, otherwise with `username` + `password`;
+/// JWT takes precedence when both are present.
 #[derive(Clone)]
 pub struct RemoteConfig {
     pub server_url: String,

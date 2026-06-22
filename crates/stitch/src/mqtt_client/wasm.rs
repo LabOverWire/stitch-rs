@@ -38,11 +38,6 @@ impl MqttClientApi for WasmMqttClientAdapter {
         opts.set_keepAlive(u16::try_from(args.keep_alive_secs).unwrap_or(u16::MAX));
         opts.set_sessionExpiryInterval(Some(args.session_expiry_secs));
         if let Some(ticket) = &args.jwt_ticket {
-            // MQTT v5 enhanced auth: the JWT travels as the CONNECT auth data,
-            // mirroring the native `JwtAuthHandler`. A broker `AUTH(Continue)`
-            // challenge is answered by doing nothing (never call `respond_auth`),
-            // matching the native handler's `Success` — but a callback must be
-            // registered or `mqtt5-wasm` errors when a challenge arrives.
             opts.set_authenticationMethod(Some("JWT".into()));
             opts.set_authenticationData(ticket.as_bytes());
             let on_challenge = Closure::<dyn FnMut()>::new(|| {});
@@ -54,9 +49,6 @@ impl MqttClientApi for WasmMqttClientAdapter {
             );
             self.callbacks.borrow_mut().push(on_challenge);
         } else if let (Some(user), Some(pass)) = (&args.username, &args.password) {
-            // Classic MQTT password auth on the wasm path. Mirrors the
-            // native branch in `mqtt_client/native.rs`. Used when the
-            // broker is in `AuthMethod::Password` mode (no JWT).
             opts.set_username(Some(user.clone()));
             opts.set_password(pass.as_bytes());
         }

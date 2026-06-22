@@ -9,11 +9,8 @@ mod native;
 mod wasm;
 
 /// Connect parameters, platform-neutral. `jwt_ticket` drives MQTT5 enhanced
-/// auth on native; it is ignored on wasm for now (auth is a later milestone).
-/// `username` + `password` drive classic MQTT password authentication —
-/// used when the broker isn't configured for JWT enhanced auth (e.g.
-/// `MQDB_JWT_ALGORITHM` unset → broker selects `AuthMethod::Password`).
-/// JWT takes precedence when both are set.
+/// auth; `username` + `password` drive classic password auth (JWT wins when
+/// both are set).
 pub(crate) struct ConnectArgs {
     pub clean_start: bool,
     pub keep_alive_secs: u64,
