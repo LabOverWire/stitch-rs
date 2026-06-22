@@ -731,6 +731,27 @@ impl Store {
         Ok(inner.memory.list(entity, scope_id).await?.len())
     }
 
+    /// Synchronous read from the in-memory cache for the loaded scope.
+    /// Mirrors the TS core's synchronous `read`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Record>> {
+        self.inner()?.memory.read_sync(entity, id)
+    }
+
+    /// Synchronous snapshot of all rows for an entity within a scope, from the
+    /// in-memory cache. Mirrors the TS core's synchronous `getSnapshot`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn snapshot_sync(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
+        self.inner()?.memory.list_sync(entity, scope_id)
+    }
+
+    /// Synchronous row count for an entity within a scope, from the in-memory
+    /// cache. Mirrors the TS core's synchronous `getChildCount`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn child_count_sync(&self, entity: &str, scope_id: &str) -> Result<usize> {
+        self.inner()?.memory.count_sync(entity, scope_id)
+    }
+
     /// Switch the active scope. If a remote is connected, fetches the new
     /// scope's root + children, reconciles them with local state, replays any
     /// buffered live mutations, and atomically swaps the memory cache. When

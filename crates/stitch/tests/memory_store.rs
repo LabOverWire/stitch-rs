@@ -292,7 +292,7 @@ async fn clear_scope_emits_scope_cleared() {
     };
     assert_eq!(cleared.0, "p1");
     assert!(cleared.1.contains(&"task".to_string()));
-    assert!(store.current_scope().await.is_none());
+    assert!(store.current_scope().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

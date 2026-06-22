@@ -41,12 +41,11 @@ async fn create_read_snapshot_in_browser() {
         .await
         .expect("create second");
 
-    let got = store.read("task".into(), id).await.expect("read");
+    let got = store.read("task".into(), id).expect("read");
     assert!(!got.is_null(), "a created row must be readable back");
 
     let snapshot = store
         .snapshot("task".into(), "p1".into())
-        .await
         .expect("snapshot");
     let rows = js_sys::Array::from(&snapshot);
     assert_eq!(rows.length(), 2, "snapshot must contain both created tasks");
@@ -62,8 +61,8 @@ async fn scope_isolation_in_browser() {
     let b = js_sys::JSON::parse(r#"{"title":"b"}"#).unwrap();
     store.create("task".into(), "p2".into(), b).await.unwrap();
 
-    let p1 = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).await.unwrap());
-    let p2 = js_sys::Array::from(&store.snapshot("task".into(), "p2".into()).await.unwrap());
+    let p1 = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).unwrap());
+    let p2 = js_sys::Array::from(&store.snapshot("task".into(), "p2".into()).unwrap());
     assert_eq!(p1.length(), 1, "scope p1 sees only its own task");
     assert_eq!(p2.length(), 1, "scope p2 sees only its own task");
 }
@@ -203,7 +202,7 @@ async fn remote_connect_failure_is_graceful_in_browser() {
         .create("task".into(), "p1".into(), row)
         .await
         .expect("local create works without a broker");
-    let got = store.read("task".into(), id).await.expect("read");
+    let got = store.read("task".into(), id).expect("read");
     assert!(
         !got.is_null(),
         "local create/read works with a configured-but-unreachable remote"
@@ -237,7 +236,7 @@ async fn persistence_survives_reopen_in_browser() {
         .replace_scope("p1".into())
         .await
         .expect("replace_scope");
-    let rows = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).await.unwrap());
+    let rows = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).unwrap());
     assert_eq!(
         rows.length(),
         1,
@@ -354,13 +353,11 @@ async fn list_child_count_snapshot_map_in_browser() {
 
     let count = store
         .get_child_count("task".into(), "p1".into())
-        .await
         .expect("child count");
     assert_eq!(count, 2, "getChildCount matches the scope's rows");
 
     let map = store
         .get_snapshot_as_map("task".into(), "p1".into())
-        .await
         .expect("snapshot map");
     let keys = js_sys::Object::keys(&map.dyn_into::<js_sys::Object>().unwrap());
     assert_eq!(keys.length(), 2, "getSnapshotAsMap is keyed by row id");

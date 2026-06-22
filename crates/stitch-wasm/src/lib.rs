@@ -268,8 +268,8 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the read fails.
-    pub async fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
-        match self.inner.read(&entity, &id).await.map_err(err)? {
+    pub fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
+        match self.inner.read_sync(&entity, &id).map_err(err)? {
             Some(record) => to_js(&serde_json::Value::Object(record)),
             None => Ok(JsValue::NULL),
         }
@@ -334,8 +334,8 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getSnapshot")]
-    pub async fn snapshot(&self, entity: String, scope_id: String) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot(&entity, &scope_id).await.map_err(err)?;
+    pub fn snapshot(&self, entity: String, scope_id: String) -> Result<JsValue, JsValue> {
+        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
         let array = rows.into_iter().map(serde_json::Value::Object).collect();
         to_js(&serde_json::Value::Array(array))
     }
@@ -385,15 +385,8 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getChildCount")]
-    pub async fn get_child_count(
-        &self,
-        entity: String,
-        scope_id: String,
-    ) -> Result<usize, JsValue> {
-        self.inner
-            .child_count(&entity, &scope_id)
-            .await
-            .map_err(err)
+    pub fn get_child_count(&self, entity: String, scope_id: String) -> Result<usize, JsValue> {
+        self.inner.child_count_sync(&entity, &scope_id).map_err(err)
     }
 
     /// Snapshot of `entity` within `scopeId` as an object keyed by row id.
@@ -401,12 +394,12 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getSnapshotAsMap")]
-    pub async fn get_snapshot_as_map(
+    pub fn get_snapshot_as_map(
         &self,
         entity: String,
         scope_id: String,
     ) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot(&entity, &scope_id).await.map_err(err)?;
+        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
         let mut map = serde_json::Map::new();
         for row in rows {
             let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);

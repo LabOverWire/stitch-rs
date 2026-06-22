@@ -7,8 +7,8 @@ use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent, st
 use mqdb_core::types::{Filter, FilterOp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, broadcast};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::broadcast;
 
 pub struct MemoryStore {
     state: RwLock<State>,
@@ -76,12 +76,12 @@ impl MemoryStore {
         self.bus.subscribe()
     }
 
-    pub async fn current_scope(&self) -> Option<String> {
-        self.state.read().await.current_scope.clone()
+    pub fn current_scope(&self) -> Option<String> {
+        self.state.read().unwrap().current_scope.clone()
     }
 
-    async fn db(&self) -> DynDb {
-        Shared::clone(&self.state.read().await.db)
+    fn db(&self) -> DynDb {
+        Shared::clone(&self.state.read().unwrap().db)
     }
 
     pub async fn create(
@@ -99,7 +99,7 @@ impl MemoryStore {
             data.insert(scope_field.clone(), Value::String(scope_id.to_string()));
         }
 
-        let db = self.db().await;
+        let db = self.db();
         let value = db.create(entity, Value::Object(data)).await?;
 
         let record = value_to_record(value)?;
@@ -120,7 +120,7 @@ impl MemoryStore {
     }
 
     pub async fn read(&self, entity: &str, id: &str) -> Result<Option<Record>> {
-        let db = self.db().await;
+        let db = self.db();
         match db.read(entity, id).await? {
             Some(value) => Ok(Some(value_to_record(value)?)),
             None => Ok(None),
@@ -128,12 +128,35 @@ impl MemoryStore {
     }
 
     pub async fn list(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
-        let db = self.db().await;
+        let db = self.db();
         let filters = self.list_filters(entity, scope_id);
         let values = db
             .list(entity, filters, Vec::new(), None, Vec::new())
             .await?;
         values.into_iter().map(value_to_record).collect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Record>> {
+        match self.db().read_sync(entity, id)? {
+            Some(value) => Ok(Some(value_to_record(value)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn list_sync(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
+        let filters = self.list_filters(entity, scope_id);
+        let values = self
+            .db()
+            .list_sync(entity, filters, Vec::new(), None, Vec::new())?;
+        values.into_iter().map(value_to_record).collect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn count_sync(&self, entity: &str, scope_id: &str) -> Result<usize> {
+        let filters = self.list_filters(entity, scope_id);
+        self.db().count_sync(entity, filters)
     }
 
     pub async fn update(
@@ -144,7 +167,7 @@ impl MemoryStore {
         origin: Origin,
     ) -> Result<Record> {
         strip_nulls(&mut fields);
-        let db = self.db().await;
+        let db = self.db();
         let updated = db.update(entity, id, Value::Object(fields)).await?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {
@@ -167,7 +190,7 @@ impl MemoryStore {
     }
 
     pub async fn delete(&self, entity: &str, id: &str, origin: Origin) -> Result<()> {
-        let db = self.db().await;
+        let db = self.db();
         let existing = self.read(entity, id).await?;
         let scope_id = existing
             .as_ref()
@@ -203,7 +226,7 @@ impl MemoryStore {
         }
 
         let previous_scope = {
-            let mut state = self.state.write().await;
+            let mut state = self.state.write().unwrap();
             let prev = state.current_scope.take();
             state.db = fresh;
             state.current_scope = Some(scope_id.to_string());
@@ -229,7 +252,7 @@ impl MemoryStore {
     pub async fn clear_scope(&self, scope_id: &str) -> Result<()> {
         let fresh = open_memory_db(&self.config).await?;
         {
-            let mut state = self.state.write().await;
+            let mut state = self.state.write().unwrap();
             state.db = fresh;
             if state.current_scope.as_deref() == Some(scope_id) {
                 state.current_scope = None;
