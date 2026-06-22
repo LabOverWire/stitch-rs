@@ -12,7 +12,7 @@ use mqdb_core::types::{
     Filter, FilterOp, SortDirection as MqdbSortDirection, SortOrder as MqdbSortOrder,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -811,6 +811,50 @@ impl Store {
             inner.memory.load_scope(scope_id, bundle).await?;
         }
         Ok(())
+    }
+
+    /// Load a scope's rows into the in-memory cache from caller-supplied data
+    /// (`{ entity: [records] }`), replacing any currently-loaded scope. The
+    /// scope field is stamped onto child records. Mirrors the TS core's
+    /// `loadScope`.
+    pub async fn load_scope(
+        &self,
+        scope_id: &str,
+        data: HashMap<String, Vec<Record>>,
+    ) -> Result<()> {
+        let inner = self.inner()?;
+        let root_entity = inner.config.scope.root_entity.as_str();
+        let scope_field = &inner.config.scope.scope_field;
+        let top_level: HashSet<&str> = inner
+            .config
+            .top_level_entities
+            .iter()
+            .map(|t| t.entity.as_str())
+            .collect();
+        let mut root = None;
+        let mut children = BTreeMap::new();
+        for (entity, mut records) in data {
+            if entity == root_entity {
+                root = records.into_iter().next();
+            } else {
+                if !top_level.contains(entity.as_str()) {
+                    for record in &mut records {
+                        record.insert(scope_field.clone(), Value::String(scope_id.to_string()));
+                    }
+                }
+                children.insert(entity, records);
+            }
+        }
+        inner
+            .memory
+            .load_scope(scope_id, ScopeBundle { root, children })
+            .await
+    }
+
+    /// Clear a scope from the in-memory cache. Mirrors the TS core's
+    /// `clearScope`.
+    pub async fn clear_scope(&self, scope_id: &str) -> Result<()> {
+        self.inner()?.memory.clear_scope(scope_id).await
     }
 
     /// Unsubscribe from a scope's MQTT topics and clear it from

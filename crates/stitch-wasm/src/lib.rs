@@ -349,6 +349,28 @@ impl Store {
         self.inner.replace_scope(&scope_id).await.map_err(err)
     }
 
+    /// Load a scope's rows into the in-memory cache from caller-supplied data,
+    /// `{ entity: [records] }`, replacing any currently-loaded scope. Equivalent
+    /// to TS `loadScope`.
+    ///
+    /// # Errors
+    /// Returns an error if `data` is malformed or the load fails.
+    #[wasm_bindgen(js_name = "loadScope")]
+    pub async fn load_scope(&self, scope_id: String, data: JsValue) -> Result<(), JsValue> {
+        let parsed: HashMap<String, Vec<Record>> =
+            serde_json::from_value(json_from_js(&data)?).map_err(err)?;
+        self.inner.load_scope(&scope_id, parsed).await.map_err(err)
+    }
+
+    /// Clear a scope from the in-memory cache. Equivalent to TS `clearScope`.
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    #[wasm_bindgen(js_name = "clearScope")]
+    pub async fn clear_scope(&self, scope_id: String) -> Result<(), JsValue> {
+        self.inner.clear_scope(&scope_id).await.map_err(err)
+    }
+
     /// Snapshot of all rows for `entity` within `scopeId`. Equivalent to TS
     /// `getSnapshot`.
     ///

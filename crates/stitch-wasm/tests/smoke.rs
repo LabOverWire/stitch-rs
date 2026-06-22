@@ -524,6 +524,26 @@ async fn scope_signal_observes_committed_data_in_browser() {
 }
 
 #[wasm_bindgen_test]
+async fn load_and_clear_scope_in_browser() {
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let data = js_sys::JSON::parse(r#"{"task":[{"id":"t1","title":"a"},{"id":"t2","title":"b"}]}"#)
+        .unwrap();
+    store
+        .load_scope("p1".into(), data)
+        .await
+        .expect("load_scope");
+
+    let rows = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).unwrap());
+    assert_eq!(rows.length(), 2, "loadScope populates the in-memory scope");
+
+    store.clear_scope("p1".into()).await.expect("clear_scope");
+    let after = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).unwrap());
+    assert_eq!(after.length(), 0, "clearScope empties the scope");
+}
+
+#[wasm_bindgen_test]
 async fn origin_tag_remote_skips_persistence_in_browser() {
     let store = stitch_wasm::create_store(config(), persist_options("stitch-tag-remote"))
         .expect("create_store");
