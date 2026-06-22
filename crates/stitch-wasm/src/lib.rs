@@ -245,6 +245,21 @@ impl Store {
         self.inner.set_authenticated_user(user_id).map_err(err)
     }
 
+    /// Register a callback fired when the broker rejects the session
+    /// (`MQTT_DISCONNECT_AUTH_FAILURE`). Use it to clear cached auth and route
+    /// the user to re-login. No-op if no remote is configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "setSessionInvalidHandler")]
+    pub fn set_session_invalid_handler(&self, callback: js_sys::Function) -> Result<(), JsValue> {
+        self.inner
+            .set_session_invalid_handler(move || {
+                let _ = callback.call0(&JsValue::NULL);
+            })
+            .map_err(err)
+    }
+
     /// Number of offline-queued mutations buffered for `scopeId` (the
     /// authenticated user's pending writes). `0` when no remote/queue is
     /// configured.

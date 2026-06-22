@@ -216,6 +216,22 @@ async fn remote_connect_failure_is_graceful_in_browser() {
 }
 
 #[wasm_bindgen_test]
+async fn set_session_invalid_handler_accepts_js_callback_in_browser() {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let store = stitch_wasm::create_store(config(), remote_options("ws://127.0.0.1:1"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let closure = Closure::<dyn FnMut()>::new(move || {});
+    store
+        .set_session_invalid_handler(closure.as_ref().unchecked_ref::<js_sys::Function>().clone())
+        .expect("setSessionInvalidHandler accepts a non-Send JS callback");
+    closure.forget();
+}
+
+#[wasm_bindgen_test]
 async fn persistence_survives_reopen_in_browser() {
     let id = {
         let store = stitch_wasm::create_store(config(), persist_options("stitch-m2-reopen"))

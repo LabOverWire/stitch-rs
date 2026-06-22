@@ -931,6 +931,21 @@ impl Store {
         Ok(())
     }
 
+    /// Register a callback fired when the broker returns
+    /// `MQTT_DISCONNECT_AUTH_FAILURE`. Use it to clear cached auth state and
+    /// route the user to re-login.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F) -> Result<()>
+    where
+        F: Fn() + 'static,
+    {
+        let inner = self.inner()?;
+        if let Some(remote) = &inner.remote {
+            remote.set_session_invalid_handler(handler);
+        }
+        Ok(())
+    }
+
     /// Register an async validator fired at the start of every successful
     /// (re)connect. See [`ReconnectValidator`].
     #[cfg(not(target_arch = "wasm32"))]

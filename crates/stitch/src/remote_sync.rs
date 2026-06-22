@@ -91,9 +91,18 @@ impl RemoteSyncLayer {
             .await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_session_invalid_handler<F>(&self, handler: F)
     where
         F: Fn() + Send + Sync + 'static,
+    {
+        self.sync.set_session_invalid_handler(handler);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F)
+    where
+        F: Fn() + 'static,
     {
         self.sync.set_session_invalid_handler(handler);
     }

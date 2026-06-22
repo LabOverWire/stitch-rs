@@ -27,11 +27,14 @@ pub struct SyncEngine {
     prefix: String,
     response_prefix: String,
     client: DynMqttClient,
-    state: Arc<EngineState>,
+    state: rt::Shared<EngineState>,
     request_timeout: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type SessionInvalidHandler = Arc<dyn Fn() + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type SessionInvalidHandler = std::rc::Rc<dyn Fn()>;
 
 struct EngineState {
     pending_requests: Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>,
@@ -76,7 +79,7 @@ impl SyncEngine {
             })
             .collect();
 
-        let state = Arc::new(EngineState {
+        let state = rt::Shared::new(EngineState {
             pending_requests: Mutex::new(HashMap::new()),
             subscribed_scopes: Mutex::new(HashSet::new()),
             awaiting_state: Mutex::new(HashSet::new()),
@@ -93,7 +96,7 @@ impl SyncEngine {
         });
 
         let client = new_client(&client_id);
-        Self::wire_connection_events(&client, Arc::clone(&state)).await?;
+        Self::wire_connection_events(&client, rt::Shared::clone(&state)).await?;
 
         Ok(Self {
             client_id,
@@ -442,7 +445,7 @@ impl SyncEngine {
 
     async fn subscribe_to_response_topic(&self) -> Result<()> {
         let pattern = format!("{}/{}/#", self.response_prefix, self.client_id);
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 pattern,
@@ -468,7 +471,7 @@ impl SyncEngine {
             "{}/{}/+/events/#",
             self.prefix, self.config.scope.root_entity
         );
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 root_wildcard,
@@ -479,7 +482,7 @@ impl SyncEngine {
             .await?;
 
         for tl in &self.state.top_level_patterns {
-            let state = Arc::clone(&self.state);
+            let state = rt::Shared::clone(&self.state);
             let entity = tl.entity.clone();
             self.client
                 .subscribe(
@@ -498,7 +501,7 @@ impl SyncEngine {
             "{}/{}/{}/#",
             self.prefix, self.config.scope.root_entity, scope_id
         );
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 pattern,
@@ -509,7 +512,10 @@ impl SyncEngine {
             .await
     }
 
-    async fn wire_connection_events(client: &DynMqttClient, state: Arc<EngineState>) -> Result<()> {
+    async fn wire_connection_events(
+        client: &DynMqttClient,
+        state: rt::Shared<EngineState>,
+    ) -> Result<()> {
         let handler: ConnectionHandler = Box::new(move |status, auth_failure| {
             let _ = state.connection_status.send(status);
             if auth_failure && let Some(handler) = state.session_invalid.lock().unwrap().clone() {
@@ -519,11 +525,20 @@ impl SyncEngine {
         client.on_connection_event(handler).await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_session_invalid_handler<F>(&self, handler: F)
     where
         F: Fn() + Send + Sync + 'static,
     {
         *self.state.session_invalid.lock().unwrap() = Some(Arc::new(handler));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.state.session_invalid.lock().unwrap() = Some(std::rc::Rc::new(handler));
     }
 
     pub fn clear_session_invalid_handler(&self) {
