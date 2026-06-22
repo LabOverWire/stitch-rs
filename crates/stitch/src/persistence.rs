@@ -2,7 +2,7 @@ use crate::backend::{DynDb, open_persistent_db, value_to_record};
 use crate::config::{EntityDefinition, PersistenceConfig, StoreConfig};
 use crate::error::Result;
 use crate::origin::Origin;
-use crate::types::{MutationEvent, Operation, Record, StoreEvent};
+use crate::types::{MutationEvent, Operation, Record, StoreEvent, strip_nulls};
 use mqdb_core::types::{Filter, FilterOp, Pagination, SortOrder};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -244,14 +244,4 @@ impl PersistenceLayer {
             .and_then(Value::as_str)
             .map(str::to_string)
     }
-}
-
-/// Drop null fields from a record before passing to mqdb. Without this,
-/// the schema validator rejects e.g. `read_at: null` for an optional
-/// `Number` field with `expected type Number, got null`. Mirrors the
-/// same helper in `memory_store` so both layers accept the same
-/// records (otherwise memory accepts but persistence silently drops,
-/// leaving `Store::list` empty until restart).
-fn strip_nulls(record: &mut Record) {
-    record.retain(|_, v| !v.is_null());
 }

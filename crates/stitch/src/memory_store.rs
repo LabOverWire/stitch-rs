@@ -3,7 +3,7 @@ use crate::config::StoreConfig;
 use crate::error::Result;
 use crate::origin::Origin;
 use crate::rt::Shared;
-use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent};
+use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent, strip_nulls};
 use mqdb_core::types::{Filter, FilterOp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -284,8 +284,4 @@ impl MemoryStore {
             .chain(self.top_level.iter().cloned())
             .collect()
     }
-}
-
-fn strip_nulls(record: &mut Record) {
-    record.retain(|_, v| !v.is_null());
 }

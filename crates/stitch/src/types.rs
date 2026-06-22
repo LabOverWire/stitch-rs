@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 /// A single entity row, represented as a JSON object.
 pub type Record = serde_json::Map<String, Value>;
 
+pub(crate) fn strip_nulls(record: &mut Record) {
+    record.retain(|_, v| !v.is_null());
+}
+
 /// The kind of mutation an event represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
