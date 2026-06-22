@@ -31,13 +31,13 @@ async fn create_read_snapshot_in_browser() {
 
     let first = js_sys::JSON::parse(r#"{"title":"first"}"#).unwrap();
     let id = store
-        .create("task".into(), "p1".into(), first)
+        .create("task".into(), "p1".into(), first, None)
         .await
         .expect("create first");
 
     let second = js_sys::JSON::parse(r#"{"title":"second"}"#).unwrap();
     store
-        .create("task".into(), "p1".into(), second)
+        .create("task".into(), "p1".into(), second, None)
         .await
         .expect("create second");
 
@@ -57,9 +57,15 @@ async fn scope_isolation_in_browser() {
     store.initialize().await.expect("initialize");
 
     let a = js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap();
-    store.create("task".into(), "p1".into(), a).await.unwrap();
+    store
+        .create("task".into(), "p1".into(), a, None)
+        .await
+        .unwrap();
     let b = js_sys::JSON::parse(r#"{"title":"b"}"#).unwrap();
-    store.create("task".into(), "p2".into(), b).await.unwrap();
+    store
+        .create("task".into(), "p2".into(), b, None)
+        .await
+        .unwrap();
 
     let p1 = js_sys::Array::from(&store.snapshot("task".into(), "p1".into()).unwrap());
     let p2 = js_sys::Array::from(&store.snapshot("task".into(), "p2".into()).unwrap());
@@ -99,7 +105,7 @@ async fn subscribe_fires_on_matching_mutation_in_browser() {
 
     let row = js_sys::JSON::parse(r#"{"title":"hello"}"#).unwrap();
     store
-        .create("task".into(), "p1".into(), row)
+        .create("task".into(), "p1".into(), row, None)
         .await
         .expect("create");
 
@@ -154,7 +160,7 @@ async fn offline_write_queues_and_survives_reopen_in_browser() {
             .expect("set user");
         let row = js_sys::JSON::parse(r#"{"title":"queued"}"#).unwrap();
         store
-            .create("task".into(), "p1".into(), row)
+            .create("task".into(), "p1".into(), row, None)
             .await
             .expect("create while offline");
         let pending = store
@@ -199,7 +205,7 @@ async fn remote_connect_failure_is_graceful_in_browser() {
 
     let row = js_sys::JSON::parse(r#"{"title":"offline"}"#).unwrap();
     let id = store
-        .create("task".into(), "p1".into(), row)
+        .create("task".into(), "p1".into(), row, None)
         .await
         .expect("local create works without a broker");
     let got = store.read("task".into(), id).expect("read");
@@ -217,7 +223,7 @@ async fn persistence_survives_reopen_in_browser() {
         store.initialize().await.expect("initialize");
         let row = js_sys::JSON::parse(r#"{"title":"durable"}"#).unwrap();
         store
-            .create("task".into(), "p1".into(), row)
+            .create("task".into(), "p1".into(), row, None)
             .await
             .expect("create")
     };
@@ -253,7 +259,7 @@ async fn encrypted_persistence_round_trip_in_browser() {
         store.initialize().await.expect("initialize");
         let row = js_sys::JSON::parse(r#"{"title":"secret"}"#).unwrap();
         store
-            .create("task".into(), "p1".into(), row)
+            .create("task".into(), "p1".into(), row, None)
             .await
             .expect("create")
     };
@@ -342,7 +348,7 @@ async fn list_child_count_snapshot_map_in_browser() {
     for (scope, title) in [("p1", "a"), ("p1", "b"), ("p2", "c")] {
         let row = js_sys::JSON::parse(&format!(r#"{{"title":"{title}"}}"#)).unwrap();
         store
-            .create("task".into(), scope.into(), row)
+            .create("task".into(), scope.into(), row, None)
             .await
             .expect("create");
     }
@@ -400,6 +406,7 @@ async fn subscribe_passes_data_op_and_unsubscribe_stops_in_browser() {
             "task".into(),
             "p1".into(),
             js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap(),
+            None,
         )
         .await
         .expect("create");
@@ -418,6 +425,7 @@ async fn subscribe_passes_data_op_and_unsubscribe_stops_in_browser() {
             "task".into(),
             "p1".into(),
             js_sys::JSON::parse(r#"{"title":"b"}"#).unwrap(),
+            None,
         )
         .await
         .expect("create2");
@@ -442,6 +450,7 @@ async fn version_bumps_on_mutation_in_browser() {
             "task".into(),
             "p1".into(),
             js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap(),
+            None,
         )
         .await
         .expect("create");
@@ -493,6 +502,7 @@ async fn scope_signal_observes_committed_data_in_browser() {
             "task".into(),
             "p1".into(),
             js_sys::JSON::parse(r#"{"title":"x"}"#).unwrap(),
+            None,
         )
         .await
         .expect("create");
@@ -511,6 +521,31 @@ async fn scope_signal_observes_committed_data_in_browser() {
         "scope callback's synchronous snapshot must see the committed row"
     );
     closure.forget();
+}
+
+#[wasm_bindgen_test]
+async fn origin_tag_remote_skips_persistence_in_browser() {
+    let store = stitch_wasm::create_store(config(), persist_options("stitch-tag-remote"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let row = js_sys::JSON::parse(r#"{"title":"r"}"#).unwrap();
+    let id = store
+        .create("task".into(), "p1".into(), row, Some("remote".into()))
+        .await
+        .expect("create");
+
+    let got = store.read("task".into(), id.clone()).expect("read");
+    assert!(!got.is_null(), "remote-tagged create still lands in memory");
+
+    let durable = store
+        .read_local_state("task".into(), id)
+        .await
+        .expect("read_local_state");
+    assert!(
+        durable.is_null(),
+        "a 'remote'-tagged create must skip persistence (Origin::Remote)"
+    );
 }
 
 #[wasm_bindgen_test]

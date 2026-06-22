@@ -118,6 +118,15 @@ fn op_label(op: Operation) -> &'static str {
     }
 }
 
+fn origin_from_tag(tag: Option<String>) -> Origin {
+    match tag.as_deref() {
+        Some("remote") => Origin::Remote,
+        Some("load") => Origin::Load,
+        Some("clear") => Origin::Clear,
+        _ => Origin::Local,
+    }
+}
+
 /// Spawn a forwarder that drives `on_event` for each entity mutation until the
 /// returned unsubscribe function is called (or the channel closes). The returned
 /// `JsValue` is a one-shot JS function; calling it cancels the subscription.
@@ -256,10 +265,11 @@ impl Store {
         entity: String,
         scope_id: String,
         data: JsValue,
+        tag: Option<String>,
     ) -> Result<String, JsValue> {
         let record = record_from_js(&data)?;
         self.inner
-            .create(&entity, &scope_id, record, Origin::Local)
+            .create(&entity, &scope_id, record, origin_from_tag(tag))
             .await
             .map_err(err)
     }
@@ -279,10 +289,16 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the write fails.
-    pub async fn update(&self, entity: String, id: String, fields: JsValue) -> Result<(), JsValue> {
+    pub async fn update(
+        &self,
+        entity: String,
+        id: String,
+        fields: JsValue,
+        tag: Option<String>,
+    ) -> Result<(), JsValue> {
         let record = record_from_js(&fields)?;
         self.inner
-            .update(&entity, &id, record, Origin::Local)
+            .update(&entity, &id, record, origin_from_tag(tag))
             .await
             .map_err(err)
     }
@@ -291,9 +307,14 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the write fails.
-    pub async fn delete(&self, entity: String, id: String) -> Result<(), JsValue> {
+    pub async fn delete(
+        &self,
+        entity: String,
+        id: String,
+        tag: Option<String>,
+    ) -> Result<(), JsValue> {
         self.inner
-            .delete(&entity, &id, Origin::Local)
+            .delete(&entity, &id, origin_from_tag(tag))
             .await
             .map_err(err)
     }
