@@ -731,6 +731,13 @@ impl Store {
         Ok(inner.memory.list(entity, scope_id).await?.len())
     }
 
+    /// Monotonic mutation counter for `(scope_id, entity)`, bumped on every
+    /// create/update/delete and on scope load/clear. Synchronous; lets callers
+    /// cache snapshots and re-fetch only when the version changes.
+    pub fn version(&self, scope_id: &str, entity: &str) -> Result<u64> {
+        Ok(self.inner()?.memory.get_version(scope_id, entity))
+    }
+
     /// Synchronous read from the in-memory cache for the loaded scope.
     /// Mirrors the TS core's synchronous `read`.
     #[cfg(target_arch = "wasm32")]

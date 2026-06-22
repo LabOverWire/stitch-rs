@@ -16,6 +16,7 @@ pub struct MemoryStore {
     config: Arc<StoreConfig>,
     top_level: HashSet<String>,
     batch: Mutex<BatchState>,
+    versions: Mutex<HashMap<(String, String), u64>>,
 }
 
 struct State {
@@ -47,6 +48,7 @@ impl MemoryStore {
             config,
             top_level,
             batch: Mutex::new(BatchState::default()),
+            versions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -242,6 +244,7 @@ impl MemoryStore {
             });
         }
 
+        self.bump_scope_versions(scope_id);
         let _ = self.bus.send(StoreEvent::ScopeLoaded {
             scope_id: scope_id.to_string(),
             entities: self.all_scoped_entities(),
@@ -258,6 +261,7 @@ impl MemoryStore {
                 state.current_scope = None;
             }
         }
+        self.bump_scope_versions(scope_id);
         let _ = self.bus.send(StoreEvent::ScopeCleared {
             scope_id: scope_id.to_string(),
             entities: self.all_scoped_entities(),
@@ -265,7 +269,31 @@ impl MemoryStore {
         Ok(())
     }
 
+    pub fn get_version(&self, scope_id: &str, entity: &str) -> u64 {
+        self.versions
+            .lock()
+            .unwrap()
+            .get(&(scope_id.to_string(), entity.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn bump_version(&self, scope_id: &str, entity: &str) {
+        let mut versions = self.versions.lock().unwrap();
+        let counter = versions
+            .entry((scope_id.to_string(), entity.to_string()))
+            .or_insert(0);
+        *counter += 1;
+    }
+
+    fn bump_scope_versions(&self, scope_id: &str) {
+        for entity in self.all_scoped_entities() {
+            self.bump_version(scope_id, &entity);
+        }
+    }
+
     fn emit_mutation(&self, event: MutationEvent) {
+        self.bump_version(&event.scope_id, &event.entity);
         {
             let mut batch = self.batch.lock().unwrap();
             if batch.depth > 0 {

@@ -430,6 +430,90 @@ async fn subscribe_passes_data_op_and_unsubscribe_stops_in_browser() {
 }
 
 #[wasm_bindgen_test]
+async fn version_bumps_on_mutation_in_browser() {
+    let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let v0 = store
+        .get_version("p1".into(), "task".into())
+        .expect("version");
+    store
+        .create(
+            "task".into(),
+            "p1".into(),
+            js_sys::JSON::parse(r#"{"title":"a"}"#).unwrap(),
+        )
+        .await
+        .expect("create");
+    let v1 = store
+        .get_version("p1".into(), "task".into())
+        .expect("version");
+    assert!(
+        v1 > v0,
+        "version must bump on a mutation (v0={v0}, v1={v1})"
+    );
+
+    let other = store
+        .get_version("p2".into(), "task".into())
+        .expect("version");
+    assert_eq!(other, 0.0, "an untouched (scope,entity) stays at 0");
+}
+
+#[wasm_bindgen_test]
+async fn scope_signal_observes_committed_data_in_browser() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let store = Rc::new(stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create"));
+    store.initialize().await.expect("initialize");
+
+    let seen = Rc::new(Cell::new(usize::MAX));
+    let store_cb = Rc::clone(&store);
+    let seen_cb = Rc::clone(&seen);
+    let closure = Closure::<dyn FnMut()>::new(move || {
+        let rows = js_sys::Array::from(
+            &store_cb
+                .snapshot("task".into(), "p1".into())
+                .expect("sync snapshot in callback"),
+        );
+        seen_cb.set(rows.length() as usize);
+    });
+    let _unsub = store
+        .subscribe_to_scope(
+            "p1".into(),
+            "task".into(),
+            closure.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+        )
+        .expect("subscribe_to_scope");
+
+    store
+        .create(
+            "task".into(),
+            "p1".into(),
+            js_sys::JSON::parse(r#"{"title":"x"}"#).unwrap(),
+        )
+        .await
+        .expect("create");
+
+    for _ in 0..50 {
+        if seen.get() != usize::MAX {
+            break;
+        }
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        seen.get(),
+        1,
+        "scope callback's synchronous snapshot must see the committed row"
+    );
+    closure.forget();
+}
+
+#[wasm_bindgen_test]
 async fn update_local_state_round_trip_in_browser() {
     let store = stitch_wasm::create_store(config(), JsValue::UNDEFINED).expect("create_store");
     store.initialize().await.expect("initialize");

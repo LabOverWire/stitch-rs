@@ -389,6 +389,20 @@ impl Store {
         self.inner.child_count_sync(&entity, &scope_id).map_err(err)
     }
 
+    /// Monotonic mutation counter for `(scopeId, entity)`. Bumps on every
+    /// mutation and on scope load/clear. Lets the JS layer cache snapshots and
+    /// re-fetch only when this changes (referential stability for React).
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "getVersion")]
+    pub fn get_version(&self, scope_id: String, entity: String) -> Result<f64, JsValue> {
+        self.inner
+            .version(&scope_id, &entity)
+            .map(|v| v as f64)
+            .map_err(err)
+    }
+
     /// Snapshot of `entity` within `scopeId` as an object keyed by row id.
     ///
     /// # Errors
