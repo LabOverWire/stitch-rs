@@ -98,6 +98,10 @@ fn list_array(out: JsValue) -> Result<Vec<Value>> {
     }
 }
 
+fn is_not_found(js: &JsValue) -> bool {
+    js.as_string().is_some_and(|s| s.contains("not found"))
+}
+
 fn schema_js(fields: &[SchemaField]) -> Value {
     let fields: Vec<Value> = fields
         .iter()
@@ -167,13 +171,8 @@ impl Db for WasmDb {
     async fn read(&self, entity: &str, id: &str) -> Result<Option<Value>> {
         match self.db.read(entity.to_string(), id.to_string()).await {
             Ok(js) => Ok(Some(from_js(&js)?)),
-            Err(e) => {
-                if e.as_string().is_some_and(|s| s.contains("not found")) {
-                    Ok(None)
-                } else {
-                    Err(js_err("read", &e))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(js_err("read", &e)),
         }
     }
 
@@ -242,13 +241,8 @@ impl Db for WasmDb {
     fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Value>> {
         match self.db.read_sync(entity.to_string(), id.to_string()) {
             Ok(js) => Ok(Some(from_js(&js)?)),
-            Err(e) => {
-                if e.as_string().is_some_and(|s| s.contains("not found")) {
-                    Ok(None)
-                } else {
-                    Err(js_err("read_sync", &e))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(js_err("read_sync", &e)),
         }
     }
 

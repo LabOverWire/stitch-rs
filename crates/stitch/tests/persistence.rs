@@ -495,7 +495,7 @@ async fn update_accepts_null_optional_field_and_keeps_record() {
         .await
         .unwrap();
 
-    layer
+    let updated = layer
         .update(
             "note",
             "n1",
@@ -504,9 +504,22 @@ async fn update_accepts_null_optional_field_and_keeps_record() {
         )
         .await
         .expect("update setting an optional field to null must succeed");
+    assert_eq!(
+        updated.get("read_at").and_then(Value::as_i64),
+        Some(1234),
+        "null is stripped before the db, so the update is a no-op: the field keeps its prior value rather than being cleared",
+    );
 
-    let got = layer.read("note", "n1").await.unwrap();
-    assert!(got.is_some(), "read after update must return the record");
+    let got = layer
+        .read("note", "n1")
+        .await
+        .unwrap()
+        .expect("read after update must return the record");
+    assert_eq!(
+        got.get("read_at").and_then(Value::as_i64),
+        Some(1234),
+        "an optional field cannot be cleared by updating it to null",
+    );
 
     let listed = layer
         .list_by_scope("note", "p1")

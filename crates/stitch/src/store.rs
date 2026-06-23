@@ -835,6 +835,13 @@ impl Store {
         let mut children = BTreeMap::new();
         for (entity, mut records) in data {
             if entity == root_entity {
+                if records.len() > 1 {
+                    tracing::warn!(
+                        entity,
+                        count = records.len(),
+                        "Store::load_scope: multiple root records supplied for a single scope; keeping the first and discarding the rest",
+                    );
+                }
                 root = records.into_iter().next();
             } else {
                 if !top_level.contains(entity.as_str()) {
