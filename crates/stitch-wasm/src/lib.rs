@@ -1,8 +1,10 @@
 //! Browser bindings for [`stitch`]. Exposes a `createStore` factory and a
 //! `Store` class to JavaScript via `wasm-bindgen`. The store runs the
 //! `mqdb-wasm` core: in-memory by default, or durable IndexedDB persistence
-//! when `createStore` is given a `persistence` option. MQTT remote sync lands
-//! in a later milestone.
+//! when `createStore` is given a `persistence` option, with MQTT-over-WebSocket
+//! remote sync. The crate targets `wasm32` only; it is empty on other targets.
+
+#![cfg(target_arch = "wasm32")]
 
 use futures::channel::oneshot;
 use futures::future::{Either, select};

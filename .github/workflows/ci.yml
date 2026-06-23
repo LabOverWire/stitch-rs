@@ -35,3 +35,4 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p stitch-sync --lib --test memory_store --test offline_queue --test persistence
       - run: cargo check -p stitch-sync --target wasm32-unknown-unknown
+      - run: cargo clippy -p stitch-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
