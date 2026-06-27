@@ -53,10 +53,7 @@ jobs:
       - uses: jetli/wasm-pack-action@v0.4.0
         with:
           version: "v0.13.1"
-      - uses: browser-actions/setup-chrome@v1
-        id: setup-chrome
-        with:
-          install-chromedriver: true
+      - run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
       - run: wasm-pack test --headless --chrome crates/stitch-wasm
         env:
-          CHROMEDRIVER: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+          CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
