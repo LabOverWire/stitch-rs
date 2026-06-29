@@ -731,9 +731,11 @@ impl Store {
         Ok(inner.memory.list(entity, scope_id).await?.len())
     }
 
-    /// Monotonic mutation counter for `(scope_id, entity)`, bumped on every
-    /// create/update/delete and on scope load/clear. Synchronous; lets callers
-    /// cache snapshots and re-fetch only when the version changes.
+    /// Change token for `(scope_id, entity)`: increments on every
+    /// create/update/delete and on scope load, and resets to `0` when the scope
+    /// is cleared or replaced by loading another scope. Top-level (global)
+    /// entities are versioned under the empty scope. Synchronous; callers cache
+    /// snapshots and re-fetch whenever the value differs from the last seen one.
     pub fn version(&self, scope_id: &str, entity: &str) -> Result<u64> {
         Ok(self.inner()?.memory.get_version(scope_id, entity))
     }

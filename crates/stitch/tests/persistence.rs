@@ -304,14 +304,6 @@ async fn delete_unknown_returns_not_found() {
 
 #[tokio::test]
 async fn create_accepts_null_optional_field_and_lists_record() {
-    // Regression for chorale M-FS1 V1 (2026-06-17): a record with
-    // `null` set on an optional Number field used to fail the mqdb
-    // schema validator inside persistence.create with
-    // `expected type Number, got null`. `Store::create` discarded
-    // that error (memory still had the record), so subsequent
-    // `Store::list` returned empty until restart while `Store::read`
-    // succeeded. Fix: mirror `memory_store::strip_nulls` in
-    // `persistence::create`.
     use std::collections::HashMap;
     let mut entities = HashMap::new();
     entities.insert(

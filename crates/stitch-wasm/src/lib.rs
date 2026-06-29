@@ -449,9 +449,11 @@ impl Store {
         self.inner.child_count_sync(&entity, &scope_id).map_err(err)
     }
 
-    /// Monotonic mutation counter for `(scopeId, entity)`. Bumps on every
-    /// mutation and on scope load/clear. Lets the JS layer cache snapshots and
-    /// re-fetch only when this changes (referential stability for React).
+    /// Change token for `(scopeId, entity)`: increments on every mutation and on
+    /// scope load, and resets to `0` when the scope is cleared or replaced by
+    /// loading another scope. Top-level (global) entities are versioned under the
+    /// empty scope. Lets the JS layer cache snapshots and re-fetch whenever this
+    /// differs from the last seen value (referential stability for React).
     ///
     /// # Errors
     /// Returns an error if the store is not initialized.

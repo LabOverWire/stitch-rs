@@ -70,6 +70,10 @@ impl MemoryStore {
             batch.buffered.drain().map(|(_, ev)| ev).collect()
         };
         for event in drained {
+            self.bump_version(
+                &self.version_scope(&event.entity, &event.scope_id),
+                &event.entity,
+            );
             let _ = self.bus.send(StoreEvent::Mutation(event));
         }
     }
@@ -238,6 +242,7 @@ impl MemoryStore {
         if let Some(prev) = previous_scope
             && prev != scope_id
         {
+            self.remove_scope_versions(&prev);
             let _ = self.bus.send(StoreEvent::ScopeCleared {
                 scope_id: prev,
                 entities: self.all_scoped_entities(),
@@ -261,7 +266,7 @@ impl MemoryStore {
                 state.current_scope = None;
             }
         }
-        self.bump_scope_versions(scope_id);
+        self.remove_scope_versions(scope_id);
         let _ = self.bus.send(StoreEvent::ScopeCleared {
             scope_id: scope_id.to_string(),
             entities: self.all_scoped_entities(),
@@ -288,12 +293,26 @@ impl MemoryStore {
 
     fn bump_scope_versions(&self, scope_id: &str) {
         for entity in self.all_scoped_entities() {
-            self.bump_version(scope_id, &entity);
+            self.bump_version(&self.version_scope(&entity, scope_id), &entity);
+        }
+    }
+
+    fn remove_scope_versions(&self, scope_id: &str) {
+        self.versions
+            .lock()
+            .unwrap()
+            .retain(|(scope, _), _| scope != scope_id);
+    }
+
+    fn version_scope(&self, entity: &str, scope_id: &str) -> String {
+        if self.top_level.contains(entity) {
+            String::new()
+        } else {
+            scope_id.to_string()
         }
     }
 
     fn emit_mutation(&self, event: MutationEvent) {
-        self.bump_version(&event.scope_id, &event.entity);
         {
             let mut batch = self.batch.lock().unwrap();
             if batch.depth > 0 {
@@ -302,6 +321,10 @@ impl MemoryStore {
                 return;
             }
         }
+        self.bump_version(
+            &self.version_scope(&event.entity, &event.scope_id),
+            &event.entity,
+        );
         let _ = self.bus.send(StoreEvent::Mutation(event));
     }
 
