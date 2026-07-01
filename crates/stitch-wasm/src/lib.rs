@@ -1,8 +1,10 @@
 //! Browser bindings for [`stitch`]. Exposes a `createStore` factory and a
 //! `Store` class to JavaScript via `wasm-bindgen`. The store runs the
 //! `mqdb-wasm` core: in-memory by default, or durable IndexedDB persistence
-//! when `createStore` is given a `persistence` option. MQTT remote sync lands
-//! in a later milestone.
+//! when `createStore` is given a `persistence` option, with MQTT-over-WebSocket
+//! remote sync. The crate targets `wasm32` only; it is empty on other targets.
+
+#![cfg(target_arch = "wasm32")]
 
 use futures::channel::oneshot;
 use futures::future::{Either, select};
@@ -45,6 +47,10 @@ struct RemoteDto {
     client_id: Option<String>,
     #[serde(default)]
     ticket: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -114,6 +120,15 @@ fn op_label(op: Operation) -> &'static str {
     }
 }
 
+fn origin_from_tag(tag: Option<String>) -> Origin {
+    match tag.as_deref() {
+        Some("remote") => Origin::Remote,
+        Some("load") => Origin::Load,
+        Some("clear") => Origin::Clear,
+        _ => Origin::Local,
+    }
+}
+
 /// Spawn a forwarder that drives `on_event` for each entity mutation until the
 /// returned unsubscribe function is called (or the channel closes). The returned
 /// `JsValue` is a one-shot JS function; calling it cancels the subscription.
@@ -150,10 +165,12 @@ pub struct Store {
 ///
 /// Pass an optional second argument to enable durable IndexedDB persistence
 /// and/or remote MQTT-over-WebSocket sync:
-/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket? } }`.
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
 /// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
 /// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
-/// enhanced auth when the broker requires it. `initialize` then connects and live
+/// enhanced auth, and `remote.username` + `remote.password` drive classic MQTT
+/// password auth when the broker isn't in JWT mode (ticket takes precedence).
+/// `initialize` then connects and live
 /// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
 /// for an in-memory store.
 ///
@@ -184,6 +201,8 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
         remote: opts.remote.map(|r| {
             let mut cfg = RemoteConfig::new(r.url);
             cfg.ticket = r.ticket;
+            cfg.username = r.username;
+            cfg.password = r.password;
             cfg
         }),
     };
@@ -228,6 +247,21 @@ impl Store {
         self.inner.set_authenticated_user(user_id).map_err(err)
     }
 
+    /// Register a callback fired when the broker rejects the session
+    /// (`MQTT_DISCONNECT_AUTH_FAILURE`). Use it to clear cached auth and route
+    /// the user to re-login. No-op if no remote is configured.
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "setSessionInvalidHandler")]
+    pub fn set_session_invalid_handler(&self, callback: js_sys::Function) -> Result<(), JsValue> {
+        self.inner
+            .set_session_invalid_handler(move || {
+                let _ = callback.call0(&JsValue::NULL);
+            })
+            .map_err(err)
+    }
+
     /// Number of offline-queued mutations buffered for `scopeId` (the
     /// authenticated user's pending writes). `0` when no remote/queue is
     /// configured.
@@ -248,10 +282,11 @@ impl Store {
         entity: String,
         scope_id: String,
         data: JsValue,
+        tag: Option<String>,
     ) -> Result<String, JsValue> {
         let record = record_from_js(&data)?;
         self.inner
-            .create(&entity, &scope_id, record, Origin::Local)
+            .create(&entity, &scope_id, record, origin_from_tag(tag))
             .await
             .map_err(err)
     }
@@ -260,8 +295,8 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the read fails.
-    pub async fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
-        match self.inner.read(&entity, &id).await.map_err(err)? {
+    pub fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
+        match self.inner.read_sync(&entity, &id).map_err(err)? {
             Some(record) => to_js(&serde_json::Value::Object(record)),
             None => Ok(JsValue::NULL),
         }
@@ -271,10 +306,16 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the write fails.
-    pub async fn update(&self, entity: String, id: String, fields: JsValue) -> Result<(), JsValue> {
+    pub async fn update(
+        &self,
+        entity: String,
+        id: String,
+        fields: JsValue,
+        tag: Option<String>,
+    ) -> Result<(), JsValue> {
         let record = record_from_js(&fields)?;
         self.inner
-            .update(&entity, &id, record, Origin::Local)
+            .update(&entity, &id, record, origin_from_tag(tag))
             .await
             .map_err(err)
     }
@@ -283,9 +324,14 @@ impl Store {
     ///
     /// # Errors
     /// Returns an error if the write fails.
-    pub async fn delete(&self, entity: String, id: String) -> Result<(), JsValue> {
+    pub async fn delete(
+        &self,
+        entity: String,
+        id: String,
+        tag: Option<String>,
+    ) -> Result<(), JsValue> {
         self.inner
-            .delete(&entity, &id, Origin::Local)
+            .delete(&entity, &id, origin_from_tag(tag))
             .await
             .map_err(err)
     }
@@ -320,14 +366,36 @@ impl Store {
         self.inner.replace_scope(&scope_id).await.map_err(err)
     }
 
+    /// Load a scope's rows into the in-memory cache from caller-supplied data,
+    /// `{ entity: [records] }`, replacing any currently-loaded scope. Equivalent
+    /// to TS `loadScope`.
+    ///
+    /// # Errors
+    /// Returns an error if `data` is malformed or the load fails.
+    #[wasm_bindgen(js_name = "loadScope")]
+    pub async fn load_scope(&self, scope_id: String, data: JsValue) -> Result<(), JsValue> {
+        let parsed: HashMap<String, Vec<Record>> =
+            serde_json::from_value(json_from_js(&data)?).map_err(err)?;
+        self.inner.load_scope(&scope_id, parsed).await.map_err(err)
+    }
+
+    /// Clear a scope from the in-memory cache. Equivalent to TS `clearScope`.
+    ///
+    /// # Errors
+    /// Returns an error if the operation fails.
+    #[wasm_bindgen(js_name = "clearScope")]
+    pub async fn clear_scope(&self, scope_id: String) -> Result<(), JsValue> {
+        self.inner.clear_scope(&scope_id).await.map_err(err)
+    }
+
     /// Snapshot of all rows for `entity` within `scopeId`. Equivalent to TS
     /// `getSnapshot`.
     ///
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getSnapshot")]
-    pub async fn snapshot(&self, entity: String, scope_id: String) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot(&entity, &scope_id).await.map_err(err)?;
+    pub fn snapshot(&self, entity: String, scope_id: String) -> Result<JsValue, JsValue> {
+        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
         let array = rows.into_iter().map(serde_json::Value::Object).collect();
         to_js(&serde_json::Value::Array(array))
     }
@@ -377,14 +445,23 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getChildCount")]
-    pub async fn get_child_count(
-        &self,
-        entity: String,
-        scope_id: String,
-    ) -> Result<usize, JsValue> {
+    pub fn get_child_count(&self, entity: String, scope_id: String) -> Result<usize, JsValue> {
+        self.inner.child_count_sync(&entity, &scope_id).map_err(err)
+    }
+
+    /// Change token for `(scopeId, entity)`: increments on every mutation and on
+    /// scope load, and resets to `0` when the scope is cleared or replaced by
+    /// loading another scope. Top-level (global) entities are versioned under the
+    /// empty scope. Lets the JS layer cache snapshots and re-fetch whenever this
+    /// differs from the last seen value (referential stability for React).
+    ///
+    /// # Errors
+    /// Returns an error if the store is not initialized.
+    #[wasm_bindgen(js_name = "getVersion")]
+    pub fn get_version(&self, scope_id: String, entity: String) -> Result<f64, JsValue> {
         self.inner
-            .child_count(&entity, &scope_id)
-            .await
+            .version(&scope_id, &entity)
+            .map(|v| v as f64)
             .map_err(err)
     }
 
@@ -393,12 +470,12 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getSnapshotAsMap")]
-    pub async fn get_snapshot_as_map(
+    pub fn get_snapshot_as_map(
         &self,
         entity: String,
         scope_id: String,
     ) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot(&entity, &scope_id).await.map_err(err)?;
+        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
         let mut map = serde_json::Map::new();
         for row in rows {
             let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);
@@ -460,7 +537,8 @@ impl Store {
         self.inner.disconnect().await.map_err(err)
     }
 
-    /// Reconnect the remote client, optionally with a fresh JWT ticket.
+    /// Reconnect the remote client, optionally with a fresh JWT ticket or
+    /// fresh username + password.
     ///
     /// # Errors
     /// Returns an error if no remote is configured or the reconnect fails.
@@ -468,8 +546,13 @@ impl Store {
         &self,
         server_url: String,
         ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
     ) -> Result<(), JsValue> {
-        self.inner.reconnect(&server_url, ticket).await.map_err(err)
+        self.inner
+            .reconnect(&server_url, ticket, username, password)
+            .await
+            .map_err(err)
     }
 
     /// Disconnect, clear auth + sync state. Persistence and the offline queue

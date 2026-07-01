@@ -1,11 +1,36 @@
 # Changelog
 
-All notable changes to the `stitch` crate are documented here.
+All notable changes to the `stitch-sync` crate are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Fixed
+
+- A `create` or `update` carrying an optional field set to `null` no longer
+  fails the mqdb schema validator inside `persistence` (`expected type Number,
+  got null`). `persistence::{create,update}` now strip null-valued keys before
+  the durable write, mirroring `memory_store`. Previously the persistence error
+  was discarded while the in-memory copy succeeded, so `list` returned empty
+  until restart even though `read` saw the record. Note: as a consequence, a
+  `null` in an update is dropped rather than clearing the field.
+- The `(scope, entity)` version counter now stays consistent for top-level
+  entities (`create` and `update`/`delete` bump the same key), is no longer
+  advanced mid-batch before the buffered mutation is broadcast, invalidates the
+  previous scope when `loadScope` switches scopes, and releases a scope's
+  version entries on `clearScope`/scope-switch instead of growing unbounded.
+
+## [0.2.3] - 2026-06-07
+
+### Changed
+
+- The crate is now published to crates.io as **`stitch-sync`** (the `stitch`
+  name was taken by an unrelated 2018 crate). The library name is unchanged, so
+  it is still imported as `use stitch::…`; only the dependency line differs
+  (`stitch-sync = "0.2.3"`). Added crates.io package metadata (keywords,
+  categories, MSRV `1.88`) and corrected the repository URL.
 
 ### Added
 

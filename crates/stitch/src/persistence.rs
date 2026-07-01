@@ -1,8 +1,10 @@
 use crate::backend::{DynDb, open_persistent_db, value_to_record};
 use crate::config::{EntityDefinition, PersistenceConfig, StoreConfig};
 use crate::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::lock::RwLockExt;
 use crate::origin::Origin;
-use crate::types::{MutationEvent, Operation, Record, StoreEvent};
+use crate::types::{MutationEvent, Operation, Record, StoreEvent, strip_nulls};
 use mqdb_core::types::{Filter, FilterOp, Pagination, SortOrder};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -58,7 +60,7 @@ impl PersistenceLayer {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn db(&self) -> DynDb {
-        self.db.read().expect("persistence db lock").clone()
+        self.db.read_guard().clone()
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -76,7 +78,7 @@ impl PersistenceLayer {
     pub async fn recover(&self) -> Result<()> {
         let placeholder = crate::backend::open_memory_db(&self.config).await?;
         let old = {
-            let mut guard = self.db.write().expect("persistence db lock");
+            let mut guard = self.db.write_guard();
             std::mem::replace(&mut *guard, placeholder)
         };
         old.close();
@@ -85,7 +87,7 @@ impl PersistenceLayer {
         for attempt in 0..10 {
             match open_persistent_db(&self.config, &self.persistence_config).await {
                 Ok(fresh) => {
-                    *self.db.write().expect("persistence db lock") = fresh;
+                    *self.db.write_guard() = fresh;
                     return Ok(());
                 }
                 Err(err) if attempt < 9 => {
@@ -99,6 +101,8 @@ impl PersistenceLayer {
     }
 
     pub async fn create(&self, entity: &str, data: Record, origin: Origin) -> Result<Record> {
+        let mut data = data;
+        strip_nulls(&mut data);
         let value = self.db().create(entity, Value::Object(data)).await?;
         let record = value_to_record(value)?;
         let id = record
@@ -132,6 +136,8 @@ impl PersistenceLayer {
         fields: Record,
         origin: Origin,
     ) -> Result<Record> {
+        let mut fields = fields;
+        strip_nulls(&mut fields);
         let updated = self.db().update(entity, id, Value::Object(fields)).await?;
         let record = value_to_record(updated)?;
         let Some(scope_id) = self.resolve_scope(entity, &record) else {

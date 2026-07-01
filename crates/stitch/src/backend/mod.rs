@@ -43,6 +43,20 @@ pub(crate) trait Db: MaybeSendSync {
     ) -> Result<Vec<Value>>;
     async fn register_schema(&self, name: &str, def: &EntityDefinition) -> Result<()>;
     fn close(&self);
+
+    #[cfg(target_arch = "wasm32")]
+    fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Value>>;
+    #[cfg(target_arch = "wasm32")]
+    fn list_sync(
+        &self,
+        entity: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        projection: Vec<String>,
+    ) -> Result<Vec<Value>>;
+    #[cfg(target_arch = "wasm32")]
+    fn count_sync(&self, entity: &str, filters: Vec<Filter>) -> Result<usize>;
 }
 
 pub(crate) type DynDb = Shared<dyn Db>;

@@ -12,12 +12,13 @@ use mqdb_core::types::{
     Filter, FilterOp, SortDirection as MqdbSortDirection, SortOrder as MqdbSortOrder,
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, broadcast};
 
+use crate::lock::MutexExt;
 use crate::offline_queue::{InMemoryOfflineQueue, PersistentOfflineQueue};
 use crate::queue::OfflineQueue;
 use crate::remote_sync::{LocalAccessor, RemoteSyncLayer};
@@ -210,7 +211,7 @@ impl Store {
     /// configured.
     pub fn connection_status(&self) -> Result<ConnectionStatus> {
         let inner = self.inner()?;
-        Ok(inner.state.lock().unwrap().last_connection_status)
+        Ok(inner.state.lock_guard().last_connection_status)
     }
 
     /// Subscribe to remote connection-status changes. `None` when no remote is
@@ -237,7 +238,7 @@ impl Store {
     /// queue so persisted rows are scoped to the user that wrote them.
     pub fn set_authenticated_user(&self, user_id: Option<String>) -> Result<()> {
         let inner = self.inner()?;
-        inner.state.lock().unwrap().authenticated_user = user_id.clone();
+        inner.state.lock_guard().authenticated_user = user_id.clone();
         if let Some(q) = &inner.queue {
             q.set_authenticated_user(user_id);
         }
@@ -246,7 +247,7 @@ impl Store {
 
     /// The currently-loaded scope id, or `None` if none is active.
     pub fn current_scope(&self) -> Result<Option<String>> {
-        Ok(self.inner()?.state.lock().unwrap().current_scope.clone())
+        Ok(self.inner()?.state.lock_guard().current_scope.clone())
     }
 
     /// `true` once [`Store::initialize`] has completed successfully.
@@ -271,7 +272,7 @@ impl Store {
     /// configured this is `true` immediately after `initialize`. Use
     /// [`Store::is_reconnecting`] for a transient "currently resyncing" signal.
     pub fn initial_sync_done(&self) -> Result<bool> {
-        Ok(self.inner()?.state.lock().unwrap().initial_sync_done)
+        Ok(self.inner()?.state.lock_guard().initial_sync_done)
     }
 
     /// `true` if the client has been connected at least once and the current
@@ -280,7 +281,7 @@ impl Store {
     /// backoff window before the next retry fires). `false` after explicit
     /// disconnect or a terminal error.
     pub fn is_reconnecting(&self) -> Result<bool> {
-        let state = self.inner()?.state.lock().unwrap();
+        let state = self.inner()?.state.lock_guard();
         Ok(state.has_been_connected
             && matches!(
                 state.last_connection_status,
@@ -330,8 +331,13 @@ impl Store {
 
         if let Some(persistence) = &inner.persistence
             && !origin.skips_persistence()
+            && let Err(e) = persistence.create(entity, data.clone(), origin).await
         {
-            let _ = persistence.create(entity, data.clone(), origin).await;
+            tracing::warn!(
+                entity,
+                error = %e,
+                "Store::create: persistence.create failed (memory still updated; list reads will miss this record until restart)",
+            );
         }
 
         if let Some(queue) = &inner.queue
@@ -352,7 +358,7 @@ impl Store {
 
         if let Some(remote) = &inner.remote
             && !origin.skips_remote()
-            && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
+            && inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected
             && has_sync_target
         {
             match remote.sync_create(entity, &effective_scope, data).await {
@@ -452,8 +458,15 @@ impl Store {
                         .ok();
                 }
             }
-            if scope_id.is_some() {
-                let _ = persistence.update(entity, id, fields.clone(), origin).await;
+            if scope_id.is_some()
+                && let Err(e) = persistence.update(entity, id, fields.clone(), origin).await
+            {
+                tracing::warn!(
+                    entity,
+                    id,
+                    error = %e,
+                    "Store::update: persistence.update failed (memory still updated; list reads will miss this change until restart)",
+                );
             }
         } else if existing.is_none() {
             return Ok(());
@@ -480,7 +493,7 @@ impl Store {
 
         if let Some(remote) = &inner.remote
             && !origin.skips_remote()
-            && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
+            && inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_update(entity, &scope_id, id, fields).await {
                 Ok(()) => {
@@ -584,7 +597,7 @@ impl Store {
 
         if let Some(remote) = &inner.remote
             && !origin.skips_remote()
-            && inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected
+            && inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected
         {
             match remote.sync_delete(entity, &scope_id, id).await {
                 Ok(()) => {
@@ -660,7 +673,7 @@ impl Store {
     pub async fn list_root_entities(&self, sort: Vec<SortField>) -> Result<Vec<Record>> {
         let inner = self.inner()?;
         #[cfg(not(target_arch = "wasm32"))]
-        if inner.remote.is_some() && !inner.state.lock().unwrap().initial_sync_done {
+        if inner.remote.is_some() && !inner.state.lock_guard().initial_sync_done {
             return Ok(Vec::new());
         }
         if let Some(persistence) = &inner.persistence {
@@ -719,6 +732,36 @@ impl Store {
         Ok(inner.memory.list(entity, scope_id).await?.len())
     }
 
+    /// Change token for `(scope_id, entity)`: increments on every
+    /// create/update/delete and on scope load, and resets to `0` when the scope
+    /// is cleared or replaced by loading another scope. Top-level (global)
+    /// entities are versioned under the empty scope. Synchronous; callers cache
+    /// snapshots and re-fetch whenever the value differs from the last seen one.
+    pub fn version(&self, scope_id: &str, entity: &str) -> Result<u64> {
+        Ok(self.inner()?.memory.get_version(scope_id, entity))
+    }
+
+    /// Synchronous read from the in-memory cache for the loaded scope.
+    /// Mirrors the TS core's synchronous `read`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Record>> {
+        self.inner()?.memory.read_sync(entity, id)
+    }
+
+    /// Synchronous snapshot of all rows for an entity within a scope, from the
+    /// in-memory cache. Mirrors the TS core's synchronous `getSnapshot`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn snapshot_sync(&self, entity: &str, scope_id: &str) -> Result<Vec<Record>> {
+        self.inner()?.memory.list_sync(entity, scope_id)
+    }
+
+    /// Synchronous row count for an entity within a scope, from the in-memory
+    /// cache. Mirrors the TS core's synchronous `getChildCount`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn child_count_sync(&self, entity: &str, scope_id: &str) -> Result<usize> {
+        self.inner()?.memory.count_sync(entity, scope_id)
+    }
+
     /// Switch the active scope. If a remote is connected, fetches the new
     /// scope's root + children, reconciles them with local state, replays any
     /// buffered live mutations, and atomically swaps the memory cache. When
@@ -728,14 +771,13 @@ impl Store {
     pub async fn replace_scope(&self, scope_id: &str) -> Result<()> {
         let inner = self.inner()?;
         let _serializer = inner.replace_scope_lock.lock().await;
-        if inner.state.lock().unwrap().current_scope.as_deref() == Some(scope_id) {
+        if inner.state.lock_guard().current_scope.as_deref() == Some(scope_id) {
             return Ok(());
         }
 
         let previous = inner
             .state
-            .lock()
-            .unwrap()
+            .lock_guard()
             .current_scope
             .replace(scope_id.to_string());
 
@@ -749,7 +791,7 @@ impl Store {
             }
 
             let connected =
-                inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected;
+                inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected;
             if let (Some(remote), true) = (&inner.remote, connected) {
                 if let Some(persistence) = &inner.persistence {
                     persistence.set_suppress_notifications(true);
@@ -773,6 +815,57 @@ impl Store {
         Ok(())
     }
 
+    /// Load a scope's rows into the in-memory cache from caller-supplied data
+    /// (`{ entity: [records] }`), replacing any currently-loaded scope. The
+    /// scope field is stamped onto child records. Mirrors the TS core's
+    /// `loadScope`.
+    pub async fn load_scope(
+        &self,
+        scope_id: &str,
+        data: HashMap<String, Vec<Record>>,
+    ) -> Result<()> {
+        let inner = self.inner()?;
+        let root_entity = inner.config.scope.root_entity.as_str();
+        let scope_field = &inner.config.scope.scope_field;
+        let top_level: HashSet<&str> = inner
+            .config
+            .top_level_entities
+            .iter()
+            .map(|t| t.entity.as_str())
+            .collect();
+        let mut root = None;
+        let mut children = BTreeMap::new();
+        for (entity, mut records) in data {
+            if entity == root_entity {
+                if records.len() > 1 {
+                    tracing::warn!(
+                        entity,
+                        count = records.len(),
+                        "Store::load_scope: multiple root records supplied for a single scope; keeping the first and discarding the rest",
+                    );
+                }
+                root = records.into_iter().next();
+            } else {
+                if !top_level.contains(entity.as_str()) {
+                    for record in &mut records {
+                        record.insert(scope_field.clone(), Value::String(scope_id.to_string()));
+                    }
+                }
+                children.insert(entity, records);
+            }
+        }
+        inner
+            .memory
+            .load_scope(scope_id, ScopeBundle { root, children })
+            .await
+    }
+
+    /// Clear a scope from the in-memory cache. Mirrors the TS core's
+    /// `clearScope`.
+    pub async fn clear_scope(&self, scope_id: &str) -> Result<()> {
+        self.inner()?.memory.clear_scope(scope_id).await
+    }
+
     /// Unsubscribe from a scope's MQTT topics and clear it from
     /// `current_scope` if it was active.
     pub async fn close_scope(&self, scope_id: &str) -> Result<()> {
@@ -781,7 +874,7 @@ impl Store {
         if let Some(remote) = &inner.remote {
             let _ = remote.close_scope(scope_id).await;
         }
-        let mut state = inner.state.lock().unwrap();
+        let mut state = inner.state.lock_guard();
         if state.current_scope.as_deref() == Some(scope_id) {
             state.current_scope = None;
         }
@@ -812,15 +905,24 @@ impl Store {
         persistence.recover().await
     }
 
-    /// Reconnect the remote client, optionally with a fresh auth ticket.
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    /// Reconnect the remote client, optionally with a fresh auth ticket
+    /// or fresh username + password.
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
             return Err(Error::Config(
                 "reconnect requires remote configuration".into(),
             ));
         };
-        remote.reconnect(server_url, ticket).await
+        remote
+            .reconnect(server_url, ticket, username, password)
+            .await
     }
 
     /// Register a callback fired when the broker returns
@@ -838,12 +940,27 @@ impl Store {
         Ok(())
     }
 
+    /// Register a callback fired when the broker returns
+    /// `MQTT_DISCONNECT_AUTH_FAILURE`. Use it to clear cached auth state and
+    /// route the user to re-login.
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F) -> Result<()>
+    where
+        F: Fn() + 'static,
+    {
+        let inner = self.inner()?;
+        if let Some(remote) = &inner.remote {
+            remote.set_session_invalid_handler(handler);
+        }
+        Ok(())
+    }
+
     /// Register an async validator fired at the start of every successful
     /// (re)connect. See [`ReconnectValidator`].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_reconnect_validator(&self, validator: ReconnectValidator) -> Result<()> {
         let inner = self.inner()?;
-        *inner.reconnect_validator.lock().unwrap() = Some(validator);
+        *inner.reconnect_validator.lock_guard() = Some(validator);
         Ok(())
     }
 
@@ -935,10 +1052,10 @@ impl Store {
                 remote.clear_session_invalid_handler();
                 let _ = remote.disconnect().await;
             }
-            *inner.reconnect_validator.lock().unwrap() = None;
+            *inner.reconnect_validator.lock_guard() = None;
         }
         {
-            let mut state = inner.state.lock().unwrap();
+            let mut state = inner.state.lock_guard();
             state.authenticated_user = None;
             state.current_scope = None;
             state.initial_sync_done = false;
@@ -964,7 +1081,7 @@ impl Store {
         if let Some(persistence) = &inner.persistence {
             persistence.close();
         }
-        let handles: Vec<JoinHandle> = inner.tasks.lock().unwrap().drain(..).collect();
+        let handles: Vec<JoinHandle> = inner.tasks.lock_guard().drain(..).collect();
         for handle in handles {
             handle.abort();
         }
@@ -1038,11 +1155,11 @@ impl StoreInner {
                 mutation_rx,
             ));
             let status_task = rt::spawn(status_loop(Shared::clone(&inner), status_rx));
-            inner.tasks.lock().unwrap().push(mutation_task);
-            inner.tasks.lock().unwrap().push(status_task);
+            inner.tasks.lock_guard().push(mutation_task);
+            inner.tasks.lock_guard().push(status_task);
 
             let flush_task = rt::spawn(flush_loop(Shared::clone(&inner)));
-            inner.tasks.lock().unwrap().push(flush_task);
+            inner.tasks.lock_guard().push(flush_task);
 
             if let Some(remote_cfg) = &options.remote {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1052,7 +1169,14 @@ impl StoreInner {
                 };
                 #[cfg(target_arch = "wasm32")]
                 let ticket: Option<String> = remote_cfg.ticket.clone();
-                let _ = remote.connect(&remote_cfg.server_url, ticket).await;
+                let _ = remote
+                    .connect(
+                        &remote_cfg.server_url,
+                        ticket,
+                        remote_cfg.username.clone(),
+                        remote_cfg.password.clone(),
+                    )
+                    .await;
             }
         }
 
@@ -1261,10 +1385,10 @@ async fn mutation_loop(
 }
 
 async fn resync_after_lag(inner: &Shared<StoreInner>, remote: &dyn RemoteSyncOps) {
-    if inner.state.lock().unwrap().last_connection_status != ConnectionStatus::Connected {
+    if inner.state.lock_guard().last_connection_status != ConnectionStatus::Connected {
         return;
     }
-    let user = inner.state.lock().unwrap().authenticated_user.clone();
+    let user = inner.state.lock_guard().authenticated_user.clone();
     let accessor = inner.local_accessor();
     let queue_ref = inner.queue.as_deref();
     if let Err(err) = remote
@@ -1280,7 +1404,7 @@ async fn status_loop(inner: Shared<StoreInner>, mut rx: broadcast::Receiver<Conn
         match rx.recv().await {
             Ok(status) => {
                 {
-                    let mut state = inner.state.lock().unwrap();
+                    let mut state = inner.state.lock_guard();
                     state.last_connection_status = status;
                     if status == ConnectionStatus::Connected {
                         state.has_been_connected = true;
@@ -1302,7 +1426,7 @@ async fn flush_loop(inner: Shared<StoreInner>) {
         inner.flush_notify.notified().await;
         loop {
             let connected =
-                inner.state.lock().unwrap().last_connection_status == ConnectionStatus::Connected;
+                inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected;
             if !connected {
                 break;
             }
@@ -1352,7 +1476,7 @@ async fn handle_remote_mutation(
         return;
     }
 
-    let current_scope = inner.state.lock().unwrap().current_scope.clone();
+    let current_scope = inner.state.lock_guard().current_scope.clone();
     let root_entity = &inner.config.scope.root_entity;
     let scope_field = &inner.config.scope.scope_field;
     let is_top_level = inner
@@ -1521,7 +1645,7 @@ async fn mirror_remote_to_memory(
 }
 
 async fn on_connected(inner: Shared<StoreInner>) {
-    let user = inner.state.lock().unwrap().authenticated_user.clone();
+    let user = inner.state.lock_guard().authenticated_user.clone();
     let remote = inner.remote.clone();
     let accessor = inner.local_accessor();
 
@@ -1529,7 +1653,7 @@ async fn on_connected(inner: Shared<StoreInner>) {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let validator = inner.reconnect_validator.lock().unwrap().clone();
+        let validator = inner.reconnect_validator.lock_guard().clone();
         if let Some(validator) = validator
             && let Err(err) = validator().await
         {
@@ -1551,7 +1675,7 @@ async fn on_connected(inner: Shared<StoreInner>) {
         let _ = remote
             .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
             .await;
-        inner.state.lock().unwrap().initial_sync_done = true;
+        inner.state.lock_guard().initial_sync_done = true;
     }
 }
 
@@ -1590,7 +1714,7 @@ fn spawn_filtered_forwarder<F>(
             }
         }
     });
-    let mut guard = tasks.lock().unwrap();
+    let mut guard = tasks.lock_guard();
     guard.retain(|h| !h.is_finished());
     guard.push(handle);
 }
@@ -1643,7 +1767,7 @@ fn sort_records(rows: &mut [Record], sort: &[crate::types::SortField]) {
 
 impl Drop for StoreInner {
     fn drop(&mut self) {
-        let handles: Vec<JoinHandle> = self.tasks.lock().unwrap().drain(..).collect();
+        let handles: Vec<JoinHandle> = self.tasks.lock_guard().drain(..).collect();
         for handle in handles {
             handle.abort();
         }
@@ -1694,7 +1818,7 @@ mod tests {
             _authenticated_user: Option<&str>,
         ) -> Result<()> {
             self.resync_calls.fetch_add(1, Ordering::SeqCst);
-            if let Some(sender) = self.inject_on_first_resync.lock().unwrap().take() {
+            if let Some(sender) = self.inject_on_first_resync.lock_guard().take() {
                 for i in 0..5 {
                     let _ = sender.send(delivery(&format!("inject-{i}")));
                 }
@@ -1703,7 +1827,7 @@ mod tests {
         }
     }
 
-    async fn fixture_inner(status: ConnectionStatus) -> Arc<StoreInner> {
+    async fn fixture_inner(status: ConnectionStatus) -> crate::error::Result<Arc<StoreInner>> {
         let mut entities = HashMap::new();
         entities.insert("project".to_string(), EntityDefinition::default());
         entities.insert("task".to_string(), EntityDefinition::default());
@@ -1715,12 +1839,8 @@ mod tests {
                 scope_field: "projectId".to_string(),
             },
         ));
-        let memory = Arc::new(
-            MemoryStore::new(Arc::clone(&config))
-                .await
-                .expect("memory store"),
-        );
-        Arc::new(StoreInner {
+        let memory = Arc::new(MemoryStore::new(Arc::clone(&config)).await?);
+        Ok(Arc::new(StoreInner {
             config,
             memory,
             persistence: None,
@@ -1737,7 +1857,7 @@ mod tests {
             replace_scope_lock: tokio::sync::Mutex::new(()),
             tasks: Mutex::new(Vec::new()),
             flush_notify: tokio::sync::Notify::new(),
-        })
+        }))
     }
 
     fn delivery(id: &str) -> MutationDelivery {
@@ -1761,8 +1881,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mirror_update_before_insert_upserts_the_row() {
-        let inner = fixture_inner(ConnectionStatus::Connected).await;
+    async fn mirror_update_before_insert_upserts_the_row() -> crate::error::Result<()> {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
         let mutation = SyncMutation {
             op: Operation::Update,
             entity: "task".to_string(),
@@ -1776,19 +1896,30 @@ mod tests {
 
         mirror_remote_to_memory(&inner, mutation, false).await;
 
-        let got = inner.memory.read("task", "t1").await.unwrap();
+        let got = inner.memory.read("task", "t1").await?;
         assert!(
             got.is_some(),
             "an Update arriving before its Insert must upsert the row, not drop it"
         );
-        let rec = got.unwrap();
-        assert_eq!(rec.get("title").and_then(Value::as_str), Some("hello"));
-        assert_eq!(rec.get("id").and_then(Value::as_str), Some("t1"));
+        assert_eq!(
+            got.as_ref()
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str),
+            Some("hello")
+        );
+        assert_eq!(
+            got.as_ref()
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str),
+            Some("t1")
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn mirror_insert_after_update_upsert_overwrites_idempotently() {
-        let inner = fixture_inner(ConnectionStatus::Connected).await;
+    async fn mirror_insert_after_update_upsert_overwrites_idempotently() -> crate::error::Result<()>
+    {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
         let upsert = SyncMutation {
             op: Operation::Update,
             entity: "task".to_string(),
@@ -1813,17 +1944,20 @@ mod tests {
         };
         mirror_remote_to_memory(&inner, insert, false).await;
 
-        let rec = inner.memory.read("task", "t1").await.unwrap().unwrap();
+        let rec = inner.memory.read("task", "t1").await?;
         assert_eq!(
-            rec.get("title").and_then(Value::as_str),
+            rec.as_ref()
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str),
             Some("from-insert"),
             "an Insert arriving after the Update already upserted the row must overwrite cleanly"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn mirror_delete_of_absent_row_is_noop() {
-        let inner = fixture_inner(ConnectionStatus::Connected).await;
+    async fn mirror_delete_of_absent_row_is_noop() -> crate::error::Result<()> {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
         let mutation = SyncMutation {
             op: Operation::Delete,
             entity: "task".to_string(),
@@ -1834,12 +1968,13 @@ mod tests {
 
         mirror_remote_to_memory(&inner, mutation, false).await;
 
-        assert!(inner.memory.read("task", "ghost").await.unwrap().is_none());
+        assert!(inner.memory.read("task", "ghost").await?.is_none());
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn lag_triggers_resync_and_still_applies_retained_messages() {
-        let inner = fixture_inner(ConnectionStatus::Connected).await;
+    async fn lag_triggers_resync_and_still_applies_retained_messages() -> crate::error::Result<()> {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
         let remote = FakeRemote::new(None);
         let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
 
@@ -1860,11 +1995,12 @@ mod tests {
             2,
             "the 2 retained (non-skipped) deliveries must still be applied after resync"
         );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resync_is_skipped_when_not_connected() {
-        let inner = fixture_inner(ConnectionStatus::Offline).await;
+    async fn resync_is_skipped_when_not_connected() -> crate::error::Result<()> {
+        let inner = fixture_inner(ConnectionStatus::Offline).await?;
         let remote = FakeRemote::new(None);
         let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
 
@@ -1885,11 +2021,13 @@ mod tests {
             2,
             "retained deliveries are still applied even when resync is gated off"
         );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sustained_overflow_during_resync_relags_and_resyncs_again() {
-        let inner = fixture_inner(ConnectionStatus::Connected).await;
+    async fn sustained_overflow_during_resync_relags_and_resyncs_again() -> crate::error::Result<()>
+    {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
         let (tx, rx) = broadcast::channel::<MutationDelivery>(2);
         let remote = FakeRemote::new(Some(tx.clone()));
 
@@ -1915,5 +2053,6 @@ mod tests {
             "an overflow injected synchronously during the first resync must force a second \
              lag and a second resync — the amplification hypothesis"
         );
+        Ok(())
     }
 }

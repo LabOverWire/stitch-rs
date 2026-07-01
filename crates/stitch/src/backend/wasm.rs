@@ -57,6 +57,51 @@ fn sort_dir_str(dir: &SortDirection) -> &'static str {
     }
 }
 
+fn list_options_js(
+    filters: &[Filter],
+    sort: &[SortOrder],
+    pagination: Option<Pagination>,
+    projection: &[String],
+) -> Result<JsValue> {
+    let filter_js: Vec<Value> = filters
+        .iter()
+        .map(|f| json!({ "field": f.field, "op": filter_op_str(&f.op), "value": f.value }))
+        .collect();
+    let mut options = serde_json::Map::new();
+    options.insert("filters".into(), Value::Array(filter_js));
+    if !sort.is_empty() {
+        let sort_js: Vec<Value> = sort
+            .iter()
+            .map(|s| json!({ "field": s.field, "direction": sort_dir_str(&s.direction) }))
+            .collect();
+        options.insert("sort".into(), Value::Array(sort_js));
+    }
+    if let Some(p) = pagination {
+        options.insert(
+            "pagination".into(),
+            json!({ "offset": p.offset, "limit": p.limit }),
+        );
+    }
+    if !projection.is_empty() {
+        options.insert(
+            "projection".into(),
+            Value::Array(projection.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    to_js(&Value::Object(options))
+}
+
+fn list_array(out: JsValue) -> Result<Vec<Value>> {
+    match from_js(&out)? {
+        Value::Array(items) => Ok(items),
+        other => Err(Error::Config(format!("list returned non-array: {other:?}"))),
+    }
+}
+
+fn is_not_found(js: &JsValue) -> bool {
+    js.as_string().is_some_and(|s| s.contains("not found"))
+}
+
 fn schema_js(fields: &[SchemaField]) -> Value {
     let fields: Vec<Value> = fields
         .iter()
@@ -126,13 +171,8 @@ impl Db for WasmDb {
     async fn read(&self, entity: &str, id: &str) -> Result<Option<Value>> {
         match self.db.read(entity.to_string(), id.to_string()).await {
             Ok(js) => Ok(Some(from_js(&js)?)),
-            Err(e) => {
-                if e.as_string().is_some_and(|s| s.contains("not found")) {
-                    Ok(None)
-                } else {
-                    Err(js_err("read", &e))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(js_err("read", &e)),
         }
     }
 
@@ -161,41 +201,13 @@ impl Db for WasmDb {
         pagination: Option<Pagination>,
         projection: Vec<String>,
     ) -> Result<Vec<Value>> {
-        let filter_js: Vec<Value> = filters
-            .iter()
-            .map(|f| json!({ "field": f.field, "op": filter_op_str(&f.op), "value": f.value }))
-            .collect();
-        let mut options = serde_json::Map::new();
-        options.insert("filters".into(), Value::Array(filter_js));
-        if !sort.is_empty() {
-            let sort_js: Vec<Value> = sort
-                .iter()
-                .map(|s| json!({ "field": s.field, "direction": sort_dir_str(&s.direction) }))
-                .collect();
-            options.insert("sort".into(), Value::Array(sort_js));
-        }
-        if let Some(p) = pagination {
-            options.insert(
-                "pagination".into(),
-                json!({ "offset": p.offset, "limit": p.limit }),
-            );
-        }
-        if !projection.is_empty() {
-            options.insert(
-                "projection".into(),
-                Value::Array(projection.into_iter().map(Value::String).collect()),
-            );
-        }
-        let options = to_js(&Value::Object(options))?;
+        let options = list_options_js(&filters, &sort, pagination, &projection)?;
         let out = self
             .db
             .list(entity.to_string(), options)
             .await
             .map_err(|e| js_err("list", &e))?;
-        match from_js(&out)? {
-            Value::Array(items) => Ok(items),
-            other => Err(Error::Config(format!("list returned non-array: {other:?}"))),
-        }
+        list_array(out)
     }
 
     async fn register_schema(&self, name: &str, def: &EntityDefinition) -> Result<()> {
@@ -225,4 +237,35 @@ impl Db for WasmDb {
     }
 
     fn close(&self) {}
+
+    fn read_sync(&self, entity: &str, id: &str) -> Result<Option<Value>> {
+        match self.db.read_sync(entity.to_string(), id.to_string()) {
+            Ok(js) => Ok(Some(from_js(&js)?)),
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(js_err("read_sync", &e)),
+        }
+    }
+
+    fn list_sync(
+        &self,
+        entity: &str,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        projection: Vec<String>,
+    ) -> Result<Vec<Value>> {
+        let options = list_options_js(&filters, &sort, pagination, &projection)?;
+        let out = self
+            .db
+            .list_sync(entity.to_string(), options)
+            .map_err(|e| js_err("list_sync", &e))?;
+        list_array(out)
+    }
+
+    fn count_sync(&self, entity: &str, filters: Vec<Filter>) -> Result<usize> {
+        let options = list_options_js(&filters, &[], None, &[])?;
+        self.db
+            .count_sync(entity.to_string(), options)
+            .map_err(|e| js_err("count_sync", &e))
+    }
 }

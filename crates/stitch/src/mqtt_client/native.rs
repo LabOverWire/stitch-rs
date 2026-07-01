@@ -36,6 +36,8 @@ impl MqttClientApi for NativeMqttClient {
             self.client
                 .set_auth_handler(JwtAuthHandler::new(ticket.clone()))
                 .await;
+        } else if let (Some(user), Some(pass)) = (&args.username, &args.password) {
+            options = options.with_credentials(user.clone(), pass.clone());
         }
 
         let result = self

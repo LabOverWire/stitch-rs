@@ -1,5 +1,6 @@
 use crate::config::StoreConfig;
 use crate::error::{Error, Result};
+use crate::lock::MutexExt;
 use crate::mqtt_client::{
     ConnectArgs, ConnectionHandler, DynMqttClient, IncomingMessage, PublishArgs, new_client,
 };
@@ -27,11 +28,14 @@ pub struct SyncEngine {
     prefix: String,
     response_prefix: String,
     client: DynMqttClient,
-    state: Arc<EngineState>,
+    state: rt::Shared<EngineState>,
     request_timeout: Duration,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type SessionInvalidHandler = Arc<dyn Fn() + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type SessionInvalidHandler = std::rc::Rc<dyn Fn()>;
 
 struct EngineState {
     pending_requests: Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>,
@@ -76,7 +80,7 @@ impl SyncEngine {
             })
             .collect();
 
-        let state = Arc::new(EngineState {
+        let state = rt::Shared::new(EngineState {
             pending_requests: Mutex::new(HashMap::new()),
             subscribed_scopes: Mutex::new(HashSet::new()),
             awaiting_state: Mutex::new(HashSet::new()),
@@ -93,7 +97,7 @@ impl SyncEngine {
         });
 
         let client = new_client(&client_id);
-        Self::wire_connection_events(&client, Arc::clone(&state)).await?;
+        Self::wire_connection_events(&client, rt::Shared::clone(&state)).await?;
 
         Ok(Self {
             client_id,
@@ -123,7 +127,13 @@ impl SyncEngine {
         self.client.is_connected().await
     }
 
-    pub async fn connect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    pub async fn connect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let _ = self
             .state
             .connection_status
@@ -134,6 +144,8 @@ impl SyncEngine {
             keep_alive_secs: 60,
             session_expiry_secs: self.config.session_expiry_secs,
             jwt_ticket: ticket,
+            username,
+            password,
         };
 
         let result = self.client.connect(server_url, args).await?;
@@ -158,24 +170,20 @@ impl SyncEngine {
 
     pub async fn open_scope(&self, scope_id: &str) -> Result<ScopeState> {
         {
-            let mut awaiting = self.state.awaiting_state.lock().unwrap();
+            let mut awaiting = self.state.awaiting_state.lock_guard();
             awaiting.insert(scope_id.to_string());
         }
         {
-            let mut buffered = self.state.buffered.lock().unwrap();
+            let mut buffered = self.state.buffered.lock_guard();
             buffered.insert(scope_id.to_string(), Vec::new());
         }
 
         match self.do_open_scope(scope_id).await {
             Ok(state) => Ok(state),
             Err(err) => {
-                self.state.awaiting_state.lock().unwrap().remove(scope_id);
-                self.state.buffered.lock().unwrap().remove(scope_id);
-                self.state
-                    .subscribed_scopes
-                    .lock()
-                    .unwrap()
-                    .remove(scope_id);
+                self.state.awaiting_state.lock_guard().remove(scope_id);
+                self.state.buffered.lock_guard().remove(scope_id);
+                self.state.subscribed_scopes.lock_guard().remove(scope_id);
                 Err(err)
             }
         }
@@ -185,8 +193,7 @@ impl SyncEngine {
         self.subscribe_to_scope(scope_id).await?;
         self.state
             .subscribed_scopes
-            .lock()
-            .unwrap()
+            .lock_guard()
             .insert(scope_id.to_string());
 
         let root_future = self.fetch_one(&self.config.scope.root_entity, scope_id);
@@ -218,19 +225,17 @@ impl SyncEngine {
         {
             self.state
                 .applied_version
-                .lock()
-                .unwrap()
+                .lock_guard()
                 .insert(scope_id.to_string(), version_i64);
         }
 
         let buffered = self
             .state
             .buffered
-            .lock()
-            .unwrap()
+            .lock_guard()
             .remove(scope_id)
             .unwrap_or_default();
-        self.state.awaiting_state.lock().unwrap().remove(scope_id);
+        self.state.awaiting_state.lock_guard().remove(scope_id);
 
         Ok(ScopeState {
             root,
@@ -241,14 +246,10 @@ impl SyncEngine {
     }
 
     pub async fn close_scope(&self, scope_id: &str) -> Result<()> {
-        self.state
-            .subscribed_scopes
-            .lock()
-            .unwrap()
-            .remove(scope_id);
-        self.state.buffered.lock().unwrap().remove(scope_id);
-        self.state.awaiting_state.lock().unwrap().remove(scope_id);
-        self.state.applied_version.lock().unwrap().remove(scope_id);
+        self.state.subscribed_scopes.lock_guard().remove(scope_id);
+        self.state.buffered.lock_guard().remove(scope_id);
+        self.state.awaiting_state.lock_guard().remove(scope_id);
+        self.state.applied_version.lock_guard().remove(scope_id);
         let topic = format!(
             "{}/{}/{}/#",
             self.prefix, self.config.scope.root_entity, scope_id
@@ -319,8 +320,7 @@ impl SyncEngine {
         check_response(&response)?;
         self.state
             .applied_version
-            .lock()
-            .unwrap()
+            .lock_guard()
             .insert(scope_id.to_string(), now);
         Ok(())
     }
@@ -328,8 +328,7 @@ impl SyncEngine {
     pub fn applied_version(&self, scope_id: &str) -> Option<i64> {
         self.state
             .applied_version
-            .lock()
-            .unwrap()
+            .lock_guard()
             .get(scope_id)
             .copied()
     }
@@ -391,8 +390,7 @@ impl SyncEngine {
         let (tx, rx) = oneshot::channel();
         self.state
             .pending_requests
-            .lock()
-            .unwrap()
+            .lock_guard()
             .insert(request_id.clone(), tx);
 
         let args = PublishArgs {
@@ -404,11 +402,7 @@ impl SyncEngine {
         let body = serde_json::to_vec(&payload)?;
         let publish = self.client.publish(topic.to_string(), body, args).await;
         if let Err(e) = publish {
-            self.state
-                .pending_requests
-                .lock()
-                .unwrap()
-                .remove(&request_id);
+            self.state.pending_requests.lock_guard().remove(&request_id);
             return Err(e);
         }
 
@@ -420,11 +414,7 @@ impl SyncEngine {
             },
             Ok(Err(_)) => Err(Error::ConnectionClosed),
             Err(_) => {
-                self.state
-                    .pending_requests
-                    .lock()
-                    .unwrap()
-                    .remove(&request_id);
+                self.state.pending_requests.lock_guard().remove(&request_id);
                 Err(Error::Timeout(
                     u64::try_from(self.request_timeout.as_millis()).unwrap_or(u64::MAX),
                 ))
@@ -434,7 +424,7 @@ impl SyncEngine {
 
     async fn subscribe_to_response_topic(&self) -> Result<()> {
         let pattern = format!("{}/{}/#", self.response_prefix, self.client_id);
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 pattern,
@@ -448,8 +438,7 @@ impl SyncEngine {
     fn snapshot_subscribed_scopes(&self) -> Vec<String> {
         self.state
             .subscribed_scopes
-            .lock()
-            .unwrap()
+            .lock_guard()
             .iter()
             .cloned()
             .collect()
@@ -460,7 +449,7 @@ impl SyncEngine {
             "{}/{}/+/events/#",
             self.prefix, self.config.scope.root_entity
         );
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 root_wildcard,
@@ -471,7 +460,7 @@ impl SyncEngine {
             .await?;
 
         for tl in &self.state.top_level_patterns {
-            let state = Arc::clone(&self.state);
+            let state = rt::Shared::clone(&self.state);
             let entity = tl.entity.clone();
             self.client
                 .subscribe(
@@ -490,7 +479,7 @@ impl SyncEngine {
             "{}/{}/{}/#",
             self.prefix, self.config.scope.root_entity, scope_id
         );
-        let state = Arc::clone(&self.state);
+        let state = rt::Shared::clone(&self.state);
         self.client
             .subscribe(
                 pattern,
@@ -501,42 +490,59 @@ impl SyncEngine {
             .await
     }
 
-    async fn wire_connection_events(client: &DynMqttClient, state: Arc<EngineState>) -> Result<()> {
+    async fn wire_connection_events(
+        client: &DynMqttClient,
+        state: rt::Shared<EngineState>,
+    ) -> Result<()> {
         let handler: ConnectionHandler = Box::new(move |status, auth_failure| {
             let _ = state.connection_status.send(status);
-            if auth_failure && let Some(handler) = state.session_invalid.lock().unwrap().clone() {
+            if auth_failure && let Some(handler) = state.session_invalid.lock_guard().clone() {
                 handler();
             }
         });
         client.on_connection_event(handler).await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_session_invalid_handler<F>(&self, handler: F)
     where
         F: Fn() + Send + Sync + 'static,
     {
-        *self.state.session_invalid.lock().unwrap() = Some(Arc::new(handler));
+        *self.state.session_invalid.lock_guard() = Some(Arc::new(handler));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F)
+    where
+        F: Fn() + 'static,
+    {
+        *self.state.session_invalid.lock_guard() = Some(std::rc::Rc::new(handler));
     }
 
     pub fn clear_session_invalid_handler(&self) {
-        *self.state.session_invalid.lock().unwrap() = None;
+        *self.state.session_invalid.lock_guard() = None;
     }
 
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
         let _ = self.client.disconnect().await;
-        self.connect(server_url, ticket).await
+        self.connect(server_url, ticket, username, password).await
     }
 
     fn cleanup_on_disconnect(&self) {
-        self.state.subscribed_scopes.lock().unwrap().clear();
-        self.state.awaiting_state.lock().unwrap().clear();
-        self.state.buffered.lock().unwrap().clear();
-        self.state.applied_version.lock().unwrap().clear();
+        self.state.subscribed_scopes.lock_guard().clear();
+        self.state.awaiting_state.lock_guard().clear();
+        self.state.buffered.lock_guard().clear();
+        self.state.applied_version.lock_guard().clear();
         let pending: Vec<oneshot::Sender<Result<Value>>> = self
             .state
             .pending_requests
-            .lock()
-            .unwrap()
+            .lock_guard()
             .drain()
             .map(|(_, v)| v)
             .collect();
@@ -551,7 +557,7 @@ fn handle_response(state: &EngineState, msg: IncomingMessage) {
     let Some(request_id) = msg.topic.strip_prefix(&expected) else {
         return;
     };
-    let Some(sender) = state.pending_requests.lock().unwrap().remove(request_id) else {
+    let Some(sender) = state.pending_requests.lock_guard().remove(request_id) else {
         return;
     };
     let parsed = serde_json::from_slice::<Value>(&msg.payload);
@@ -587,8 +593,8 @@ fn handle_scope_message(state: &EngineState, msg: IncomingMessage) {
     };
 
     let scope_id = parsed.scope_id.clone();
-    let buffered = state.awaiting_state.lock().unwrap().contains(&scope_id);
-    if buffered && let Some(list) = state.buffered.lock().unwrap().get_mut(&scope_id) {
+    let buffered = state.awaiting_state.lock_guard().contains(&scope_id);
+    if buffered && let Some(list) = state.buffered.lock_guard().get_mut(&scope_id) {
         list.push(mutation);
         return;
     }
@@ -609,8 +615,7 @@ fn handle_root_wildcard_message(state: &EngineState, msg: IncomingMessage) {
     }
     if state
         .subscribed_scopes
-        .lock()
-        .unwrap()
+        .lock_guard()
         .contains(&parsed.scope_id)
     {
         return;

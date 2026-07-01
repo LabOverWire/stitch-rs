@@ -9,12 +9,15 @@ mod native;
 mod wasm;
 
 /// Connect parameters, platform-neutral. `jwt_ticket` drives MQTT5 enhanced
-/// auth on native; it is ignored on wasm for now (auth is a later milestone).
+/// auth; `username` + `password` drive classic password auth (JWT wins when
+/// both are set).
 pub(crate) struct ConnectArgs {
     pub clean_start: bool,
     pub keep_alive_secs: u64,
     pub session_expiry_secs: u32,
     pub jwt_ticket: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 pub(crate) struct ConnectOutcome {

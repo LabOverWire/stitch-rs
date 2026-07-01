@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::lock::MutexExt;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
 pub use crate::queue::{MutationSender, OfflineQueue};
@@ -454,7 +455,7 @@ impl OfflineQueue for PersistentOfflineQueue {
     }
 
     fn set_authenticated_user(&self, user_id: Option<String>) {
-        *self.authenticated_user.lock().expect("user lock") = user_id;
+        *self.authenticated_user.lock_guard() = user_id;
     }
 }
 
@@ -521,7 +522,7 @@ impl OfflineQueue for InMemoryOfflineQueue {
                 mutation.created_at
             },
         };
-        self.rows.lock().expect("rows lock").push(row);
+        self.rows.lock_guard().push(row);
         Ok(())
     }
 
@@ -532,7 +533,7 @@ impl OfflineQueue for InMemoryOfflineQueue {
         scope_id: &str,
         op: Operation,
     ) -> Result<()> {
-        let mut rows = self.rows.lock().expect("rows lock");
+        let mut rows = self.rows.lock_guard();
         rows.retain(|r| {
             !(r.entity == entity
                 && r.entity_id == entity_id
@@ -547,7 +548,7 @@ impl OfflineQueue for InMemoryOfflineQueue {
             Some(g) => g,
             None => return Ok(0),
         };
-        let snapshot: Vec<StoredRow> = self.rows.lock().expect("rows lock").clone();
+        let snapshot: Vec<StoredRow> = self.rows.lock_guard().clone();
         if snapshot.is_empty() {
             return Ok(0);
         }
@@ -558,28 +559,26 @@ impl OfflineQueue for InMemoryOfflineQueue {
         let remove = move |ids: Vec<String>| {
             let set = Arc::clone(&remove_set_clone);
             box_fut(async move {
-                set.lock().expect("remove_set lock").extend(ids);
+                set.lock_guard().extend(ids);
             })
         };
         let retained = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
-        let flushed: Vec<String> = remove_set.lock().expect("remove_set lock").clone();
+        let flushed: Vec<String> = remove_set.lock_guard().clone();
         rows_handle
-            .lock()
-            .expect("rows lock")
+            .lock_guard()
             .retain(|r| !flushed.contains(&r.record_id));
         Ok(retained)
     }
 
     async fn clear(&self) -> Result<()> {
-        self.rows.lock().expect("rows lock").clear();
+        self.rows.lock_guard().clear();
         Ok(())
     }
 
     async fn pending_for_scope(&self, scope_id: &str) -> Result<Vec<PendingMutation>> {
         Ok(self
             .rows
-            .lock()
-            .expect("rows lock")
+            .lock_guard()
             .iter()
             .filter(|r| r.scope_id == scope_id)
             .cloned()
@@ -590,8 +589,7 @@ impl OfflineQueue for InMemoryOfflineQueue {
     async fn has_pending_insert(&self, entity: &str, entity_id: &str) -> Result<bool> {
         Ok(self
             .rows
-            .lock()
-            .expect("rows lock")
+            .lock_guard()
             .iter()
             .any(|r| r.entity == entity && r.entity_id == entity_id && r.op == Operation::Insert))
     }
@@ -699,7 +697,7 @@ struct FlushGuard<'a> {
 
 impl<'a> FlushGuard<'a> {
     fn try_acquire(flag: &'a Mutex<bool>) -> Option<Self> {
-        let mut guard = flag.lock().expect("flushing lock");
+        let mut guard = flag.lock_guard();
         if *guard {
             return None;
         }
@@ -737,10 +735,7 @@ mod tests {
             if self.fail_create_transient {
                 return Err(Error::Timeout(10));
             }
-            self.creates
-                .lock()
-                .unwrap()
-                .push((entity.to_string(), data));
+            self.creates.lock_guard().push((entity.to_string(), data));
             Ok(())
         }
 
@@ -766,7 +761,7 @@ mod tests {
         }
 
         async fn read_entity(&self, _entity: &str, _id: &str) -> Result<Option<Record>> {
-            Ok(self.read_result.lock().unwrap().clone())
+            Ok(self.read_result.lock_guard().clone())
         }
 
         async fn delete_entity(&self, _entity: &str, _id: &str) -> Result<()> {
@@ -794,7 +789,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_retains_transient_then_drains_on_recovery() {
+    async fn flush_retains_transient_then_drains_on_recovery() -> crate::error::Result<()> {
         let queue = InMemoryOfflineQueue::new("workspace".into());
         queue
             .queue(pending(
@@ -803,22 +798,22 @@ mod tests {
                 Some(record(&[("id", "t1"), ("status", "pending")])),
                 1,
             ))
-            .await
-            .unwrap();
+            .await?;
 
         let failing = FakeSender {
             fail_create_transient: true,
             ..Default::default()
         };
-        assert_eq!(queue.flush(&failing).await.unwrap(), 1);
+        assert_eq!(queue.flush(&failing).await?, 1);
 
         let recovered = FakeSender::default();
-        assert_eq!(queue.flush(&recovered).await.unwrap(), 0);
-        assert_eq!(recovered.creates.lock().unwrap().len(), 1);
+        assert_eq!(queue.flush(&recovered).await?, 0);
+        assert_eq!(recovered.creates.lock_guard().len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn flush_update_not_found_recreates_from_local_snapshot() {
+    async fn flush_update_not_found_recreates_from_local_snapshot() -> crate::error::Result<()> {
         let queue = InMemoryOfflineQueue::new("workspace".into());
         queue
             .queue(pending(
@@ -827,21 +822,21 @@ mod tests {
                 Some(record(&[("status", "running")])),
                 1,
             ))
-            .await
-            .unwrap();
+            .await?;
 
         let sender = FakeSender {
             fail_update_not_found: true,
             read_result: Mutex::new(Some(record(&[("id", "t1"), ("status", "running")]))),
             ..Default::default()
         };
-        assert_eq!(queue.flush(&sender).await.unwrap(), 0);
+        assert_eq!(queue.flush(&sender).await?, 0);
         assert_eq!(sender.updates.load(Ordering::SeqCst), 1);
-        assert_eq!(sender.creates.lock().unwrap().len(), 1);
+        assert_eq!(sender.creates.lock_guard().len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn flush_consolidates_insert_and_update_into_single_create() {
+    async fn flush_consolidates_insert_and_update_into_single_create() -> crate::error::Result<()> {
         let queue = InMemoryOfflineQueue::new("workspace".into());
         queue
             .queue(pending(
@@ -850,8 +845,7 @@ mod tests {
                 Some(record(&[("id", "t1"), ("status", "pending")])),
                 1,
             ))
-            .await
-            .unwrap();
+            .await?;
         queue
             .queue(pending(
                 Operation::Update,
@@ -859,17 +853,17 @@ mod tests {
                 Some(record(&[("status", "running")])),
                 2,
             ))
-            .await
-            .unwrap();
+            .await?;
 
         let sender = FakeSender::default();
-        assert_eq!(queue.flush(&sender).await.unwrap(), 0);
+        assert_eq!(queue.flush(&sender).await?, 0);
         assert_eq!(sender.updates.load(Ordering::SeqCst), 0);
-        let creates = sender.creates.lock().unwrap();
+        let creates = sender.creates.lock_guard();
         assert_eq!(creates.len(), 1);
         assert_eq!(
             creates[0].1.get("status").and_then(Value::as_str),
             Some("running")
         );
+        Ok(())
     }
 }

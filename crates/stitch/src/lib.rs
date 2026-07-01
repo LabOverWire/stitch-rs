@@ -50,6 +50,7 @@ pub mod error;
 pub mod types;
 
 pub(crate) mod backend;
+pub(crate) mod lock;
 pub(crate) mod mqtt_client;
 pub(crate) mod rt;
 

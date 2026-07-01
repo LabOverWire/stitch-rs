@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::queue::{MutationSender, OfflineQueue};
 use crate::rt::Shared;
 use crate::sync_engine::{MutationDelivery, SyncEngine};
-use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation};
+use crate::types::{ConnectionStatus, Operation, Record, ScopeState, SyncMutation, strip_nulls};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -63,21 +63,46 @@ impl RemoteSyncLayer {
         self.sync.connection_status()
     }
 
-    pub async fn connect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
-        self.sync.connect(server_url, ticket).await
+    pub async fn connect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
+        self.sync
+            .connect(server_url, ticket, username, password)
+            .await
     }
 
     pub async fn disconnect(&self) -> Result<()> {
         self.sync.disconnect().await
     }
 
-    pub async fn reconnect(&self, server_url: &str, ticket: Option<String>) -> Result<()> {
-        self.sync.reconnect(server_url, ticket).await
+    pub async fn reconnect(
+        &self,
+        server_url: &str,
+        ticket: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Result<()> {
+        self.sync
+            .reconnect(server_url, ticket, username, password)
+            .await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_session_invalid_handler<F>(&self, handler: F)
     where
         F: Fn() + Send + Sync + 'static,
+    {
+        self.sync.set_session_invalid_handler(handler);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn set_session_invalid_handler<F>(&self, handler: F)
+    where
+        F: Fn() + 'static,
     {
         self.sync.set_session_invalid_handler(handler);
     }
@@ -266,7 +291,8 @@ impl RemoteSyncLayer {
             if has_pending_delete || has_pending_update {
                 continue;
             }
-            let mut cleaned = strip_nulls(record);
+            let mut cleaned = record;
+            strip_nulls(&mut cleaned);
             if !cleaned.contains_key(&scope_field) {
                 cleaned.insert(scope_field.clone(), Value::String(scope_id.to_string()));
             }
@@ -425,8 +451,4 @@ enum EntityRole {
     Child,
     TopLevel,
     Unknown,
-}
-
-fn strip_nulls(record: Record) -> Record {
-    record.into_iter().filter(|(_, v)| !v.is_null()).collect()
 }

@@ -1,12 +1,19 @@
-# stitch
+# stitch-sync
 
-Native Rust port of [`@laboverwire/stitch`](https://github.com/LabOverWire/stitch). Reactive state-sync library
+Rust port of [`@laboverwire/stitch`](https://github.com/LabOverWire/stitch). Reactive state-sync library
 bridging an in-memory store, fjall-backed local persistence, and MQTT-based remote
-sync into a single `Store` interface.
+sync into a single `Store` interface. Compiles for both native and `wasm32`.
 
 ```toml
 [dependencies]
-stitch = { path = "..." } # path/git dep — not on crates.io
+stitch-sync = "0.2.3"
+```
+
+The crate is published as `stitch-sync` (the name `stitch` was taken) but is
+imported as `stitch`:
+
+```rust
+use stitch::{Origin, Store, StoreConfig, StoreOptions};
 ```
 
 ```rust
@@ -115,7 +122,9 @@ layer composition, deliberate deviations from TS, and known gaps.
 - `mqtt5` — MQTT5 client and broker
 - `tokio` — async runtime
 
-All three are LabOverWire-owned. No WASM, no JS bindings — pure Rust target.
+All three are LabOverWire-owned. On `wasm32` the equivalent browser stack
+(`mqdb-wasm`, `mqtt5-wasm`) is used instead; see
+[`stitch-wasm`](../stitch-wasm) for the JavaScript bindings.
 
 ## License
 
