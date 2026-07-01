@@ -1,6 +1,7 @@
 use crate::backend::{DynDb, open_memory_db, value_to_record};
 use crate::config::StoreConfig;
 use crate::error::Result;
+use crate::lock::{MutexExt, RwLockExt};
 use crate::origin::Origin;
 use crate::rt::Shared;
 use crate::types::{MutationEvent, Operation, Record, ScopeBundle, StoreEvent, strip_nulls};
@@ -53,13 +54,13 @@ impl MemoryStore {
     }
 
     pub fn begin_batch(&self) {
-        let mut batch = self.batch.lock().unwrap();
+        let mut batch = self.batch.lock_guard();
         batch.depth = batch.depth.saturating_add(1);
     }
 
     pub fn end_batch(&self) {
         let drained: Vec<MutationEvent> = {
-            let mut batch = self.batch.lock().unwrap();
+            let mut batch = self.batch.lock_guard();
             if batch.depth == 0 {
                 return;
             }
@@ -83,11 +84,11 @@ impl MemoryStore {
     }
 
     pub fn current_scope(&self) -> Option<String> {
-        self.state.read().unwrap().current_scope.clone()
+        self.state.read_guard().current_scope.clone()
     }
 
     fn db(&self) -> DynDb {
-        Shared::clone(&self.state.read().unwrap().db)
+        Shared::clone(&self.state.read_guard().db)
     }
 
     pub async fn create(
@@ -232,7 +233,7 @@ impl MemoryStore {
         }
 
         let previous_scope = {
-            let mut state = self.state.write().unwrap();
+            let mut state = self.state.write_guard();
             let prev = state.current_scope.take();
             state.db = fresh;
             state.current_scope = Some(scope_id.to_string());
@@ -260,7 +261,7 @@ impl MemoryStore {
     pub async fn clear_scope(&self, scope_id: &str) -> Result<()> {
         let fresh = open_memory_db(&self.config).await?;
         {
-            let mut state = self.state.write().unwrap();
+            let mut state = self.state.write_guard();
             state.db = fresh;
             if state.current_scope.as_deref() == Some(scope_id) {
                 state.current_scope = None;
@@ -276,15 +277,14 @@ impl MemoryStore {
 
     pub fn get_version(&self, scope_id: &str, entity: &str) -> u64 {
         self.versions
-            .lock()
-            .unwrap()
+            .lock_guard()
             .get(&(scope_id.to_string(), entity.to_string()))
             .copied()
             .unwrap_or(0)
     }
 
     fn bump_version(&self, scope_id: &str, entity: &str) {
-        let mut versions = self.versions.lock().unwrap();
+        let mut versions = self.versions.lock_guard();
         let counter = versions
             .entry((scope_id.to_string(), entity.to_string()))
             .or_insert(0);
@@ -299,8 +299,7 @@ impl MemoryStore {
 
     fn remove_scope_versions(&self, scope_id: &str) {
         self.versions
-            .lock()
-            .unwrap()
+            .lock_guard()
             .retain(|(scope, _), _| scope != scope_id);
     }
 
@@ -314,7 +313,7 @@ impl MemoryStore {
 
     fn emit_mutation(&self, event: MutationEvent) {
         {
-            let mut batch = self.batch.lock().unwrap();
+            let mut batch = self.batch.lock_guard();
             if batch.depth > 0 {
                 let key = (event.scope_id.clone(), event.entity.clone());
                 batch.buffered.insert(key, event);
