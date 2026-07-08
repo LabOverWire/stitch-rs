@@ -34,9 +34,14 @@ the layer composition, deliberate deviations, and current gaps.
 | `memory_store.rs` | Hot reads for the active scope; held in an `mqdb_agent::Database` opened with `MemoryBackend`; emits `StoreEvent` via `broadcast::Sender`; supports `begin_batch`/`end_batch` deduplication |
 | `persistence.rs` | Durable storage for all scopes; held in an `mqdb_agent::Database` on fjall; `set_suppress_notifications`; `recover()` for corruption recovery |
 | `offline_queue.rs` | Persistent (`pending_sync`-backed) and in-memory implementations of the `OfflineQueue` trait; consolidation (insert + updates → insert with merged data, etc.); `MutationSender` trait that `RemoteSyncLayer` implements |
-| `sync_engine.rs` | Thin layer over `mqtt5::MqttClient`; request-response correlation; per-scope subscriptions; root-wildcard subscription for cross-scope root events; top-level entity subscriptions; JWT enhanced-auth via `JwtAuthHandler` |
+| `sync_engine.rs` | Thin layer over the platform `mqtt_client` seam (`DynMqttClient`); request-response correlation; per-scope subscriptions; root-wildcard subscription for cross-scope root events; top-level entity subscriptions; JWT enhanced-auth |
 | `remote_sync.rs` | Routes CRUD by entity role (Root/Child/TopLevel); `apply_mutation_to_db` with version-based conflict resolution; `reconcile_children`; `sync_root_entity_list`; impls `MutationSender` for `OfflineQueue` to drain through |
 | `store.rs` | Public facade; idempotent `initialize` via `OnceCell`; CRUD fan-out (memory + persistence + queue + remote); `replace_scope` orchestration; background tasks for remote-mutation forwarding and connection-status handling |
+| `backend/` | Platform `Db` seam: native `mqdb-agent` on fjall, `mqdb-wasm` on wasm; `MemoryStore` and `PersistenceLayer` open through it |
+| `mqtt_client/` | Platform MQTT seam (`MqttClientApi` / `DynMqttClient`, `ConnectArgs`): native `mqtt5`, `mqtt5-wasm` on wasm |
+| `rt.rs` | Task-spawning shim, `Shared<T>` (`Arc` native / `Rc` wasm), and `new_id()` (UUIDv7 native / v4 wasm) |
+| `lock.rs` | Poison-tolerant `MutexExt` / `RwLockExt` guard helpers |
+| `queue.rs` | `MutationSender` trait the offline queue drains through |
 
 ---
 
@@ -334,7 +339,8 @@ cargo test                              # full suite, default parallel
 cargo clippy --all-targets -- -D warnings   # CI-strict
 ```
 
-Current: 90 tests, all passing, zero clippy warnings, zero build warnings.
+Current: 101 tests (92 integration + 9 in-crate unit), all passing, zero clippy
+warnings, zero build warnings.
 
 ---
 
@@ -385,25 +391,36 @@ broker. The wire-significant choices:
 
 ```
 src/
+├── backend/           platform Db seam
+│   ├── mod.rs         Db trait + MaybeSendSync marker
+│   ├── native.rs      mqdb-agent on fjall
+│   └── wasm.rs        mqdb-wasm
+├── mqtt_client/       platform MQTT seam
+│   ├── mod.rs         MqttClientApi / DynMqttClient + ConnectArgs
+│   ├── native.rs      mqtt5
+│   └── wasm.rs        mqtt5-wasm
 ├── config.rs          public config types
 ├── db_helpers.rs      pub(crate) shared open/register helpers
 ├── error.rs           Error enum + classifiers
 ├── lib.rs             module declarations + re-exports
+├── lock.rs            poison-tolerant Mutex/RwLock guard helpers
 ├── memory_store.rs    MemoryStore + begin/end batch
 ├── offline_queue.rs   OfflineQueue trait + persistent/in-memory impls
 ├── origin.rs          Origin enum + skip helpers
 ├── persistence.rs     PersistenceLayer + recover()
+├── queue.rs           MutationSender trait
 ├── remote_sync.rs     RemoteSyncLayer + LocalAccessor trait
+├── rt.rs              task-spawn shim, Shared<T>, new_id()
 ├── store.rs           Store facade + StoreInner + background tasks
-├── sync_engine.rs     SyncEngine over mqtt5::MqttClient
+├── sync_engine.rs     SyncEngine over the mqtt_client seam
 └── types.rs           MutationEvent, StoreEvent, Operation, etc.
 
 tests/
 ├── common/mod.rs      BrokerFixture for wire tests
-├── memory_store.rs    9 tests
-├── offline_queue.rs   13 tests
-├── persistence.rs     9 tests
+├── memory_store.rs    10 tests
+├── offline_queue.rs   16 tests
+├── persistence.rs     11 tests
 ├── remote_sync.rs     8 tests
-├── store.rs           15 tests
-└── wire.rs            2 broker-backed tests
+├── store.rs           38 tests
+└── wire.rs            9 broker-backed tests
 ```

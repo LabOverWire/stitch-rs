@@ -1,7 +1,7 @@
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use stitch::config::{EntityDefinition, FieldType, SchemaField, ScopeConfig};
+use stitch::config::{EntityDefinition, FieldType, SchemaField, ScopeConfig, TopLevelEntity};
 use stitch::memory_store::MemoryStore;
 use stitch::types::{Operation, StoreEvent};
 use stitch::{Origin, ScopeBundle, StoreConfig};
@@ -354,5 +354,70 @@ async fn concurrent_updates_to_same_record_converge_without_conflict() {
         final_task.get("projectId").and_then(Value::as_str),
         Some("p1"),
         "field-level merge dropped the untouched projectId field"
+    );
+}
+
+fn config_with_top_level() -> Arc<StoreConfig> {
+    let mut config = StoreConfig::new(
+        {
+            let mut entities = HashMap::new();
+            entities.insert(
+                "project".to_string(),
+                EntityDefinition {
+                    fields: vec![SchemaField {
+                        name: "id".to_string(),
+                        r#type: FieldType::String,
+                        required: true,
+                        default: None,
+                    }],
+                    ..EntityDefinition::default()
+                },
+            );
+            entities.insert(
+                "settings".to_string(),
+                EntityDefinition {
+                    fields: vec![SchemaField {
+                        name: "id".to_string(),
+                        r#type: FieldType::String,
+                        required: true,
+                        default: None,
+                    }],
+                    ..EntityDefinition::default()
+                },
+            );
+            entities
+        },
+        ScopeConfig {
+            root_entity: "project".to_string(),
+            child_entities: Vec::new(),
+            scope_field: "projectId".to_string(),
+        },
+    );
+    config.top_level_entities.push(TopLevelEntity {
+        entity: "settings".to_string(),
+        subscription_pattern: "$DB/settings/#".to_string(),
+    });
+    Arc::new(config)
+}
+
+#[tokio::test]
+async fn get_version_normalizes_top_level_scope() {
+    let store = MemoryStore::new(config_with_top_level()).await.unwrap();
+    store
+        .create(
+            "settings",
+            "p1",
+            make_record(&[("id", json!("s1"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let empty = store.get_version("", "settings");
+    assert!(empty > 0, "top-level mutation must bump the version");
+    assert_eq!(
+        store.get_version("p1", "settings"),
+        empty,
+        "get_version must normalize a top-level entity's scope so a real scopeId sees the same counter as the empty scope",
     );
 }

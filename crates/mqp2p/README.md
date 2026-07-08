@@ -120,10 +120,10 @@ src/
 | [rustls](https://crates.io/crates/rustls) | TLS for QUIC |
 | [rcgen](https://crates.io/crates/rcgen) | Self-signed certificate generation |
 | [ring](https://crates.io/crates/ring) | SHA-256 hashing, STUN transaction IDs |
-| [mqtt5](https://github.com/LabOverWire/mqtt-lib) | MQTT 5 client (patched fork) |
+| [mqtt5](https://crates.io/crates/mqtt5) | MQTT 5 client |
 | [flume](https://crates.io/crates/flume) | Async channels for signaling subscriptions |
 | [tokio](https://crates.io/crates/tokio) | Async runtime |
 
 ## License
 
-MIT
+Apache-2.0 — see [LICENSE](./LICENSE).

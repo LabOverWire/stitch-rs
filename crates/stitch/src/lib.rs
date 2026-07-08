@@ -2,8 +2,8 @@
 //! an in-memory store, fjall-backed local persistence, and MQTT-based remote sync
 //! into a single [`Store`] interface.
 //!
-//! See [`README.md`](https://github.com/LabOverWire/stitch/blob/main/README.md) for
-//! a runnable example and [`ARCHITECTURE.md`](https://github.com/LabOverWire/stitch/blob/main/ARCHITECTURE.md)
+//! See [`README.md`](https://github.com/LabOverWire/stitch-rs/blob/main/crates/stitch/README.md) for
+//! a runnable example and [`ARCHITECTURE.md`](https://github.com/LabOverWire/stitch-rs/blob/main/crates/stitch/ARCHITECTURE.md)
 //! for the layer composition, data flow, and deliberate deviations from the TS
 //! library.
 //!

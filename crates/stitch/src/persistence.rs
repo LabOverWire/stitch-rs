@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Durable local store: fjall natively, IndexedDB on wasm. Routes all record
-/// access through the backend [`Db`] trait; owns the mutation bus and
+/// access through the backend `Db` trait; owns the mutation bus and
 /// scope-resolution logic shared by both platforms.
 pub struct PersistenceLayer {
     #[cfg(not(target_arch = "wasm32"))]

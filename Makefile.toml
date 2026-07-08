@@ -1,0 +1,18 @@
+[config]
+default_to_workspace = false
+
+[tasks.wasm-build]
+description = "Build the @laboverwire/stitch-wasm npm package into crates/stitch-wasm/pkg"
+command = "wasm-pack"
+args = ["build", "crates/stitch-wasm", "--release", "--target", "bundler", "--scope", "laboverwire"]
+
+[tasks.wasm-test]
+description = "Run the stitch-wasm headless browser smoke tests in Chrome"
+command = "wasm-pack"
+args = ["test", "--headless", "--chrome", "crates/stitch-wasm"]
+
+[tasks.wasm-publish]
+description = "Publish crates/stitch-wasm/pkg to npm (builds first; needs an npm login)"
+dependencies = ["wasm-build"]
+command = "wasm-pack"
+args = ["publish", "crates/stitch-wasm", "--target", "bundler", "--access", "public"]

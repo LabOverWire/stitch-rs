@@ -278,7 +278,7 @@ impl MemoryStore {
     pub fn get_version(&self, scope_id: &str, entity: &str) -> u64 {
         self.versions
             .lock_guard()
-            .get(&(scope_id.to_string(), entity.to_string()))
+            .get(&(self.version_scope(entity, scope_id), entity.to_string()))
             .copied()
             .unwrap_or(0)
     }

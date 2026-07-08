@@ -9,11 +9,13 @@
 //! the per-record GC floor that prevents stale writes from resurrecting a
 //! deleted record. See `spec/README.md`.
 //!
-//! # Milestone status
+//! # Features
 //!
-//! M1 (this code): the wire frame ([`wire`]), the clock ([`hlc`]), and the
-//! verified merge core ([`lww`]). Transport (mqp2p QUIC sessions), anti-entropy
-//! cursors, and membership are later milestones.
+//! The merge core ([`wire`], [`hlc`], [`lww`], [`replog`] anti-entropy cursors)
+//! is always available. Optional, default-on features add the rest: `discovery`
+//! (QUIC transport and peer discovery via mqp2p), `membership` (Ed25519-signed
+//! writes and owner-controlled membership), `persistence` (a fjall-backed
+//! replication log), and `store` (a JSON document facade).
 
 pub mod hlc;
 pub mod lww;

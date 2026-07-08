@@ -20,17 +20,12 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    env:
-      DEP_GIT_TOKEN: ${{ secrets.DEP_GIT_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
           targets: wasm32-unknown-unknown
-      - name: Authenticate git for private dependencies
-        if: env.DEP_GIT_TOKEN != ''
-        run: git config --global url."https://x-access-token:${DEP_GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test -p stitch-sync --lib --test memory_store --test offline_queue --test persistence
@@ -39,16 +34,11 @@ jobs:
 
   wasm-test:
     runs-on: ubuntu-latest
-    env:
-      DEP_GIT_TOKEN: ${{ secrets.DEP_GIT_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Authenticate git for private dependencies
-        if: env.DEP_GIT_TOKEN != ''
-        run: git config --global url."https://x-access-token:${DEP_GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
       - uses: Swatinem/rust-cache@v2
       - uses: jetli/wasm-pack-action@v0.4.0
         with:

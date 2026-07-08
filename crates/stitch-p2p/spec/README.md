@@ -19,15 +19,14 @@ particularly the tombstone GC design.
 
 | Run | Config | States | Outcome |
 |---|---|---|---|
-| Base LWW | `StitchP2P.cfg` (2 peers) | 1,121 | converges |
-| LWW + tombstones | 2 peers | 5,026 | converges |
-| LWW + tombstones | 3 peers, MaxLogLen=1 | 10,405 | converges |
+| Core LWW (writes + deletes) | `StitchP2P.cfg` (3 peers, MaxLogLen=1) | 10,405 | converges |
+| Core LWW, wider log | 2 peers, MaxLogLen=2 (constant override) | 5,026 | converges |
 | Unsafe GC | `StitchP2PGc_unsafe_small.cfg` | 281 | **convergence violated (resurrection) at depth 6** |
 | Safe GC (per-record floor) | `StitchP2PGc_protected_small.cfg` | 533 | converges |
 | Adversarial clock skew | `StitchP2PSkew.cfg` | 14,641 | converges |
 | Transitive forwarding (line 1—2—3) | `StitchP2PTransitive.cfg` | 1,300 | converges |
 | Transitive, single writer × 2 ops | `StitchP2PTransitive_deep.cfg` | 64 | converges |
-| Transitive delivery reachable (probe) | `StitchP2PTransitive_probe.cfg` | — | refuted (proves non-vacuity) |
+| Transitive delivery reachable (probe) | `StitchP2PTransitive_probe.cfg` | — | refuted at depth 4 (proves non-vacuity) |
 | Membership auth — reject-at-receipt | `StitchP2PAuth_naive.cfg` | 23 | **convergence violated (receive-order dependent)** |
 | Membership auth — read-time filter | `StitchP2PAuth_causal.cfg` | 64 | converges |
 | Reclaim — naive (on tombstone) | `StitchP2PReclaim_naive.cfg` | 41 | **convergence violated (late write resurrects)** |
@@ -61,14 +60,6 @@ particularly the tombstone GC design.
    unconstructible. The probe config refutes "peer 3 never gets peer 1's write,"
    confirming the convergence check is not vacuous.
 
-7. **Tombstone reclamation needs a cursor low-water-mark.** Forgetting a
-   tombstone as soon as a peer holds it lets a still-in-flight older write
-   resurrect the record once the floor is gone (naive model, depth 6). Safe
-   reclamation requires every member to have delivered everything below the
-   tombstone's HLC — then no older write is in flight and the record can be
-   forgotten. The price: an offline or new member blocks reclamation (no
-   resurrection, but no GC) until it catches up or snapshots.
-
 6. **Membership authorization must be a read-time filter, not a reject.** If a
    peer permanently drops a write because the author isn't *yet* a known member,
    two peers diverge based on whether they received the write or the
@@ -78,6 +69,14 @@ particularly the tombstone GC design.
    of (converged data, converged membership) and all peers agree. Signature
    validity *is* checked at receipt — it never changes, so rejecting forgeries
    can't diverge.
+
+7. **Tombstone reclamation needs a cursor low-water-mark.** Forgetting a
+   tombstone as soon as a peer holds it lets a still-in-flight older write
+   resurrect the record once the floor is gone (naive model, depth 6). Safe
+   reclamation requires every member to have delivered everything below the
+   tombstone's HLC — then no older write is in flight and the record can be
+   forgotten. The price: an offline or new member blocks reclamation (no
+   resurrection, but no GC) until it catches up or snapshots.
 
 ## Reproducing
 
