@@ -5,7 +5,9 @@ use super::{
 use crate::error::{Error, Result};
 use crate::types::ConnectionStatus;
 use mqtt5::client::{ConnectionEvent, DisconnectReason, JwtAuthHandler};
-use mqtt5::types::{ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions};
+use mqtt5::types::{
+    ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions, WillMessage,
+};
 use mqtt5::{MqttClient, QoS};
 use std::time::Duration;
 
@@ -30,6 +32,23 @@ impl MqttClientApi for NativeMqttClient {
             .with_clean_start(args.clean_start)
             .with_keep_alive(Duration::from_secs(args.keep_alive_secs))
             .with_session_expiry_interval(args.session_expiry_secs);
+
+        if let Some(will) = &args.will {
+            let qos = match will.qos {
+                1 => QoS::AtLeastOnce,
+                2 => QoS::ExactlyOnce,
+                _ => QoS::AtMostOnce,
+            };
+            let mut message = WillMessage::new(will.topic.clone(), will.payload.clone())
+                .with_qos(qos)
+                .with_retain(will.retain);
+            message.properties.will_delay_interval = will.will_delay_interval_secs;
+            message
+                .properties
+                .content_type
+                .clone_from(&will.content_type);
+            options = options.with_will(message);
+        }
 
         if let Some(ticket) = &args.jwt_ticket {
             options = options.with_authentication_method("JWT");

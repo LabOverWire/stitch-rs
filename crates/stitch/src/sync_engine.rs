@@ -141,11 +141,12 @@ impl SyncEngine {
 
         let args = ConnectArgs {
             clean_start: self.config.clean_start,
-            keep_alive_secs: 60,
+            keep_alive_secs: self.config.keep_alive_secs,
             session_expiry_secs: self.config.session_expiry_secs,
             jwt_ticket: ticket,
             username,
             password,
+            will: self.config.will.clone(),
         };
 
         let result = self.client.connect(server_url, args).await?;

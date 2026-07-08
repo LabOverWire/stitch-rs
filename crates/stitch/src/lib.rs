@@ -75,7 +75,7 @@ pub mod store;
 
 pub use config::{
     EntityDefinition, ForeignKeyDefinition, OnDeleteAction, PersistenceConfig, RemoteConfig,
-    SchemaField, ScopeConfig, StoreConfig, StoreOptions, TopLevelEntity,
+    SchemaField, ScopeConfig, StoreConfig, StoreOptions, TopLevelEntity, WillConfig,
 };
 pub use error::{Error, Result};
 pub use origin::Origin;

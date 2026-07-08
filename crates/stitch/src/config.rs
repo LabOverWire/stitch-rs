@@ -72,6 +72,35 @@ pub struct TopLevelEntity {
     pub subscription_pattern: String,
 }
 
+/// MQTT 5 last-will (testament) registered on the remote connection. The broker
+/// publishes `payload` to `topic` if the client disconnects ungracefully (crash,
+/// tab close, network loss); a normal `disconnect` clears it so it never fires on
+/// intentional logout. Useful for presence and ephemeral state that must release
+/// the instant a session dies.
+#[derive(Debug, Clone)]
+pub struct WillConfig {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: u8,
+    pub retain: bool,
+    pub will_delay_interval_secs: Option<u32>,
+    pub content_type: Option<String>,
+}
+
+impl WillConfig {
+    #[must_use]
+    pub fn new(topic: impl Into<String>, payload: impl Into<Vec<u8>>) -> Self {
+        Self {
+            topic: topic.into(),
+            payload: payload.into(),
+            qos: 0,
+            retain: false,
+            will_delay_interval_secs: None,
+            content_type: None,
+        }
+    }
+}
+
 /// Top-level configuration passed to [`Store::new`](crate::Store::new).
 ///
 /// Most fields have sensible defaults; only `entities` and `scope` must be
@@ -89,7 +118,9 @@ pub struct StoreConfig {
     pub user_scope_field: Option<String>,
     pub event_channel_capacity: usize,
     pub session_expiry_secs: u32,
+    pub keep_alive_secs: u64,
     pub clean_start: bool,
+    pub will: Option<WillConfig>,
 }
 
 impl StoreConfig {
@@ -107,7 +138,9 @@ impl StoreConfig {
             user_scope_field: None,
             event_channel_capacity: 4096,
             session_expiry_secs: 3600,
+            keep_alive_secs: 60,
             clean_start: false,
+            will: None,
         }
     }
 

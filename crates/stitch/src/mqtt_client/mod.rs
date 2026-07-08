@@ -18,6 +18,7 @@ pub(crate) struct ConnectArgs {
     pub jwt_ticket: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub will: Option<crate::config::WillConfig>,
 }
 
 pub(crate) struct ConnectOutcome {

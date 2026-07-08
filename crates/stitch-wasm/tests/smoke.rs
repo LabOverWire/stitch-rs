@@ -148,6 +148,13 @@ fn persist_remote_options(db_name: &str, url: &str) -> JsValue {
     .unwrap()
 }
 
+fn will_options(url: &str) -> JsValue {
+    js_sys::JSON::parse(&format!(
+        r#"{{"remote":{{"url":"{url}","clientId":"tab-1","keepAliveSecs":15,"will":{{"topic":"$DB/presence/tab-1","payload":"{{\"clientId\":\"tab-1\"}}","qos":1,"retain":false,"willDelayIntervalSecs":0,"contentType":"application/json"}}}}}}"#
+    ))
+    .unwrap()
+}
+
 #[wasm_bindgen_test]
 async fn offline_write_queues_and_survives_reopen_in_browser() {
     let opts = || persist_remote_options("stitch-m31-queue", "ws://127.0.0.1:1");
@@ -212,6 +219,32 @@ async fn remote_connect_failure_is_graceful_in_browser() {
     assert!(
         !got.is_null(),
         "local create/read works with a configured-but-unreachable remote"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn will_and_keep_alive_options_are_accepted_in_browser() {
+    let store = stitch_wasm::create_store(config(), will_options("ws://127.0.0.1:1"))
+        .expect("create_store accepts a remote.will and keepAliveSecs config");
+    store
+        .initialize()
+        .await
+        .expect("initialize succeeds with a will configured against an unreachable broker");
+
+    assert!(
+        store.has_remote().expect("has_remote"),
+        "remote is configured"
+    );
+
+    let row = js_sys::JSON::parse(r#"{"title":"with-will"}"#).unwrap();
+    let id = store
+        .create("task".into(), "p1".into(), row, None)
+        .await
+        .expect("local create works with a will configured");
+    let got = store.read("task".into(), id).expect("read");
+    assert!(
+        !got.is_null(),
+        "a will config must not disturb local reads/writes"
     );
 }
 
