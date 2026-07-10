@@ -169,6 +169,11 @@ impl SyncEngine {
         Ok(())
     }
 
+    #[doc(hidden)]
+    pub async fn disconnect_abnormally(&self) -> Result<()> {
+        self.client.disconnect_abnormally().await
+    }
+
     pub async fn open_scope(&self, scope_id: &str) -> Result<ScopeState> {
         {
             let mut awaiting = self.state.awaiting_state.lock_guard();

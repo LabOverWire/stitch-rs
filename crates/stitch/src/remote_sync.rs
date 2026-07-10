@@ -79,6 +79,11 @@ impl RemoteSyncLayer {
         self.sync.disconnect().await
     }
 
+    #[doc(hidden)]
+    pub async fn disconnect_abnormally(&self) -> Result<()> {
+        self.sync.disconnect_abnormally().await
+    }
+
     pub async fn reconnect(
         &self,
         server_url: &str,

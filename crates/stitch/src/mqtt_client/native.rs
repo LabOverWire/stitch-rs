@@ -76,6 +76,13 @@ impl MqttClientApi for NativeMqttClient {
             .map_err(|e| Error::Mqtt(format!("disconnect: {e}")))
     }
 
+    async fn disconnect_abnormally(&self) -> Result<()> {
+        self.client
+            .disconnect_abnormally()
+            .await
+            .map_err(|e| Error::Mqtt(format!("disconnect_abnormally: {e}")))
+    }
+
     async fn is_connected(&self) -> bool {
         self.client.is_connected().await
     }

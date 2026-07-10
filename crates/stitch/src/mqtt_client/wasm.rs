@@ -76,6 +76,12 @@ impl MqttClientApi for WasmMqttClientAdapter {
             .map_err(|e| js_err("disconnect", &e))
     }
 
+    async fn disconnect_abnormally(&self) -> Result<()> {
+        Err(Error::Mqtt(
+            "disconnect_abnormally is only supported on native targets".into(),
+        ))
+    }
+
     async fn is_connected(&self) -> bool {
         self.client.is_connected()
     }
