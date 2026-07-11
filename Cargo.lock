@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-sync"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "flume",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures",
  "js-sys",
