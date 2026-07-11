@@ -115,11 +115,14 @@ impl MemoryStore {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let resolved_scope = self
+            .resolve_scope(entity, &record)
+            .unwrap_or_else(|| scope_id.to_string());
         self.emit_mutation(MutationEvent {
             operation: Operation::Insert,
             entity: entity.to_string(),
             id,
-            scope_id: scope_id.to_string(),
+            scope_id: resolved_scope,
             data: Some(record.clone()),
             origin,
         });

@@ -1099,3 +1099,43 @@ async fn reset_for_logout_clears_auth_and_status() {
         stitch::ConnectionStatus::Offline
     );
 }
+
+#[tokio::test]
+async fn subscribe_fires_on_scope_load_and_clear() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut scope_rx = store.subscribe_scope_entity("p1", "project").unwrap();
+    let mut entity_rx = store.subscribe_entity("project").unwrap();
+
+    let mut project = Map::new();
+    project.insert("id".to_string(), json!("p1"));
+    project.insert("name".to_string(), json!("Alpha"));
+    let mut bundle = HashMap::new();
+    bundle.insert("project".to_string(), vec![project]);
+    store.load_scope("p1", bundle).await.unwrap();
+
+    let loaded = tokio::time::timeout(std::time::Duration::from_secs(1), scope_rx.recv())
+        .await
+        .expect("subscribe_scope_entity must fire on load_scope")
+        .expect("channel open");
+    assert_eq!(loaded.scope_id, "p1");
+    assert!(
+        loaded.data.is_none(),
+        "a scope-load signal carries null data as a re-read cue"
+    );
+
+    let entity_loaded = tokio::time::timeout(std::time::Duration::from_secs(1), entity_rx.recv())
+        .await
+        .expect("subscribe_entity must fire on load_scope")
+        .expect("channel open");
+    assert_eq!(entity_loaded.entity, "project");
+
+    store.clear_scope("p1").await.unwrap();
+
+    let cleared = tokio::time::timeout(std::time::Duration::from_secs(1), scope_rx.recv())
+        .await
+        .expect("subscribe_scope_entity must fire on clear_scope")
+        .expect("channel open");
+    assert_eq!(cleared.scope_id, "p1");
+}

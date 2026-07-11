@@ -1699,7 +1699,7 @@ fn spawn_filtered_forwarder<F>(
 {
     let handle = rt::spawn(async move {
         loop {
-            match rx.recv().await {
+            let event = match rx.recv().await {
                 Ok(StoreEvent::Mutation(event)) => {
                     if event.entity != entity {
                         continue;
@@ -1709,22 +1709,67 @@ fn spawn_filtered_forwarder<F>(
                     {
                         continue;
                     }
-                    if !accept(&event) {
-                        continue;
-                    }
-                    if tx.send(event).is_err() {
-                        break;
+                    event
+                }
+                Ok(StoreEvent::ScopeLoaded {
+                    scope_id: sid,
+                    entities,
+                }) => {
+                    match scope_signal(&entity, scope_id.as_deref(), &sid, &entities, Origin::Load)
+                    {
+                        Some(event) => event,
+                        None => continue,
                     }
                 }
-                Ok(_) => {}
+                Ok(StoreEvent::ScopeCleared {
+                    scope_id: sid,
+                    entities,
+                }) => {
+                    match scope_signal(&entity, scope_id.as_deref(), &sid, &entities, Origin::Clear)
+                    {
+                        Some(event) => event,
+                        None => continue,
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if !accept(&event) {
+                continue;
+            }
+            if tx.send(event).is_err() {
+                break;
             }
         }
     });
     let mut guard = tasks.lock_guard();
     guard.retain(|h| !h.is_finished());
     guard.push(handle);
+}
+
+fn scope_signal(
+    entity: &str,
+    scope_filter: Option<&str>,
+    sid: &str,
+    entities: &[String],
+    origin: Origin,
+) -> Option<MutationEvent> {
+    if !entities.iter().any(|e| e == entity) {
+        return None;
+    }
+    if let Some(filter) = scope_filter
+        && filter != sid
+    {
+        return None;
+    }
+    Some(MutationEvent {
+        operation: Operation::Update,
+        entity: entity.to_string(),
+        id: String::new(),
+        scope_id: sid.to_string(),
+        data: None,
+        origin,
+    })
 }
 
 fn sort_fields_to_orders(sort: &[SortField]) -> Vec<MqdbSortOrder> {
