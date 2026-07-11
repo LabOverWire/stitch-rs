@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-11
+
+### Added
+
+- MQTT 5 last-will (testament) support. `StoreConfig` gains a `will:
+  Option<WillConfig>` (topic, payload, qos, retain, will-delay-interval,
+  content-type) and a configurable `keep_alive_secs` (default 60, previously
+  hard-coded). The will is registered on every `connect`/`reconnect`; the broker
+  publishes it only on an ungraceful disconnect and clears it on a normal
+  `disconnect`, so it never fires on intentional logout.
+
 ### Fixed
 
 - A `create` or `update` carrying an optional field set to `null` no longer
