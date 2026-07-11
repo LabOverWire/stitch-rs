@@ -1,0 +1,15 @@
+[package]
+name = "stitch-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Test harness that spawns a configured in-process mqdb agent (broker) with users and ACLs for exercising stitch against a real broker."
+publish = false
+
+[dependencies]
+mqdb-agent = { version = "0.8.10", default-features = false }
+mqdb-core = "0.7.3"
+mqtt5 = "0.32.2"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }

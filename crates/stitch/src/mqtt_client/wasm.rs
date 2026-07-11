@@ -7,7 +7,7 @@ use crate::types::ConnectionStatus;
 use mqtt5_protocol::types::QoS;
 use mqtt5_wasm::WasmMqttClient;
 use mqtt5_wasm::client::RustMessage;
-use mqtt5_wasm::config::{WasmConnectOptions, WasmPublishOptions};
+use mqtt5_wasm::config::{WasmConnectOptions, WasmPublishOptions, WasmWillMessage};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -37,6 +37,14 @@ impl MqttClientApi for WasmMqttClientAdapter {
         opts.set_cleanStart(args.clean_start);
         opts.set_keepAlive(u16::try_from(args.keep_alive_secs).unwrap_or(u16::MAX));
         opts.set_sessionExpiryInterval(Some(args.session_expiry_secs));
+        if let Some(will) = &args.will {
+            let mut message = WasmWillMessage::new(will.topic.clone(), will.payload.clone());
+            message.set_qos(will.qos);
+            message.set_retain(will.retain);
+            message.set_willDelayInterval(will.will_delay_interval_secs);
+            message.set_contentType(will.content_type.clone());
+            opts.set_will(message);
+        }
         if let Some(ticket) = &args.jwt_ticket {
             opts.set_authenticationMethod(Some("JWT".into()));
             opts.set_authenticationData(ticket.as_bytes());
@@ -66,6 +74,12 @@ impl MqttClientApi for WasmMqttClientAdapter {
             .disconnect()
             .await
             .map_err(|e| js_err("disconnect", &e))
+    }
+
+    async fn disconnect_abnormally(&self) -> Result<()> {
+        Err(Error::Mqtt(
+            "disconnect_abnormally is only supported on native targets".into(),
+        ))
     }
 
     async fn is_connected(&self) -> bool {

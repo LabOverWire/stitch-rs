@@ -2239,6 +2239,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stitch-harness"
+version = "0.1.0"
+dependencies = [
+ "mqdb-agent",
+ "mqdb-core",
+ "mqtt5 0.32.2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "stitch-p2p"
 version = "0.1.0"
 dependencies = [
@@ -2268,6 +2279,7 @@ dependencies = [
  "mqtt5-wasm",
  "serde",
  "serde_json",
+ "stitch-harness",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

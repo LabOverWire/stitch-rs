@@ -24,6 +24,7 @@ tracing = "0.1.44"
 uuid = { version = "1.23.1", features = ["v4", "v7"] }
 
 [dev-dependencies]
+stitch-harness = { path = "../stitch-harness" }
 tempfile = "3.27.0"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 

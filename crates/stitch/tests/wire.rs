@@ -1,6 +1,6 @@
 mod common;
 
-use common::{BrokerFixture, fixture_config, init_tracing, make_record};
+use common::{fixture_config, init_tracing, make_record};
 use serde_json::{Value, json};
 use std::time::Duration;
 use stitch::config::{
@@ -9,6 +9,7 @@ use stitch::config::{
 };
 use stitch::types::StoreEvent;
 use stitch::{Origin, Store, StoreOptions};
+use stitch_harness::BrokerHarness;
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -41,18 +42,18 @@ async fn wait_for_connected(store: &Store) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_stores_sync_creates_via_broker() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a".into(),
     );
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b".into(),
     );
 
@@ -112,12 +113,12 @@ async fn two_stores_sync_creates_via_broker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offline_create_flushes_after_connect() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir),
+        options_with_remote(broker.tcp_url(), &dir),
         "client-a-offline".into(),
     );
     store_a.initialize().await.unwrap();
@@ -129,7 +130,7 @@ async fn offline_create_flushes_after_connect() {
     let dir_b = TempDir::new().unwrap();
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-observer".into(),
     );
     store_b.initialize().await.unwrap();
@@ -163,7 +164,7 @@ async fn offline_create_flushes_after_connect() {
         .unwrap();
 
     store_a
-        .reconnect(&broker.url(), None, None, None)
+        .reconnect(&broker.tcp_url(), None, None, None)
         .await
         .unwrap();
     wait_for_connected(&store_a).await;
@@ -195,12 +196,12 @@ async fn offline_create_flushes_after_connect() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_sync_populates_local_state_from_server() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a-seed".into(),
     );
     store_a.initialize().await.unwrap();
@@ -236,7 +237,7 @@ async fn initial_sync_populates_local_state_from_server() {
     let dir_b = TempDir::new().unwrap();
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-fresh".into(),
     );
     store_b.initialize().await.unwrap();
@@ -282,18 +283,18 @@ async fn initial_sync_populates_local_state_from_server() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn higher_version_remote_update_wins() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a-conflict".into(),
     );
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-conflict".into(),
     );
     store_a.initialize().await.unwrap();
@@ -373,18 +374,18 @@ async fn higher_version_remote_update_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn child_mutation_bumps_root_scope_version() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a-bump".into(),
     );
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-bump".into(),
     );
     store_a.initialize().await.unwrap();
@@ -525,18 +526,18 @@ fn config_with_top_level_notification() -> StoreConfig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn top_level_entity_propagates_via_wildcard() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         config_with_top_level_notification(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a-tl".into(),
     );
     let store_b = Store::with_client_id(
         config_with_top_level_notification(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-tl".into(),
     );
     store_a.initialize().await.unwrap();
@@ -597,18 +598,18 @@ async fn top_level_entity_propagates_via_wildcard() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn applied_version_seeded_from_open_scope_and_cleared_on_close() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir_a = TempDir::new().unwrap();
     let dir_b = TempDir::new().unwrap();
 
     let store_a = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_a),
+        options_with_remote(broker.tcp_url(), &dir_a),
         "client-a-applied".into(),
     );
     let store_b = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir_b),
+        options_with_remote(broker.tcp_url(), &dir_b),
         "client-b-applied".into(),
     );
     store_a.initialize().await.unwrap();
@@ -663,11 +664,11 @@ async fn applied_version_seeded_from_open_scope_and_cleared_on_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reset_for_logout_disconnects_and_clears_handlers() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir = TempDir::new().unwrap();
     let store = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir),
+        options_with_remote(broker.tcp_url(), &dir),
         "client-logout".into(),
     );
     store.initialize().await.unwrap();
@@ -703,11 +704,11 @@ async fn reset_for_logout_disconnects_and_clears_handlers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_validator_fires_on_connected() {
     init_tracing();
-    let broker = BrokerFixture::start().await;
+    let broker = BrokerHarness::new().start().await.expect("start broker");
     let dir = TempDir::new().unwrap();
     let store = Store::with_client_id(
         fixture_config(),
-        options_with_remote(broker.url(), &dir),
+        options_with_remote(broker.tcp_url(), &dir),
         "client-validator".into(),
     );
     store.initialize().await.unwrap();
@@ -727,7 +728,7 @@ async fn reconnect_validator_fires_on_connected() {
     store.disconnect().await.unwrap();
     sleep(Duration::from_millis(100)).await;
     store
-        .reconnect(&broker.url(), None, None, None)
+        .reconnect(&broker.tcp_url(), None, None, None)
         .await
         .unwrap();
     wait_for_connected(&store).await;

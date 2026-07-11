@@ -10,7 +10,7 @@ use futures::channel::oneshot;
 use futures::future::{Either, select};
 use serde::Deserialize;
 use std::collections::HashMap;
-use stitch::config::{EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig};
+use stitch::config::{EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig, WillConfig};
 use stitch::types::{ListFilter, MutationEvent, Operation, Record, SortDirection, SortField};
 use stitch::{Origin, Store as CoreStore, StoreConfig, StoreOptions};
 use tokio::sync::broadcast::error::RecvError;
@@ -41,6 +41,20 @@ struct PersistenceDto {
 }
 
 #[derive(Deserialize)]
+struct WillDto {
+    topic: String,
+    payload: String,
+    #[serde(default)]
+    qos: Option<u8>,
+    #[serde(default)]
+    retain: Option<bool>,
+    #[serde(default, rename = "willDelayIntervalSecs")]
+    will_delay_interval_secs: Option<u32>,
+    #[serde(default, rename = "contentType")]
+    content_type: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct RemoteDto {
     url: String,
     #[serde(default, rename = "clientId")]
@@ -51,6 +65,10 @@ struct RemoteDto {
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    will: Option<WillDto>,
+    #[serde(default, rename = "keepAliveSecs")]
+    keep_alive_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -184,7 +202,7 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
     } else {
         serde_json::from_value(json_from_js(&options)?).map_err(err)?
     };
-    let cfg = StoreConfig::new(
+    let mut cfg = StoreConfig::new(
         dto.entities,
         ScopeConfig {
             root_entity: dto.scope.root_entity,
@@ -192,6 +210,19 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
             scope_field: dto.scope.scope_field,
         },
     );
+    if let Some(remote) = opts.remote.as_ref() {
+        if let Some(secs) = remote.keep_alive_secs {
+            cfg.keep_alive_secs = secs;
+        }
+        cfg.will = remote.will.as_ref().map(|w| WillConfig {
+            topic: w.topic.clone(),
+            payload: w.payload.clone().into_bytes(),
+            qos: w.qos.unwrap_or(0),
+            retain: w.retain.unwrap_or(false),
+            will_delay_interval_secs: w.will_delay_interval_secs,
+            content_type: w.content_type.clone(),
+        });
+    }
     let client_id = opts.remote.as_ref().and_then(|r| r.client_id.clone());
     let store_options = StoreOptions {
         persistence: opts.persistence.map(|p| PersistenceConfig {

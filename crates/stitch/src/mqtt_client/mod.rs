@@ -18,6 +18,7 @@ pub(crate) struct ConnectArgs {
     pub jwt_ticket: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub will: Option<crate::config::WillConfig>,
 }
 
 pub(crate) struct ConnectOutcome {
@@ -59,6 +60,7 @@ pub(crate) type ConnectionHandler = Box<dyn Fn(ConnectionStatus, bool) + 'static
 pub(crate) trait MqttClientApi: MaybeSendSync {
     async fn connect(&self, url: &str, args: ConnectArgs) -> Result<ConnectOutcome>;
     async fn disconnect(&self) -> Result<()>;
+    async fn disconnect_abnormally(&self) -> Result<()>;
     async fn is_connected(&self) -> bool;
     async fn publish(&self, topic: String, payload: Vec<u8>, args: PublishArgs) -> Result<()>;
     async fn subscribe(&self, topic: String, on_message: MessageHandler) -> Result<()>;

@@ -890,6 +890,14 @@ impl Store {
         Ok(())
     }
 
+    #[doc(hidden)]
+    pub async fn disconnect_abnormally(&self) -> Result<()> {
+        if let Some(remote) = &self.inner()?.remote {
+            remote.disconnect_abnormally().await?;
+        }
+        Ok(())
+    }
+
     /// Hot-swap the underlying fjall database after corruption. Returns
     /// `Error::Config` if persistence isn't configured. Callers must drop any
     /// outstanding `Arc<Database>` clones reached through the internal layer
