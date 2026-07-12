@@ -863,6 +863,36 @@ async fn memory_create_strips_null_scope_field_then_injects_argument() {
 }
 
 #[tokio::test]
+async fn create_emits_record_scope_not_arg_when_scope_field_diverges() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut entity_rx = store.subscribe_entity("task").unwrap();
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("body")),
+                ("projectId", json!("p2")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(1), entity_rx.recv())
+        .await
+        .expect("subscribe_entity must fire on create")
+        .expect("channel open");
+    assert_eq!(
+        event.scope_id, "p2",
+        "create emits the record's own scope field, not the scope_id argument"
+    );
+}
+
+#[tokio::test]
 async fn memory_create_strips_null_fields() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();
