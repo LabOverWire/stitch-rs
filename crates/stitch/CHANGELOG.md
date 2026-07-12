@@ -18,10 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bindings never received a re-read signal after a scope opened. Scope signals
   are delivered as a `MutationEvent` with `data: None` (a "re-read everything"
   cue).
-- Root-entity `create` now resolves its mutation `scope_id` to the root's own
-  id (matching `update` / `delete`) instead of the raw scope argument, so all
-  three operations land under the same `(scope_id, entity)` key and a
-  scope-filtered subscriber observes the create.
+- `create` now derives its mutation `scope_id` from the resolved record
+  (matching `update` / `delete`) instead of the raw scope argument, so all three
+  operations land under the same `(scope_id, entity)` key. A child row whose
+  scope field diverges from the `scope_id` argument is now announced under the
+  record's own scope, so a scope-filtered subscriber observes the create.
+  Top-level entities are announced under an empty scope, consistent with their
+  `update` / `delete` events.
 
 ## [0.3.0] - 2026-07-11
 
