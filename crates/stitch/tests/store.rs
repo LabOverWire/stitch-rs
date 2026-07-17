@@ -1169,3 +1169,24 @@ async fn subscribe_fires_on_scope_load_and_clear() {
         .expect("channel open");
     assert_eq!(cleared.scope_id, "p1");
 }
+
+#[tokio::test]
+async fn subscribe_scope_entity_ignores_load_of_other_scope() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    let mut scope_rx = store.subscribe_scope_entity("p2", "project").unwrap();
+
+    let mut project = Map::new();
+    project.insert("id".to_string(), json!("p1"));
+    project.insert("name".to_string(), json!("Alpha"));
+    let mut bundle = HashMap::new();
+    bundle.insert("project".to_string(), vec![project]);
+    store.load_scope("p1", bundle).await.unwrap();
+
+    let got = tokio::time::timeout(std::time::Duration::from_millis(200), scope_rx.recv()).await;
+    assert!(
+        got.is_err(),
+        "a subscriber filtered to p2 must not receive a scope-load signal for p1"
+    );
+}
