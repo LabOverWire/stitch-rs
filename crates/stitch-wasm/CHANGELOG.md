@@ -5,6 +5,14 @@ All notable changes to the `stitch-wasm` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-17
+
+### Fixed
+
+- `subscribeToScope` and `subscribeToEntity` now fire when a scope is loaded or
+  cleared via `replaceScope` / `loadScope` / `clearScope`, not only on remote
+  mutations — so reactive bindings re-read the snapshot after a scope opens.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

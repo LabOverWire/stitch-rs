@@ -632,3 +632,51 @@ async fn update_local_state_round_trip_in_browser() {
         .expect("read_local_state");
     assert!(!got.is_null(), "updateLocalState upserts and reads back");
 }
+
+#[wasm_bindgen_test]
+async fn subscribe_to_scope_fires_on_replace_scope_in_browser() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let store = stitch_wasm::create_store(config(), persist_options("stitch-scope-load"))
+        .expect("create_store");
+    store.initialize().await.expect("initialize");
+
+    let root = js_sys::JSON::parse(r#"{"id":"p1","name":"Alpha"}"#).unwrap();
+    store
+        .create("project".into(), "p1".into(), root, None)
+        .await
+        .expect("create root");
+
+    let hits = Rc::new(Cell::new(0u32));
+    let hits_cb = Rc::clone(&hits);
+    let closure = Closure::<dyn FnMut()>::new(move || hits_cb.set(hits_cb.get() + 1));
+    store
+        .subscribe_to_scope(
+            "p1".into(),
+            "project".into(),
+            closure.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+        )
+        .expect("subscribe_to_scope");
+
+    store
+        .replace_scope("p1".into())
+        .await
+        .expect("replace_scope");
+
+    for _ in 0..50 {
+        if hits.get() > 0 {
+            break;
+        }
+        wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL))
+            .await
+            .unwrap();
+    }
+    assert!(
+        hits.get() >= 1,
+        "subscribeToScope must fire when replaceScope loads a scope"
+    );
+    closure.forget();
+}
