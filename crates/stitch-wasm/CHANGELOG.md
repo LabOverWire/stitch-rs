@@ -5,6 +5,18 @@ All notable changes to the `stitch-wasm` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-08-06
+
+### Fixed
+
+- `createStore`'s config now honors `responseTopicPrefix`, `syncTopicPrefix`,
+  `versionField`, `updatedAtField`, and `userScopeField`, plus `topLevelEntities`
+  and `localOnlyEntities`. These fields were absent from the config deserializer,
+  so serde silently dropped them and the baked-in defaults (`$DB` sync prefix,
+  `$DB/clients` response prefix, `version`, `updatedAt`) always won regardless of
+  the override. Deployments overriding `responseTopicPrefix` — e.g. to keep RPC
+  responses out of a broker's reserved `$DB` namespace — now take effect.
+
 ## [0.2.1] - 2026-07-17
 
 ### Fixed

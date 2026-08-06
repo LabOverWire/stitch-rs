@@ -10,7 +10,9 @@ use futures::channel::oneshot;
 use futures::future::{Either, select};
 use serde::Deserialize;
 use std::collections::HashMap;
-use stitch::config::{EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig, WillConfig};
+use stitch::config::{
+    EntityDefinition, PersistenceConfig, RemoteConfig, ScopeConfig, TopLevelEntity, WillConfig,
+};
 use stitch::types::{ListFilter, MutationEvent, Operation, Record, SortDirection, SortField};
 use stitch::{Origin, Store as CoreStore, StoreConfig, StoreOptions};
 use tokio::sync::broadcast::error::RecvError;
@@ -27,9 +29,30 @@ struct ScopeDto {
 }
 
 #[derive(Deserialize)]
+struct TopLevelEntityDto {
+    entity: String,
+    #[serde(rename = "subscriptionPattern")]
+    subscription_pattern: String,
+}
+
+#[derive(Deserialize)]
 struct ConfigDto {
     entities: HashMap<String, EntityDefinition>,
     scope: ScopeDto,
+    #[serde(default, rename = "topLevelEntities")]
+    top_level_entities: Vec<TopLevelEntityDto>,
+    #[serde(default, rename = "localOnlyEntities")]
+    local_only_entities: HashMap<String, EntityDefinition>,
+    #[serde(default, rename = "syncTopicPrefix")]
+    sync_topic_prefix: Option<String>,
+    #[serde(default, rename = "responseTopicPrefix")]
+    response_topic_prefix: Option<String>,
+    #[serde(default, rename = "versionField")]
+    version_field: Option<String>,
+    #[serde(default, rename = "updatedAtField")]
+    updated_at_field: Option<String>,
+    #[serde(default, rename = "userScopeField")]
+    user_scope_field: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -181,6 +204,13 @@ pub struct Store {
 /// Build an unopened [`Store`] from a config object
 /// (`{ entities, scope: { rootEntity, childEntities, scopeField } }`).
 ///
+/// The config also accepts optional overrides that otherwise fall back to their
+/// defaults: `syncTopicPrefix` (`"$DB"`), `responseTopicPrefix` (`"$DB/clients"`),
+/// `versionField` (`"version"`), `updatedAtField` (`"updatedAt"`),
+/// `userScopeField` (unset), `topLevelEntities`
+/// (`[{ entity, subscriptionPattern }]`), and `localOnlyEntities` (same shape as
+/// `entities`).
+///
 /// Pass an optional second argument to enable durable IndexedDB persistence
 /// and/or remote MQTT-over-WebSocket sync:
 /// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
@@ -210,6 +240,30 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
             scope_field: dto.scope.scope_field,
         },
     );
+    cfg.top_level_entities = dto
+        .top_level_entities
+        .into_iter()
+        .map(|t| TopLevelEntity {
+            entity: t.entity,
+            subscription_pattern: t.subscription_pattern,
+        })
+        .collect();
+    cfg.local_only_entities = dto.local_only_entities;
+    if let Some(prefix) = dto.sync_topic_prefix {
+        cfg.sync_topic_prefix = prefix;
+    }
+    if let Some(prefix) = dto.response_topic_prefix {
+        cfg.response_topic_prefix = prefix;
+    }
+    if let Some(field) = dto.version_field {
+        cfg.version_field = field;
+    }
+    if let Some(field) = dto.updated_at_field {
+        cfg.updated_at_field = field;
+    }
+    if dto.user_scope_field.is_some() {
+        cfg.user_scope_field = dto.user_scope_field;
+    }
     if let Some(remote) = opts.remote.as_ref() {
         if let Some(secs) = remote.keep_alive_secs {
             cfg.keep_alive_secs = secs;
@@ -731,5 +785,61 @@ impl Store {
         Ok(Closure::once_into_js(move || {
             let _ = cancel_tx.send(());
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn config_dto_reads_documented_topic_and_field_overrides() {
+        let json = serde_json::json!({
+            "entities": { "task": { "fields": [{ "name": "id", "type": "string" }] } },
+            "scope": { "rootEntity": "project", "childEntities": ["task"], "scopeField": "projectId" },
+            "syncTopicPrefix": "$DB",
+            "responseTopicPrefix": "_rpc/responses",
+            "versionField": "version",
+            "updatedAtField": "updatedAt",
+            "userScopeField": "userId",
+            "topLevelEntities": [{ "entity": "profile", "subscriptionPattern": "profiles/+" }],
+            "localOnlyEntities": { "draft": { "fields": [{ "name": "id", "type": "string" }] } }
+        });
+
+        let dto: ConfigDto = serde_json::from_value(json).expect("config dto parses");
+
+        assert_eq!(dto.response_topic_prefix.as_deref(), Some("_rpc/responses"));
+        assert_eq!(dto.sync_topic_prefix.as_deref(), Some("$DB"));
+        assert_eq!(dto.version_field.as_deref(), Some("version"));
+        assert_eq!(dto.updated_at_field.as_deref(), Some("updatedAt"));
+        assert_eq!(dto.user_scope_field.as_deref(), Some("userId"));
+        assert_eq!(dto.top_level_entities.len(), 1);
+        assert_eq!(dto.top_level_entities[0].entity, "profile");
+        assert_eq!(
+            dto.top_level_entities[0].subscription_pattern,
+            "profiles/+"
+        );
+        assert!(dto.local_only_entities.contains_key("draft"));
+    }
+
+    #[wasm_bindgen_test]
+    fn config_dto_defaults_leave_overrides_unset() {
+        let json = serde_json::json!({
+            "entities": { "task": { "fields": [{ "name": "id", "type": "string" }] } },
+            "scope": { "rootEntity": "project", "childEntities": ["task"], "scopeField": "projectId" }
+        });
+
+        let dto: ConfigDto = serde_json::from_value(json).expect("config dto parses");
+
+        assert!(dto.response_topic_prefix.is_none());
+        assert!(dto.sync_topic_prefix.is_none());
+        assert!(dto.version_field.is_none());
+        assert!(dto.updated_at_field.is_none());
+        assert!(dto.user_scope_field.is_none());
+        assert!(dto.top_level_entities.is_empty());
+        assert!(dto.local_only_entities.is_empty());
     }
 }
