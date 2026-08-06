@@ -201,37 +201,7 @@ pub struct Store {
     inner: CoreStore,
 }
 
-/// Build an unopened [`Store`] from a config object
-/// (`{ entities, scope: { rootEntity, childEntities, scopeField } }`).
-///
-/// The config also accepts optional overrides that otherwise fall back to their
-/// defaults: `syncTopicPrefix` (`"$DB"`), `responseTopicPrefix` (`"$DB/clients"`),
-/// `versionField` (`"version"`), `updatedAtField` (`"updatedAt"`),
-/// `userScopeField` (unset), `topLevelEntities`
-/// (`[{ entity, subscriptionPattern }]`), and `localOnlyEntities` (same shape as
-/// `entities`).
-///
-/// Pass an optional second argument to enable durable IndexedDB persistence
-/// and/or remote MQTT-over-WebSocket sync:
-/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
-/// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
-/// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
-/// enhanced auth, and `remote.username` + `remote.password` drive classic MQTT
-/// password auth when the broker isn't in JWT mode (ticket takes precedence).
-/// `initialize` then connects and live
-/// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
-/// for an in-memory store.
-///
-/// # Errors
-/// Returns an error if the config or options object is malformed.
-#[wasm_bindgen(js_name = "createStore")]
-pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue> {
-    let dto: ConfigDto = serde_json::from_value(json_from_js(&config)?).map_err(err)?;
-    let opts: OptionsDto = if options.is_undefined() || options.is_null() {
-        OptionsDto::default()
-    } else {
-        serde_json::from_value(json_from_js(&options)?).map_err(err)?
-    };
+fn build_store_config(dto: ConfigDto) -> StoreConfig {
     let mut cfg = StoreConfig::new(
         dto.entities,
         ScopeConfig {
@@ -264,6 +234,41 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
     if dto.user_scope_field.is_some() {
         cfg.user_scope_field = dto.user_scope_field;
     }
+    cfg
+}
+
+/// Build an unopened [`Store`] from a config object
+/// (`{ entities, scope: { rootEntity, childEntities, scopeField } }`).
+///
+/// The config also accepts optional overrides that otherwise fall back to their
+/// defaults: `syncTopicPrefix` (`"$DB"`), `responseTopicPrefix` (`"$DB/clients"`),
+/// `versionField` (`"version"`), `updatedAtField` (`"updatedAt"`),
+/// `userScopeField` (unset), `topLevelEntities`
+/// (`[{ entity, subscriptionPattern }]`), and `localOnlyEntities` (same shape as
+/// `entities`).
+///
+/// Pass an optional second argument to enable durable IndexedDB persistence
+/// and/or remote MQTT-over-WebSocket sync:
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
+/// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
+/// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
+/// enhanced auth, and `remote.username` + `remote.password` drive classic MQTT
+/// password auth when the broker isn't in JWT mode (ticket takes precedence).
+/// `initialize` then connects and live
+/// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
+/// for an in-memory store.
+///
+/// # Errors
+/// Returns an error if the config or options object is malformed.
+#[wasm_bindgen(js_name = "createStore")]
+pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue> {
+    let dto: ConfigDto = serde_json::from_value(json_from_js(&config)?).map_err(err)?;
+    let opts: OptionsDto = if options.is_undefined() || options.is_null() {
+        OptionsDto::default()
+    } else {
+        serde_json::from_value(json_from_js(&options)?).map_err(err)?
+    };
+    let mut cfg = build_store_config(dto);
     if let Some(remote) = opts.remote.as_ref() {
         if let Some(secs) = remote.keep_alive_secs {
             cfg.keep_alive_secs = secs;
@@ -795,51 +800,48 @@ mod tests {
 
     wasm_bindgen_test_configure!(run_in_browser);
 
-    #[wasm_bindgen_test]
-    fn config_dto_reads_documented_topic_and_field_overrides() {
-        let json = serde_json::json!({
-            "entities": { "task": { "fields": [{ "name": "id", "type": "string" }] } },
-            "scope": { "rootEntity": "project", "childEntities": ["task"], "scopeField": "projectId" },
-            "syncTopicPrefix": "$DB",
-            "responseTopicPrefix": "_rpc/responses",
-            "versionField": "version",
-            "updatedAtField": "updatedAt",
-            "userScopeField": "userId",
-            "topLevelEntities": [{ "entity": "profile", "subscriptionPattern": "profiles/+" }],
-            "localOnlyEntities": { "draft": { "fields": [{ "name": "id", "type": "string" }] } }
-        });
-
-        let dto: ConfigDto = serde_json::from_value(json).expect("config dto parses");
-
-        assert_eq!(dto.response_topic_prefix.as_deref(), Some("_rpc/responses"));
-        assert_eq!(dto.sync_topic_prefix.as_deref(), Some("$DB"));
-        assert_eq!(dto.version_field.as_deref(), Some("version"));
-        assert_eq!(dto.updated_at_field.as_deref(), Some("updatedAt"));
-        assert_eq!(dto.user_scope_field.as_deref(), Some("userId"));
-        assert_eq!(dto.top_level_entities.len(), 1);
-        assert_eq!(dto.top_level_entities[0].entity, "profile");
-        assert_eq!(
-            dto.top_level_entities[0].subscription_pattern,
-            "profiles/+"
-        );
-        assert!(dto.local_only_entities.contains_key("draft"));
+    fn parse_config(json: serde_json::Value) -> ConfigDto {
+        serde_json::from_value(json).expect("config dto parses")
     }
 
     #[wasm_bindgen_test]
-    fn config_dto_defaults_leave_overrides_unset() {
-        let json = serde_json::json!({
+    fn build_store_config_threads_documented_overrides_onto_store_config() {
+        let cfg = build_store_config(parse_config(serde_json::json!({
+            "entities": { "task": { "fields": [{ "name": "id", "type": "string" }] } },
+            "scope": { "rootEntity": "project", "childEntities": ["task"], "scopeField": "projectId" },
+            "syncTopicPrefix": "sync/root",
+            "responseTopicPrefix": "_rpc/responses",
+            "versionField": "_v",
+            "updatedAtField": "_ts",
+            "userScopeField": "userId",
+            "topLevelEntities": [{ "entity": "profile", "subscriptionPattern": "profiles/+" }],
+            "localOnlyEntities": { "draft": { "fields": [{ "name": "id", "type": "string" }] } }
+        })));
+
+        assert_eq!(cfg.sync_topic_prefix, "sync/root");
+        assert_eq!(cfg.response_topic_prefix, "_rpc/responses");
+        assert_eq!(cfg.version_field, "_v");
+        assert_eq!(cfg.updated_at_field, "_ts");
+        assert_eq!(cfg.user_scope_field.as_deref(), Some("userId"));
+        assert_eq!(cfg.top_level_entities.len(), 1);
+        assert_eq!(cfg.top_level_entities[0].entity, "profile");
+        assert_eq!(cfg.top_level_entities[0].subscription_pattern, "profiles/+");
+        assert!(cfg.local_only_entities.contains_key("draft"));
+    }
+
+    #[wasm_bindgen_test]
+    fn build_store_config_keeps_defaults_when_overrides_absent() {
+        let cfg = build_store_config(parse_config(serde_json::json!({
             "entities": { "task": { "fields": [{ "name": "id", "type": "string" }] } },
             "scope": { "rootEntity": "project", "childEntities": ["task"], "scopeField": "projectId" }
-        });
+        })));
 
-        let dto: ConfigDto = serde_json::from_value(json).expect("config dto parses");
-
-        assert!(dto.response_topic_prefix.is_none());
-        assert!(dto.sync_topic_prefix.is_none());
-        assert!(dto.version_field.is_none());
-        assert!(dto.updated_at_field.is_none());
-        assert!(dto.user_scope_field.is_none());
-        assert!(dto.top_level_entities.is_empty());
-        assert!(dto.local_only_entities.is_empty());
+        assert_eq!(cfg.sync_topic_prefix, "$DB");
+        assert_eq!(cfg.response_topic_prefix, "$DB/clients");
+        assert_eq!(cfg.version_field, "version");
+        assert_eq!(cfg.updated_at_field, "updatedAt");
+        assert!(cfg.user_scope_field.is_none());
+        assert!(cfg.top_level_entities.is_empty());
+        assert!(cfg.local_only_entities.is_empty());
     }
 }
