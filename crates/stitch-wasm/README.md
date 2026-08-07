@@ -38,6 +38,21 @@ await store.replaceScope("p1");
 `remote.url` is a `ws://`/`wss://` MQTT endpoint; `remote.ticket` is a JWT used
 for MQTT v5 enhanced-auth.
 
+### Config fields
+
+Only `entities` and `scope` are required. The rest are optional overrides; an
+omitted field keeps its default:
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `syncTopicPrefix` | `"$DB"` | Root of the sync topic namespace. |
+| `responseTopicPrefix` | `"$DB/clients"` | Root of the per-request RPC response inbox (`{prefix}/{clientId}/{requestId}`). Override it when the default would collide with a namespace the broker reserves — e.g. set `"_rpc/responses"` for an MQDB broker, which owns `$DB`. |
+| `versionField` | `"version"` | Record field holding the LWW version. |
+| `updatedAtField` | `"updatedAt"` | Record field holding the update timestamp. |
+| `userScopeField` | _unset_ | Record field that scopes offline writes to the authenticated user. |
+| `topLevelEntities` | `[]` | Entities synced outside any scope, each `{ entity, subscriptionPattern }`. |
+| `localOnlyEntities` | `{}` | Entities persisted locally but never synced, same shape as `entities`. |
+
 ## API surface
 
 The `Store` mirrors the TS core:

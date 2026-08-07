@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-06
+
+- Version-align release to co-publish the `stitch-wasm` 0.2.2 config fix; no `stitch-sync` code changes.
+
 ## [0.3.1] - 2026-07-17
 
 ### Fixed
