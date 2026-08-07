@@ -2,7 +2,7 @@
 name = "stitch-harness"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 license = "Apache-2.0"
 description = "Test harness that spawns a configured in-process mqdb agent (broker) with users and ACLs for exercising stitch against a real broker."
 publish = false

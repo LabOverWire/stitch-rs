@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed all semver-compatible dependencies, including `quinn-proto` to 0.11.16
+  (fixes GHSA-4w2j-m93h-cj5j, a high-severity remote memory-exhaustion advisory).
+- MSRV raised to Rust 1.90 (from 1.88); the `fjall` 3.1.8 persistence backend now
+  requires it. `mqtt5-wasm` is held at 1.3.2 because 1.4+ pulls `mqtt5-protocol`
+  0.14, a breaking bump of a crate `stitch-sync` depends on directly at 0.13.
+
 ## [0.3.2] - 2026-08-06
 
 - Version-align release to co-publish the `stitch-wasm` 0.2.2 config fix; no `stitch-sync` code changes.
