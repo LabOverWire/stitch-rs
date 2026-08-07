@@ -2,7 +2,7 @@
 name = "mqp2p"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Peer-to-peer transport (QUIC + NAT traversal) over an MQTT signaling channel."
 repository = "https://github.com/LabOverWire/stitch-rs"
