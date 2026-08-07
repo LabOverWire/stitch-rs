@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded the wasm MQTT stack to `mqtt5-wasm` 1.4.4 and `mqtt5-protocol` 0.14.3
   (from 1.3.2 / 0.13.0), keeping the browser client's `mqtt5-protocol` in lockstep
   with `mqtt5-wasm`. No behavioral change to the wasm sync path.
+- Upgraded the native MQTT client to `mqtt5` 0.38.2 (from 0.32.2). No source
+  changes; validated against a real broker via the harness-backed test suite.
 
 ## [0.3.2] - 2026-08-06
 

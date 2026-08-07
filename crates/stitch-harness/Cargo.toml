@@ -10,6 +10,6 @@ publish = false
 [dependencies]
 mqdb-agent = { version = "0.8.10", default-features = false }
 mqdb-core = "0.7.3"
-mqtt5 = "0.32.2"
+mqtt5 = "0.38"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }

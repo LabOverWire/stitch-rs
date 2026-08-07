@@ -9,7 +9,7 @@ repository = "https://github.com/LabOverWire/stitch-rs"
 publish = false
 
 [dependencies]
-mqtt5 = "0.31"
+mqtt5 = "0.38"
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = { version = "1.14", features = ["std"] }

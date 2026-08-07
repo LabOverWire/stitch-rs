@@ -1430,7 +1430,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flume",
- "mqtt5 0.31.4",
+ "mqtt5 0.38.2",
  "quinn",
  "rand 0.10.2",
  "rcgen",
@@ -1483,8 +1483,8 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
- "toml",
+ "tokio-tungstenite 0.28.0",
+ "toml 0.9.12+spec-1.1.0",
  "tracing",
  "url",
  "webpki-roots",
@@ -1493,9 +1493,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.32.2"
+version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6d3174a371e6acb71d1da83fcfa86e7e39088cfd13adee1cf18828bb8de56f3"
+checksum = "e969d1327b7ce3ce6a1f19fbcef90f0ddb1dad35c228381d9929c26c84b86aca"
 dependencies = [
  "argon2",
  "base64",
@@ -1504,7 +1504,7 @@ dependencies = [
  "flume",
  "futures",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "http",
  "http-body-util",
@@ -1512,22 +1512,22 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "mqtt5-protocol 0.13.0",
+ "mqtt5-protocol 0.14.3",
  "parking_lot",
  "quinn",
- "rand 0.9.5",
+ "rand 0.10.2",
  "regex",
  "ring",
  "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
- "toml",
+ "tokio-tungstenite 0.29.0",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
  "url",
  "webpki-roots",
@@ -1539,23 +1539,6 @@ name = "mqtt5-protocol"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab2673a581b938357355f8c7854ea056e6c0179ea943b75f8247971e8204091a"
-dependencies = [
- "bebytes",
- "bytes",
- "hashbrown 0.16.1",
- "portable-atomic",
- "portable-atomic-util",
- "serde",
- "thiserror",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "mqtt5-protocol"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c5a999feca0d9752859b6dc8179bc81d7d7e6fea51852628486e858de8a1db"
 dependencies = [
  "bebytes",
  "bytes",
@@ -2395,7 +2378,7 @@ version = "0.1.0"
 dependencies = [
  "mqdb-agent",
  "mqdb-core",
- "mqtt5 0.32.2",
+ "mqtt5 0.38.2",
  "tempfile",
  "tokio",
 ]
@@ -2425,7 +2408,7 @@ dependencies = [
  "mqdb-agent",
  "mqdb-core",
  "mqdb-wasm",
- "mqtt5 0.32.2",
+ "mqtt5 0.38.2",
  "mqtt5-protocol 0.14.3",
  "mqtt5-wasm",
  "serde",
@@ -2662,7 +2645,23 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.28.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -2674,10 +2673,25 @@ dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned",
- "toml_datetime",
+ "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml"
+version = "1.1.4+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+dependencies = [
+ "indexmap",
+ "serde_core",
+ "serde_spanned",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.4",
 ]
 
 [[package]]
@@ -2685,6 +2699,15 @@ name = "toml_datetime"
 version = "0.7.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "1.1.1+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
 ]
@@ -2794,6 +2817,24 @@ dependencies = [
  "sha1",
  "thiserror",
  "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror",
 ]
 
 [[package]]
