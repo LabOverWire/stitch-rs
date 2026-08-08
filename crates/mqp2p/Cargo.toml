@@ -2,18 +2,18 @@
 name = "mqp2p"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "Peer-to-peer transport (QUIC + NAT traversal) over an MQTT signaling channel."
 repository = "https://github.com/LabOverWire/stitch-rs"
 publish = false
 
 [dependencies]
-mqtt5 = "0.31"
+mqtt5 = "0.38"
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = { version = "1.14", features = ["std"] }
-rcgen = "0.13"
+rcgen = "0.14"
 ring = "0.17"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

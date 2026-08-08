@@ -2,7 +2,7 @@
 name = "stitch-sync"
 version = "0.3.2"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.90"
 license = "Apache-2.0"
 description = "Reactive state-sync library bridging an in-memory store, fjall-backed local persistence, and MQTT-based remote sync."
 authors = ["LabOverWire"]
@@ -33,7 +33,7 @@ flume = "0.12.0"
 futures = "0.3.32"
 mqdb-agent = { version = "0.8.10", default-features = false }
 mqdb-core = "0.7.3"
-mqtt5 = "0.32.2"
+mqtt5 = "0.38"
 tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -42,8 +42,8 @@ gloo-timers = { version = "0.4.0", features = ["futures"] }
 js-sys = "0.3"
 mqdb-core = { version = "0.7.3", default-features = false }
 mqdb-wasm = "0.3.3"
-mqtt5-protocol = "0.13.0"
-mqtt5-wasm = "1.3.2"
+mqtt5-protocol = "0.14.3"
+mqtt5-wasm = "1.4.4"
 tokio = { version = "1.52.3", default-features = false, features = ["sync"] }
 uuid = { version = "1.23.1", features = ["v4", "v7", "js"] }
 wasm-bindgen = "0.2"

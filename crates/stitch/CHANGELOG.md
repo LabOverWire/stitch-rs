@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the semver-compatible dependency set, including `quinn-proto` to
+  0.11.16 (fixes GHSA-4w2j-m93h-cj5j, a high-severity remote memory-exhaustion
+  advisory).
+- MSRV raised to Rust 1.90 (from 1.88); the `fjall` 3.1.8 persistence backend now
+  requires it.
+- Upgraded the wasm MQTT stack to `mqtt5-wasm` 1.4.4 and `mqtt5-protocol` 0.14.3
+  (from 1.3.2 / 0.13.0), keeping the browser client's `mqtt5-protocol` in lockstep
+  with `mqtt5-wasm`. No behavioral change to the wasm sync path.
+- Upgraded the native MQTT client to `mqtt5` 0.38.2 (from 0.32.2, a
+  semver-incompatible bump). No source changes; the 0.38 client is exercised
+  end-to-end by the harness-backed suite against a real `mqdb-agent` broker.
+  Note the harness broker embeds an older `mqtt5`, so this validates the client,
+  not 0.38 broker-side behavior.
+- Sibling-crate major bumps in the same change set (not part of `stitch-sync`):
+  `ed25519-dalek` 2→3 in `stitch-p2p` (signed writes) and `rcgen` 0.13→0.14 in
+  `mqp2p` (QUIC cert generation); `mqp2p` MSRV raised 1.85→1.88 and `stitch-p2p`
+  now declares MSRV 1.90.
+
 ## [0.3.2] - 2026-08-06
 
 - Version-align release to co-publish the `stitch-wasm` 0.2.2 config fix; no `stitch-sync` code changes.
