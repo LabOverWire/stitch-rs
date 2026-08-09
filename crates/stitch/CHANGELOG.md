@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ed25519-dalek` 2→3 in `stitch-p2p` (signed writes) and `rcgen` 0.13→0.14 in
   `mqp2p` (QUIC cert generation); `mqp2p` MSRV raised 1.85→1.88 and `stitch-p2p`
   now declares MSRV 1.90.
+- Bumped the transitive `time` crate to 0.3.55 (from 0.3.45) in `mqp2p`'s
+  `rcgen` cert path (fixes GHSA-r6v5-fh4h-64xc, a medium-severity stack-exhaustion
+  advisory). Not in `stitch-sync`'s own dependency tree.
 
 ## [0.3.2] - 2026-08-06
 
