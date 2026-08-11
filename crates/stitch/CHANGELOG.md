@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `RemoteConfig::auto_connect` (default `true`). When `false`, `Store::initialize`
+  skips the initial broker connect and leaves the store disconnected for the
+  caller to drive via `Store::reconnect`. Use it when a JWT is minted dynamically
+  per connection, so `initialize` no longer fires a guaranteed-rejected ticketless
+  probe against an auth-requiring broker. Existing behavior is unchanged by default.
+
 ### Changed
 
 - Refreshed the semver-compatible dependency set, including `quinn-proto` to

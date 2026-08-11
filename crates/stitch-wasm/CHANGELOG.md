@@ -5,6 +5,17 @@ All notable changes to the `stitch-wasm` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `createStore`'s `remote` options accept `autoConnect` (default `true`). Set
+  `remote.autoConnect: false` to skip the connect that `initialize` otherwise
+  performs, and drive the authenticated connect yourself via `reconnect`. This
+  suits the dynamic-ticket pattern (a JWT minted per connection): without it,
+  `initialize` fires a ticketless connect that an auth-requiring broker rejects
+  before the app's `reconnect` succeeds.
+
 ## [0.2.2] - 2026-08-06
 
 ### Fixed

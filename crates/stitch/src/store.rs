@@ -91,6 +91,12 @@ impl Store {
     /// Open the inner layers (memory + optional persistence + optional remote)
     /// and start background tasks. Idempotent: subsequent calls return `Ok(())`
     /// without re-initializing.
+    ///
+    /// When a remote is configured, the initial connect is attempted unless
+    /// [`RemoteConfig::auto_connect`](crate::config::RemoteConfig) is `false`, in
+    /// which case the store is left disconnected for the caller to drive via
+    /// [`Store::reconnect`] — the pattern when a JWT is minted dynamically per
+    /// connection, avoiding a guaranteed-rejected ticketless probe on startup.
     pub async fn initialize(&self) -> Result<()> {
         self.inner
             .get_or_try_init(|| async {
@@ -1169,7 +1175,9 @@ impl StoreInner {
             let flush_task = rt::spawn(flush_loop(Shared::clone(&inner)));
             inner.tasks.lock_guard().push(flush_task);
 
-            if let Some(remote_cfg) = &options.remote {
+            if let Some(remote_cfg) = &options.remote
+                && remote_cfg.auto_connect
+            {
                 #[cfg(not(target_arch = "wasm32"))]
                 let ticket = match &remote_cfg.get_ticket {
                     Some(provider) => Some(provider().await?),

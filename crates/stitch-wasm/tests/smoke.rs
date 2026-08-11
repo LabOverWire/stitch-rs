@@ -223,6 +223,32 @@ async fn remote_connect_failure_is_graceful_in_browser() {
 }
 
 #[wasm_bindgen_test]
+async fn auto_connect_false_skips_initial_connect_in_browser() {
+    let opts = js_sys::JSON::parse(r#"{"remote":{"url":"ws://127.0.0.1:1","autoConnect":false}}"#)
+        .unwrap();
+    let store = stitch_wasm::create_store(config(), opts).expect("create_store");
+    store
+        .initialize()
+        .await
+        .expect("initialize succeeds without attempting a connect");
+
+    let status = store.connection_status().expect("connection_status");
+    assert_eq!(
+        status, "Offline",
+        "remote.autoConnect=false must leave the store Offline; no probe on initialize"
+    );
+
+    let reconnect = store
+        .reconnect("ws://127.0.0.1:1".to_string(), None, None, None)
+        .await;
+    assert!(
+        reconnect.is_err(),
+        "reconnect remains available (and fails gracefully against a dead broker), \
+         proving remote config was honored despite skipping the initial connect"
+    );
+}
+
+#[wasm_bindgen_test]
 async fn will_and_keep_alive_options_are_accepted_in_browser() {
     let store = stitch_wasm::create_store(config(), will_options("ws://127.0.0.1:1"))
         .expect("create_store accepts a remote.will and keepAliveSecs config");

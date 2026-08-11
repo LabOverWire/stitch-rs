@@ -92,6 +92,8 @@ struct RemoteDto {
     will: Option<WillDto>,
     #[serde(default, rename = "keepAliveSecs")]
     keep_alive_secs: Option<u64>,
+    #[serde(default, rename = "autoConnect")]
+    auto_connect: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -249,14 +251,15 @@ fn build_store_config(dto: ConfigDto) -> StoreConfig {
 ///
 /// Pass an optional second argument to enable durable IndexedDB persistence
 /// and/or remote MQTT-over-WebSocket sync:
-/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password? } }`.
+/// `{ persistence: { dbName, passphrase? }, remote: { url, clientId?, ticket?, username?, password?, autoConnect? } }`.
 /// With a persistence `passphrase` the store is AES-GCM encrypted. `remote.url`
 /// must be a `ws://`/`wss://` endpoint; `remote.ticket` is a JWT used for MQTT v5
 /// enhanced auth, and `remote.username` + `remote.password` drive classic MQTT
 /// password auth when the broker isn't in JWT mode (ticket takes precedence).
-/// `initialize` then connects and live
-/// mutations flow through `subscribeToEntity`/`getSnapshot`. Omit the argument
-/// for an in-memory store.
+/// `initialize` then connects unless `remote.autoConnect` is `false` (in which
+/// case the caller drives the connect via `reconnect`), and live mutations flow
+/// through `subscribeToEntity`/`getSnapshot`. Omit the argument for an in-memory
+/// store.
 ///
 /// # Errors
 /// Returns an error if the config or options object is malformed.
@@ -293,6 +296,7 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
             cfg.ticket = r.ticket;
             cfg.username = r.username;
             cfg.password = r.password;
+            cfg.auto_connect = r.auto_connect.unwrap_or(true);
             cfg
         }),
     };
@@ -305,8 +309,11 @@ pub fn create_store(config: JsValue, options: JsValue) -> Result<Store, JsValue>
 
 #[wasm_bindgen]
 impl Store {
-    /// Open the store (in-memory + persistence) and, when a remote is
-    /// configured, connect to the broker. Idempotent.
+    /// Open the store (in-memory + persistence) and, when a remote is configured,
+    /// connect to the broker. Idempotent. Pass `remote.autoConnect: false` to skip
+    /// the initial connect and drive it yourself via `reconnect` — the usual
+    /// pattern when the JWT is minted dynamically per connection, avoiding a
+    /// rejected ticketless probe on startup.
     ///
     /// # Errors
     /// Returns an error if the underlying database fails to open.
