@@ -38,6 +38,12 @@ await store.replaceScope("p1");
 `remote.url` is a `ws://`/`wss://` MQTT endpoint; `remote.ticket` is a JWT used
 for MQTT v5 enhanced-auth.
 
+Set `remote.autoConnect: false` (default `true`) when you mint the JWT
+dynamically per connection: `initialize()` then skips its connect and you drive
+the authenticated connect yourself via `reconnect(url, ticket)`. Without it,
+`initialize()` fires a ticketless connect that an auth-requiring broker rejects
+before your `reconnect` succeeds — one rejected probe per page load.
+
 ### Config fields
 
 Only `entities` and `scope` are required. The rest are optional overrides; an

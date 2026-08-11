@@ -1,7 +1,9 @@
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
-use stitch::config::{EntityDefinition, FieldType, PersistenceConfig, SchemaField, ScopeConfig};
-use stitch::types::{Operation, StoreEvent};
+use stitch::config::{
+    EntityDefinition, FieldType, PersistenceConfig, RemoteConfig, SchemaField, ScopeConfig,
+};
+use stitch::types::{ConnectionStatus, Operation, StoreEvent};
 use stitch::{Origin, Store, StoreConfig, StoreOptions};
 use tempfile::TempDir;
 
@@ -1188,5 +1190,23 @@ async fn subscribe_scope_entity_ignores_load_of_other_scope() {
     assert!(
         got.is_err(),
         "a subscriber filtered to p2 must not receive a scope-load signal for p1"
+    );
+}
+
+#[tokio::test]
+async fn initialize_skips_connect_when_auto_connect_disabled() {
+    let mut remote = RemoteConfig::new("ws://127.0.0.1:1");
+    remote.auto_connect = false;
+    let options = StoreOptions {
+        remote: Some(remote),
+        ..StoreOptions::default()
+    };
+    let store = Store::new(fixture_config(), options);
+    store.initialize().await.unwrap();
+
+    assert_eq!(
+        store.connection_status().unwrap(),
+        ConnectionStatus::Offline,
+        "auto_connect=false must not connect on initialize; the caller drives it via reconnect"
     );
 }

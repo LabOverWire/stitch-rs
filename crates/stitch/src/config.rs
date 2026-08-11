@@ -180,6 +180,12 @@ pub struct RemoteConfig {
     pub username: Option<String>,
     pub password: Option<String>,
     pub request_timeout: Duration,
+    /// Whether [`Store::initialize`](crate::Store::initialize) connects to the
+    /// broker on open. Defaults to `true`. Set `false` when the caller mints auth
+    /// dynamically and drives the connect itself via
+    /// [`Store::reconnect`](crate::Store::reconnect) — this avoids a rejected
+    /// anonymous/ticketless probe against a broker that requires auth.
+    pub auto_connect: bool,
 }
 
 impl std::fmt::Debug for RemoteConfig {
@@ -192,6 +198,7 @@ impl std::fmt::Debug for RemoteConfig {
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("request_timeout", &self.request_timeout)
+            .field("auto_connect", &self.auto_connect)
             .finish()
     }
 }
@@ -207,6 +214,7 @@ impl RemoteConfig {
             username: None,
             password: None,
             request_timeout: Duration::from_secs(30),
+            auto_connect: true,
         }
     }
 }
