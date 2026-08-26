@@ -299,6 +299,14 @@ impl Store {
     /// owning scope; for the root entity it's ignored and the row's own id
     /// becomes the scope. Returns the new row's id (either taken from the
     /// `data.id` field or freshly generated).
+    ///
+    /// When a remote is connected and the broker rejects the insert as a
+    /// [`Error::Conflict`] (409, e.g. a unique-constraint collision) or an
+    /// [`Error::Ownership`] (403), the optimistic local write is rolled back
+    /// from memory, persistence, and the offline queue, and the error is
+    /// returned — so a caller racing for an exclusive key observes the loss
+    /// instead of a phantom local row. Transient failures keep the row queued
+    /// for retry and still return the id.
     pub async fn create(
         &self,
         entity: &str,
@@ -375,15 +383,14 @@ impl Store {
                             .await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
-                    if let Some(queue) = &inner.queue {
-                        let _ = queue
-                            .remove(entity, &id, &effective_scope, Operation::Insert)
-                            .await;
-                    }
-                }
                 Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
+                }
+                Err(err) if err.is_conflict() || err.is_ownership() => {
+                    inner
+                        .rollback_local_create(entity, &id, &effective_scope, origin)
+                        .await;
+                    return Err(err);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -1266,6 +1273,30 @@ impl StoreInner {
             inner: Shared::clone(self),
         }
     }
+
+    async fn rollback_local_create(&self, entity: &str, id: &str, scope_id: &str, origin: Origin) {
+        let _ = self.memory.delete(entity, id, origin).await;
+        if let Some(persistence) = &self.persistence
+            && !origin.skips_persistence()
+        {
+            let _ = persistence.delete(entity, id, origin).await;
+        }
+        if let Some(queue) = &self.queue {
+            let _ = queue.remove(entity, id, scope_id, Operation::Insert).await;
+        }
+    }
+
+    async fn rollback_conflicted_inserts(&self, conflicts: &[crate::queue::ConflictedInsert]) {
+        for conflicted in conflicts {
+            self.rollback_local_create(
+                &conflicted.entity,
+                &conflicted.id,
+                &conflicted.scope_id,
+                Origin::Local,
+            )
+            .await;
+        }
+    }
 }
 
 struct InnerLocalAccessor {
@@ -1451,14 +1482,17 @@ async fn flush_loop(inner: Shared<StoreInner>) {
                 break;
             };
             let sender: &dyn crate::queue::MutationSender = remote.as_ref();
-            let retained = match queue.flush(sender).await {
-                Ok(retained) => retained,
+            let summary = match queue.flush(sender).await {
+                Ok(summary) => summary,
                 Err(err) => {
                     tracing::warn!(error = %err, "offline queue flush failed");
                     break;
                 }
             };
-            if retained == 0 {
+            inner
+                .rollback_conflicted_inserts(&summary.conflicted_inserts)
+                .await;
+            if summary.retained == 0 {
                 break;
             }
             rt::sleep(RETAIN_BACKOFF).await;
@@ -1679,11 +1713,18 @@ async fn on_connected(inner: Shared<StoreInner>) {
 
     if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
         let sender: &dyn crate::queue::MutationSender = remote.as_ref();
-        let _ = queue.flush(sender).await;
-        if let Ok(retained) = queue.flush(sender).await
-            && retained > 0
-        {
-            inner.flush_notify.notify_one();
+        if let Ok(summary) = queue.flush(sender).await {
+            inner
+                .rollback_conflicted_inserts(&summary.conflicted_inserts)
+                .await;
+        }
+        if let Ok(summary) = queue.flush(sender).await {
+            inner
+                .rollback_conflicted_inserts(&summary.conflicted_inserts)
+                .await;
+            if summary.retained > 0 {
+                inner.flush_notify.notify_one();
+            }
         }
     }
 

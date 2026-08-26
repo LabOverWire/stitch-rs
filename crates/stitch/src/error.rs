@@ -111,6 +111,7 @@ impl Error {
                 source.as_ref(),
                 mqdb_core::error::Error::Validation(_)
                     | mqdb_core::error::Error::ConstraintViolation(_)
+                    | mqdb_core::error::Error::UniqueViolation { .. }
                     | mqdb_core::error::Error::ForeignKeyViolation { .. }
                     | mqdb_core::error::Error::ForeignKeyRestrict { .. }
                     | mqdb_core::error::Error::NotNullViolation { .. }
