@@ -1280,27 +1280,26 @@ impl StoreInner {
         }
     }
 
-    async fn rollback_local_create(&self, entity: &str, id: &str, scope_id: &str, origin: Origin) {
+    async fn rollback_local_row(&self, entity: &str, id: &str, origin: Origin) {
         let _ = self.memory.delete(entity, id, origin).await;
         if let Some(persistence) = &self.persistence
             && !origin.skips_persistence()
         {
             let _ = persistence.delete(entity, id, origin).await;
         }
+    }
+
+    async fn rollback_local_create(&self, entity: &str, id: &str, scope_id: &str, origin: Origin) {
+        self.rollback_local_row(entity, id, origin).await;
         if let Some(queue) = &self.queue {
             let _ = queue.remove(entity, id, scope_id, Operation::Insert).await;
         }
     }
 
-    async fn rollback_conflicted_inserts(&self, conflicts: &[crate::queue::ConflictedInsert]) {
-        for conflicted in conflicts {
-            self.rollback_local_create(
-                &conflicted.entity,
-                &conflicted.id,
-                &conflicted.scope_id,
-                Origin::Local,
-            )
-            .await;
+    async fn rollback_rejected_inserts(&self, rejected: &[crate::queue::RejectedInsert]) {
+        for insert in rejected {
+            self.rollback_local_row(&insert.entity, &insert.id, Origin::Local)
+                .await;
         }
     }
 }
@@ -1496,7 +1495,7 @@ async fn flush_loop(inner: Shared<StoreInner>) {
                 }
             };
             inner
-                .rollback_conflicted_inserts(&summary.conflicted_inserts)
+                .rollback_rejected_inserts(&summary.rejected_inserts)
                 .await;
             if summary.retained == 0 {
                 break;
@@ -1721,7 +1720,7 @@ async fn on_connected(inner: Shared<StoreInner>) {
         let sender: &dyn crate::queue::MutationSender = remote.as_ref();
         if let Ok(summary) = queue.flush(sender).await {
             inner
-                .rollback_conflicted_inserts(&summary.conflicted_inserts)
+                .rollback_rejected_inserts(&summary.rejected_inserts)
                 .await;
             if summary.retained > 0 {
                 inner.flush_notify.notify_one();

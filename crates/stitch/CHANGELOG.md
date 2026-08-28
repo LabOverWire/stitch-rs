@@ -21,19 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `id` is a silent last-writer-wins overwrite), so an exclusive key must be a
   UNIQUE constraint on a non-`id` field.
 - The offline-queue flush no longer overwrites the winner on a losing insert. A
-  queued insert that flushes into a unique `Conflict` is now dropped (and reported
-  in the flush result) instead of being converted into a blind `sync_update`. When
-  a `create` returned `Ok(id)` after a transient error and then lost the race, the
-  online flush-retry now rolls the losing local row back (memory + persistence +
-  queue), so the client converges to not-holding while continuously connected
-  rather than only on the next reconnect.
+  queued insert the broker rejects with `Conflict` (409) or `Ownership` (403) is
+  now dropped and reported in the flush result — instead of a unique conflict
+  being converted into a blind `sync_update`, or an ownership denial being dropped
+  while its local row lingered. When a `create` returned `Ok(id)` after a transient
+  error and then lost the race, the online flush-retry rolls the losing local row
+  back (memory + persistence), matching the synchronous create path, so the client
+  converges to not-holding while continuously connected rather than only on the
+  next reconnect.
 
 ### Changed
 
 - **Breaking:** `OfflineQueue::flush` returns a `FlushSummary` (the `retained`
-  count plus the `ConflictedInsert`s that were dropped on a unique conflict)
-  instead of a bare `usize`, so the store can roll back the local rows of losing
-  inserts. External implementors of the trait must update their signature.
+  count plus the `RejectedInsert`s the broker refused) instead of a bare `usize`,
+  so the store can roll back the local rows of rejected inserts. External
+  implementors of the trait must update their signature.
 
 ## [0.4.0] - 2026-08-11
 

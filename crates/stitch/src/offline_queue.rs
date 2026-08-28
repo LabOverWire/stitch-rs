@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::lock::MutexExt;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
-pub use crate::queue::{ConflictedInsert, FlushSummary, MutationSender, OfflineQueue};
+pub use crate::queue::{FlushSummary, MutationSender, OfflineQueue, RejectedInsert};
 use crate::rt::{Shared, new_id, now_millis};
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
@@ -174,7 +174,7 @@ async fn flush_consolidated(
     mut remove_records: impl FnMut(Vec<String>) -> RemoveFuture,
 ) -> FlushSummary {
     let mut retained = 0usize;
-    let mut conflicted_inserts: Vec<ConflictedInsert> = Vec::new();
+    let mut rejected_inserts: Vec<RejectedInsert> = Vec::new();
     for mutation in consolidated {
         let attempt = match mutation.op {
             Operation::Insert => {
@@ -205,6 +205,18 @@ async fn flush_consolidated(
         let outcome = match attempt {
             Ok(()) => FlushOutcome::Drop,
             Err(err) if err.is_transient() => FlushOutcome::Keep,
+            Err(err)
+                if (err.is_conflict() || err.is_ownership())
+                    && mutation.op == Operation::Insert =>
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "dropping rejected queued insert; rolling back the optimistic local row"
+                );
+                FlushOutcome::DropRejected
+            }
             Err(err) if err.is_ownership() => FlushOutcome::Drop,
             Err(err) if err.is_not_found() && mutation.op == Operation::Delete => {
                 FlushOutcome::Drop
@@ -232,15 +244,6 @@ async fn flush_consolidated(
                     Err(_) => FlushOutcome::Drop,
                 }
             }
-            Err(err) if err.is_conflict() && mutation.op == Operation::Insert => {
-                tracing::warn!(
-                    entity = %mutation.entity,
-                    id = %mutation.id,
-                    error = %err,
-                    "dropping queued insert: a unique key is already held by another row"
-                );
-                FlushOutcome::DropConflict
-            }
             Err(err) if err.is_permanent_mutation() => {
                 tracing::error!(
                     entity = %mutation.entity,
@@ -267,8 +270,8 @@ async fn flush_consolidated(
             FlushOutcome::Drop => {
                 remove_records(mutation.record_ids).await;
             }
-            FlushOutcome::DropConflict => {
-                conflicted_inserts.push(ConflictedInsert {
+            FlushOutcome::DropRejected => {
+                rejected_inserts.push(RejectedInsert {
                     entity: mutation.entity.clone(),
                     id: mutation.id.clone(),
                     scope_id: mutation.scope_id.clone(),
@@ -282,13 +285,13 @@ async fn flush_consolidated(
     }
     FlushSummary {
         retained,
-        conflicted_inserts,
+        rejected_inserts,
     }
 }
 
 enum FlushOutcome {
     Drop,
-    DropConflict,
+    DropRejected,
     Keep,
 }
 

@@ -451,11 +451,45 @@ async fn conflict_on_insert_drops_without_stealing_the_unique_key() {
     );
     assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
     assert_eq!(
-        summary.conflicted_inserts.len(),
+        summary.rejected_inserts.len(),
         1,
         "the dropped insert must be reported so the store can roll its local row back"
     );
-    let reported = &summary.conflicted_inserts[0];
+    let reported = &summary.rejected_inserts[0];
+    assert_eq!(reported.entity, "task");
+    assert_eq!(reported.id, "t1");
+    assert_eq!(reported.scope_id, "p1");
+}
+
+#[tokio::test]
+async fn ownership_denied_insert_is_dropped_and_reported_for_rollback() {
+    let queue = InMemoryOfflineQueue::new("project".to_string());
+    queue
+        .queue(pending(
+            Operation::Insert,
+            "task",
+            "t1",
+            "p1",
+            make_record(&[("id", json!("t1")), ("title", json!("x"))]),
+        ))
+        .await
+        .unwrap();
+
+    let sender = MockSender::new(Behavior::Ok);
+    sender.set("create", Behavior::Ownership);
+    let summary = queue.flush(sender.as_ref()).await.unwrap();
+
+    assert_eq!(
+        summary.retained, 0,
+        "an ownership-denied insert is not retained"
+    );
+    assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
+    assert_eq!(
+        summary.rejected_inserts.len(),
+        1,
+        "an ownership-denied insert must be reported so the store rolls its local row back"
+    );
+    let reported = &summary.rejected_inserts[0];
     assert_eq!(reported.entity, "task");
     assert_eq!(reported.id, "t1");
     assert_eq!(reported.scope_id, "p1");
