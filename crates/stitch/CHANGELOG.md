@@ -27,9 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   online flush-retry now rolls the losing local row back (memory + persistence +
   queue), so the client converges to not-holding while continuously connected
   rather than only on the next reconnect.
-- `Error::is_permanent_mutation` now classifies the mqdb `UniqueViolation` variant
-  as permanent, so a locally-raised unique violation is no longer left as neither
-  transient nor permanent.
 
 ### Changed
 

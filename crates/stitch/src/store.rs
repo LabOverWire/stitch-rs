@@ -307,6 +307,12 @@ impl Store {
     /// returned — so a caller racing for an exclusive key observes the loss
     /// instead of a phantom local row. Transient failures keep the row queued
     /// for retry and still return the id.
+    ///
+    /// `create` upserts by `id`: calling it with an `id` that already exists
+    /// locally overwrites that row, and a subsequent remote rejection rolls the
+    /// `id` back to empty rather than restoring the prior row. Use a fresh `id`
+    /// for an exclusive-key claim, and [`Store::update`] to modify an existing
+    /// row.
     pub async fn create(
         &self,
         entity: &str,
@@ -1713,11 +1719,6 @@ async fn on_connected(inner: Shared<StoreInner>) {
 
     if let (Some(queue), Some(remote)) = (queue_ref, remote.as_ref()) {
         let sender: &dyn crate::queue::MutationSender = remote.as_ref();
-        if let Ok(summary) = queue.flush(sender).await {
-            inner
-                .rollback_conflicted_inserts(&summary.conflicted_inserts)
-                .await;
-        }
         if let Ok(summary) = queue.flush(sender).await {
             inner
                 .rollback_conflicted_inserts(&summary.conflicted_inserts)
