@@ -110,3 +110,76 @@ async fn wrong_password_never_reaches_connected() {
 
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn losing_create_on_unique_conflict_returns_err_and_leaves_no_phantom() {
+    init_tracing();
+    let broker = BrokerHarness::new()
+        .scope("project", "projectId")
+        .unique_constraint("task", ["title"])
+        .start()
+        .await
+        .expect("start broker");
+
+    let store = Store::with_client_id(
+        fixture_config(),
+        StoreOptions {
+            persistence: None,
+            remote: Some(RemoteConfig::new(broker.tcp_url())),
+        },
+        "app-client".into(),
+    );
+    store.initialize().await.expect("initialize");
+    assert!(reaches_connected(&store).await, "must reach Connected");
+
+    store
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .expect("create project");
+
+    store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("seatA")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .expect("first claim wins");
+
+    let err = store
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t2")),
+                ("title", json!("seatA")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .expect_err("a second claim on the same unique key must be rejected");
+    assert!(err.is_conflict(), "expected Conflict, got {err:?}");
+
+    assert!(
+        store.read("task", "t2").await.expect("read t2").is_none(),
+        "the losing create must leave no phantom local row"
+    );
+    assert!(
+        store.read("task", "t1").await.expect("read t1").is_some(),
+        "the winning row must remain"
+    );
+
+    store.shutdown().await.expect("shutdown store");
+    broker.shutdown().await;
+}

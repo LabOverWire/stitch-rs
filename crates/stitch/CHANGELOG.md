@@ -5,6 +5,38 @@ All notable changes to the `stitch-sync` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-26
+
+### Fixed
+
+- `Store::create` now surfaces a remote rejection instead of hiding it. When a
+  remote is connected and the broker rejects the insert with `Conflict` (409,
+  e.g. a unique-constraint collision) or `Ownership` (403), the optimistic local
+  write is rolled back from memory, persistence, and the offline queue, and the
+  error is returned. Previously the rejection was logged at `warn` and `create`
+  returned `Ok(id)`, leaving a phantom local row — so a client racing for an
+  exclusive key (e.g. a seat/hold) believed it had won. This makes `Store::create`
+  usable for exclusive-key claims. Note the broker must enforce the uniqueness for
+  a 409 to arise: `mqdb-agent` has no primary-key collision on `id` (a duplicate
+  `id` is a silent last-writer-wins overwrite), so an exclusive key must be a
+  UNIQUE constraint on a non-`id` field.
+- The offline-queue flush no longer overwrites the winner on a losing insert. A
+  queued insert the broker rejects with `Conflict` (409) or `Ownership` (403) is
+  now dropped and reported in the flush result — instead of a unique conflict
+  being converted into a blind `sync_update`, or an ownership denial being dropped
+  while its local row lingered. When a `create` returned `Ok(id)` after a transient
+  error and then lost the race, the online flush-retry rolls the losing local row
+  back (memory + persistence), matching the synchronous create path, so the client
+  converges to not-holding while continuously connected rather than only on the
+  next reconnect.
+
+### Changed
+
+- **Breaking:** `OfflineQueue::flush` returns a `FlushSummary` (the `retained`
+  count plus the `RejectedInsert`s the broker refused) instead of a bare `usize`,
+  so the store can roll back the local rows of rejected inserts. External
+  implementors of the trait must update their signature.
+
 ## [0.4.0] - 2026-08-11
 
 ### Added

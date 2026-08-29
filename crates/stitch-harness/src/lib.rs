@@ -26,6 +26,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use mqdb_agent::{Database, MqdbAgent};
+use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
 use mqdb_core::types::ScopeConfig;
 use mqtt5::broker::PasswordAuthProvider;
 use tempfile::TempDir;
@@ -88,6 +89,7 @@ pub struct BrokerHarness {
     anonymous_set: bool,
     users: Vec<(String, String)>,
     acl: Vec<AclEntry>,
+    unique_constraints: Vec<(String, Vec<String>)>,
 }
 
 impl Default for BrokerHarness {
@@ -106,6 +108,7 @@ impl BrokerHarness {
             anonymous_set: false,
             users: Vec::new(),
             acl: Vec::new(),
+            unique_constraints: Vec::new(),
         }
     }
 
@@ -147,6 +150,21 @@ impl BrokerHarness {
         self
     }
 
+    /// Register a UNIQUE constraint on `fields` of `entity` on the broker before
+    /// it starts. A create whose `fields` value already exists under a different
+    /// row id is rejected with a 409, letting tests exercise the client's
+    /// conflict handling against real broker enforcement.
+    #[must_use]
+    pub fn unique_constraint(
+        mut self,
+        entity: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.unique_constraints
+            .push((entity.into(), fields.into_iter().map(Into::into).collect()));
+        self
+    }
+
     /// Bind an ephemeral loopback port, write the password/ACL files, and run the
     /// agent. The broker stays up until the returned [`RunningBroker`] is dropped
     /// or [`RunningBroker::shutdown`] is called.
@@ -160,6 +178,15 @@ impl BrokerHarness {
         let dir = TempDir::new()?;
 
         let db = Database::open_without_background_tasks(dir.path().join("agent")).await?;
+        for (entity, fields) in &self.unique_constraints {
+            let mut schema = Schema::new(entity.clone());
+            for field in fields {
+                schema = schema.add_field(FieldDefinition::new(field.clone(), FieldType::String));
+            }
+            db.add_schema(schema).await?;
+            db.add_unique_constraint(entity.clone(), fields.clone())
+                .await?;
+        }
         let mut agent = MqdbAgent::new(db)
             .with_bind_address(addr)
             .with_anonymous(self.anonymous)

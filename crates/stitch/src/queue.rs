@@ -2,6 +2,26 @@ use crate::error::Result;
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
 
+/// A queued insert the broker rejected during flush — either a `Conflict` (409,
+/// its unique key is already held by another row) or an `Ownership` denial (403).
+/// Such an insert can never land, so the store rolls the optimistic local copy
+/// back and a losing racer converges to not-holding.
+#[derive(Debug, Clone)]
+pub struct RejectedInsert {
+    pub entity: String,
+    pub id: String,
+    pub scope_id: String,
+}
+
+/// Outcome of an offline-queue flush: how many mutations were retained (still
+/// pending, needing another pass) and which inserts the broker rejected so the
+/// caller can roll their local rows back.
+#[derive(Debug, Default)]
+pub struct FlushSummary {
+    pub retained: usize,
+    pub rejected_inserts: Vec<RejectedInsert>,
+}
+
 /// Sends a queued mutation to the remote during an offline-queue flush, and
 /// reads/deletes local rows while reconciling. Implemented by the remote sync
 /// layer.
@@ -42,7 +62,7 @@ pub trait OfflineQueue: Send + Sync {
         scope_id: &str,
         op: Operation,
     ) -> Result<()>;
-    async fn flush(&self, sender: &dyn MutationSender) -> Result<usize>;
+    async fn flush(&self, sender: &dyn MutationSender) -> Result<FlushSummary>;
     async fn clear(&self) -> Result<()>;
     async fn pending_for_scope(&self, scope_id: &str) -> Result<Vec<PendingMutation>>;
     async fn has_pending_insert(&self, entity: &str, entity_id: &str) -> Result<bool>;
@@ -60,7 +80,7 @@ pub trait OfflineQueue {
         scope_id: &str,
         op: Operation,
     ) -> Result<()>;
-    async fn flush(&self, sender: &dyn MutationSender) -> Result<usize>;
+    async fn flush(&self, sender: &dyn MutationSender) -> Result<FlushSummary>;
     async fn clear(&self) -> Result<()>;
     async fn pending_for_scope(&self, scope_id: &str) -> Result<Vec<PendingMutation>>;
     async fn has_pending_insert(&self, entity: &str, entity_id: &str) -> Result<bool>;

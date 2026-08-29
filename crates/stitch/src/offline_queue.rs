@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::lock::MutexExt;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
-pub use crate::queue::{MutationSender, OfflineQueue};
+pub use crate::queue::{FlushSummary, MutationSender, OfflineQueue, RejectedInsert};
 use crate::rt::{Shared, new_id, now_millis};
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
@@ -172,8 +172,9 @@ async fn flush_consolidated(
     sender: &dyn MutationSender,
     root_entity: &str,
     mut remove_records: impl FnMut(Vec<String>) -> RemoveFuture,
-) -> usize {
+) -> FlushSummary {
     let mut retained = 0usize;
+    let mut rejected_inserts: Vec<RejectedInsert> = Vec::new();
     for mutation in consolidated {
         let attempt = match mutation.op {
             Operation::Insert => {
@@ -204,6 +205,18 @@ async fn flush_consolidated(
         let outcome = match attempt {
             Ok(()) => FlushOutcome::Drop,
             Err(err) if err.is_transient() => FlushOutcome::Keep,
+            Err(err)
+                if (err.is_conflict() || err.is_ownership())
+                    && mutation.op == Operation::Insert =>
+            {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "dropping rejected queued insert; rolling back the optimistic local row"
+                );
+                FlushOutcome::DropRejected
+            }
             Err(err) if err.is_ownership() => FlushOutcome::Drop,
             Err(err) if err.is_not_found() && mutation.op == Operation::Delete => {
                 FlushOutcome::Drop
@@ -229,20 +242,6 @@ async fn flush_consolidated(
                     Ok(None) => FlushOutcome::Drop,
                     Err(e) if e.is_transient() => FlushOutcome::Keep,
                     Err(_) => FlushOutcome::Drop,
-                }
-            }
-            Err(err) if err.is_conflict() && mutation.op == Operation::Insert => {
-                if let Some(data) = mutation.data.clone() {
-                    match sender
-                        .sync_update(&mutation.entity, &mutation.scope_id, &mutation.id, data)
-                        .await
-                    {
-                        Ok(()) => FlushOutcome::Drop,
-                        Err(e) if e.is_transient() => FlushOutcome::Keep,
-                        Err(_) => FlushOutcome::Drop,
-                    }
-                } else {
-                    FlushOutcome::Drop
                 }
             }
             Err(err) if err.is_permanent_mutation() => {
@@ -271,16 +270,28 @@ async fn flush_consolidated(
             FlushOutcome::Drop => {
                 remove_records(mutation.record_ids).await;
             }
+            FlushOutcome::DropRejected => {
+                rejected_inserts.push(RejectedInsert {
+                    entity: mutation.entity.clone(),
+                    id: mutation.id.clone(),
+                    scope_id: mutation.scope_id.clone(),
+                });
+                remove_records(mutation.record_ids).await;
+            }
             FlushOutcome::Keep => {
                 retained += 1;
             }
         }
     }
-    retained
+    FlushSummary {
+        retained,
+        rejected_inserts,
+    }
 }
 
 enum FlushOutcome {
     Drop,
+    DropRejected,
     Keep,
 }
 
@@ -396,10 +407,10 @@ impl OfflineQueue for PersistentOfflineQueue {
         Ok(())
     }
 
-    async fn flush(&self, sender: &dyn MutationSender) -> Result<usize> {
+    async fn flush(&self, sender: &dyn MutationSender) -> Result<FlushSummary> {
         let _guard = match FlushGuard::try_acquire(&self.flushing) {
             Some(g) => g,
-            None => return Ok(0),
+            None => return Ok(FlushSummary::default()),
         };
         self.do_flush(sender).await
     }
@@ -460,9 +471,9 @@ impl OfflineQueue for PersistentOfflineQueue {
 }
 
 impl PersistentOfflineQueue {
-    async fn do_flush(&self, sender: &dyn MutationSender) -> Result<usize> {
+    async fn do_flush(&self, sender: &dyn MutationSender) -> Result<FlushSummary> {
         let Some(user) = self.current_user() else {
-            return Ok(0);
+            return Ok(FlushSummary::default());
         };
         let filters = vec![Filter::new(
             "userId".into(),
@@ -471,7 +482,7 @@ impl PersistentOfflineQueue {
         )];
         let rows = self.list_rows(filters).await?;
         if rows.is_empty() {
-            return Ok(0);
+            return Ok(FlushSummary::default());
         }
         let consolidated = consolidate(rows);
         let persistence = Shared::clone(&self.persistence);
@@ -483,8 +494,7 @@ impl PersistentOfflineQueue {
                 }
             })
         };
-        let retained = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
-        Ok(retained)
+        Ok(flush_consolidated(consolidated, sender, &self.root_entity, remove).await)
     }
 }
 
@@ -543,14 +553,14 @@ impl OfflineQueue for InMemoryOfflineQueue {
         Ok(())
     }
 
-    async fn flush(&self, sender: &dyn MutationSender) -> Result<usize> {
+    async fn flush(&self, sender: &dyn MutationSender) -> Result<FlushSummary> {
         let _guard = match FlushGuard::try_acquire(&self.flushing) {
             Some(g) => g,
-            None => return Ok(0),
+            None => return Ok(FlushSummary::default()),
         };
         let snapshot: Vec<StoredRow> = self.rows.lock_guard().clone();
         if snapshot.is_empty() {
-            return Ok(0);
+            return Ok(FlushSummary::default());
         }
         let consolidated = consolidate(snapshot);
         let rows_handle: &Mutex<Vec<StoredRow>> = &self.rows;
@@ -562,12 +572,12 @@ impl OfflineQueue for InMemoryOfflineQueue {
                 set.lock_guard().extend(ids);
             })
         };
-        let retained = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
+        let summary = flush_consolidated(consolidated, sender, &self.root_entity, remove).await;
         let flushed: Vec<String> = remove_set.lock_guard().clone();
         rows_handle
             .lock_guard()
             .retain(|r| !flushed.contains(&r.record_id));
-        Ok(retained)
+        Ok(summary)
     }
 
     async fn clear(&self) -> Result<()> {
@@ -804,10 +814,10 @@ mod tests {
             fail_create_transient: true,
             ..Default::default()
         };
-        assert_eq!(queue.flush(&failing).await?, 1);
+        assert_eq!(queue.flush(&failing).await?.retained, 1);
 
         let recovered = FakeSender::default();
-        assert_eq!(queue.flush(&recovered).await?, 0);
+        assert_eq!(queue.flush(&recovered).await?.retained, 0);
         assert_eq!(recovered.creates.lock_guard().len(), 1);
         Ok(())
     }
@@ -829,7 +839,7 @@ mod tests {
             read_result: Mutex::new(Some(record(&[("id", "t1"), ("status", "running")]))),
             ..Default::default()
         };
-        assert_eq!(queue.flush(&sender).await?, 0);
+        assert_eq!(queue.flush(&sender).await?.retained, 0);
         assert_eq!(sender.updates.load(Ordering::SeqCst), 1);
         assert_eq!(sender.creates.lock_guard().len(), 1);
         Ok(())
@@ -856,7 +866,7 @@ mod tests {
             .await?;
 
         let sender = FakeSender::default();
-        assert_eq!(queue.flush(&sender).await?, 0);
+        assert_eq!(queue.flush(&sender).await?.retained, 0);
         assert_eq!(sender.updates.load(Ordering::SeqCst), 0);
         let creates = sender.creates.lock_guard();
         assert_eq!(creates.len(), 1);
