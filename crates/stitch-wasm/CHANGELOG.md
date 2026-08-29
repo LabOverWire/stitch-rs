@@ -5,7 +5,20 @@ All notable changes to the `stitch-wasm` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.0] - 2026-08-26
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** a failed `Store` method now rejects with a structured JS `Error`
+  instead of a plain string. The `Error` carries `message` (the previous text)
+  and a stable `kind` discriminant — one of `conflict`, `ownership`, `notFound`,
+  `timeout`, `connectionClosed`, `sessionInvalid`, `mqtt`, `mqdb`, `config`,
+  `serde`, `io`, `notInitialized`, `alreadyInitialized`, `scopeNotActive`,
+  `unknownEntity`, or `invalidInput` (for malformed arguments) — plus `entity`
+  and `id` on the variants that carry them. Branch on `err.kind === "conflict"`
+  instead of matching message text. Callers that matched `String(err)` (e.g.
+  `String(err).startsWith("conflict for")`) must switch to `err.kind` or
+  `err.message`, since `String(err)` is now `"Error: conflict for …"`.
 
 ### Fixed
 
