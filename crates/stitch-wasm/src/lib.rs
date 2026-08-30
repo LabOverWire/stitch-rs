@@ -153,27 +153,38 @@ fn stitch_err(e: stitch::Error) -> JsValue {
     js_error(&message, kind, entity, id)
 }
 
-/// Convert an internal (non-`stitch`) failure — e.g. deserializing config or a
-/// record passed from JS — into a JS `Error` with `kind: "invalidInput"`.
+/// Best-effort message of a thrown JS value (its `.message` if it is an `Error`,
+/// else its string form).
+fn thrown_message(thrown: &JsValue) -> String {
+    js_sys::Reflect::get(thrown, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .or_else(|| thrown.as_string())
+        .unwrap_or_else(|| "unknown error".to_string())
+}
+
+/// Convert a malformed caller argument — e.g. deserializing config or a record
+/// passed from JS — into a JS `Error` with `kind: "invalidInput"`.
 fn err<E: std::fmt::Display>(e: E) -> JsValue {
     js_error(&e.to_string(), "invalidInput", None, None)
 }
 
 /// Re-wrap a thrown JS value (e.g. a `TypeError` from `JSON.stringify` on a
-/// `BigInt` or circular reference) as a `kind: "invalidInput"` error, preserving
-/// its message, so caller-input failures carry a `kind` like every other path.
+/// `BigInt` or circular reference) as a `kind: "invalidInput"` error, so
+/// caller-input failures carry a `kind` like every other path.
 fn invalid_input(thrown: JsValue) -> JsValue {
-    let message = js_sys::Reflect::get(&thrown, &JsValue::from_str("message"))
-        .ok()
-        .and_then(|v| v.as_string())
-        .or_else(|| thrown.as_string())
-        .unwrap_or_else(|| "invalid input".to_string());
-    js_error(&message, "invalidInput", None, None)
+    js_error(&thrown_message(&thrown), "invalidInput", None, None)
+}
+
+/// Convert an internal fault that is not caused by caller input — e.g.
+/// serializing a store-derived row for return — into a `kind: "internal"` error.
+fn internal_err(message: &str) -> JsValue {
+    js_error(message, "internal", None, None)
 }
 
 fn to_js(value: &serde_json::Value) -> Result<JsValue, JsValue> {
-    let text = serde_json::to_string(value).map_err(err)?;
-    js_sys::JSON::parse(&text)
+    let text = serde_json::to_string(value).map_err(|e| internal_err(&e.to_string()))?;
+    js_sys::JSON::parse(&text).map_err(|e| internal_err(&thrown_message(&e)))
 }
 
 fn json_from_js(js: &JsValue) -> Result<serde_json::Value, JsValue> {
