@@ -133,6 +133,8 @@ fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) 
         NotFound { entity, id } => ("notFound", Some(entity), Some(id)),
         Ownership { entity, id } => ("ownership", Some(entity), Some(id)),
         Conflict { entity, id } => ("conflict", Some(entity), Some(id)),
+        Mqdb { .. } if e.is_corruption() => ("corruption", None, None),
+        Mqdb { .. } if e.is_permanent_mutation() => ("constraint", None, None),
         Mqdb { .. } => ("mqdb", None, None),
         Mqtt(_) => ("mqtt", None, None),
         ConnectionClosed => ("connectionClosed", None, None),
@@ -144,17 +146,12 @@ fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) 
     }
 }
 
-/// Convert a [`stitch::Error`] into a JS `Error` carrying a stable `kind`
-/// discriminant (plus `entity`/`id` where the variant has them), so callers can
-/// branch on `err.kind === "conflict"` instead of matching the message text.
 fn stitch_err(e: stitch::Error) -> JsValue {
     let message = e.to_string();
     let (kind, entity, id) = error_parts(&e);
     js_error(&message, kind, entity, id)
 }
 
-/// Best-effort message of a thrown JS value (its `.message` if it is an `Error`,
-/// else its string form).
 fn thrown_message(thrown: &JsValue) -> String {
     js_sys::Reflect::get(thrown, &JsValue::from_str("message"))
         .ok()
@@ -163,21 +160,14 @@ fn thrown_message(thrown: &JsValue) -> String {
         .unwrap_or_else(|| "unknown error".to_string())
 }
 
-/// Convert a malformed caller argument — e.g. deserializing config or a record
-/// passed from JS — into a JS `Error` with `kind: "invalidInput"`.
 fn err<E: std::fmt::Display>(e: E) -> JsValue {
     js_error(&e.to_string(), "invalidInput", None, None)
 }
 
-/// Re-wrap a thrown JS value (e.g. a `TypeError` from `JSON.stringify` on a
-/// `BigInt` or circular reference) as a `kind: "invalidInput"` error, so
-/// caller-input failures carry a `kind` like every other path.
 fn invalid_input(thrown: JsValue) -> JsValue {
     js_error(&thrown_message(&thrown), "invalidInput", None, None)
 }
 
-/// Convert an internal fault that is not caused by caller input — e.g.
-/// serializing a store-derived row for return — into a `kind: "internal"` error.
 fn internal_err(message: &str) -> JsValue {
     js_error(message, "internal", None, None)
 }

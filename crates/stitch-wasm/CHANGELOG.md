@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** a failed `Store` method now rejects with a structured JS `Error`
   instead of a plain string. The `Error` carries `message` (the previous text)
   and a stable `kind` discriminant — one of `conflict`, `ownership`, `notFound`,
-  `timeout`, `connectionClosed`, `sessionInvalid`, `mqtt`, `mqdb`, `config`,
+  `timeout`, `connectionClosed`, `sessionInvalid`, `mqtt`, `corruption` (a
+  corrupt local store — recover via `recoverPersistence`), `constraint` (a
+  permanent local schema/unique/foreign-key violation), `mqdb`, `config`,
   `serde`, `io`, `notInitialized`, `alreadyInitialized`, `scopeNotActive`,
   `unknownEntity`, `invalidInput` (a malformed argument), or `internal` (an
   internal serialization fault) — plus `entity` and `id` on the variants that
