@@ -104,24 +104,93 @@ struct OptionsDto {
     remote: Option<RemoteDto>,
 }
 
+fn set_prop(target: &JsValue, key: &str, value: &str) {
+    let _ = js_sys::Reflect::set(target, &JsValue::from_str(key), &JsValue::from_str(value));
+}
+
+fn js_error(message: &str, kind: &str, entity: Option<&str>, id: Option<&str>) -> JsValue {
+    let error = js_sys::Error::new(message);
+    set_prop(&error, "kind", kind);
+    if let Some(entity) = entity {
+        set_prop(&error, "entity", entity);
+    }
+    if let Some(id) = id {
+        set_prop(&error, "id", id);
+    }
+    error.into()
+}
+
+fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) {
+    use stitch::Error::{
+        AlreadyInitialized, Config, Conflict, ConnectionClosed, Io, Mqdb, Mqtt, NotFound,
+        NotInitialized, Ownership, ScopeNotActive, Serde, SessionInvalid, Timeout, UnknownEntity,
+    };
+    match e {
+        NotInitialized => ("notInitialized", None, None),
+        AlreadyInitialized => ("alreadyInitialized", None, None),
+        ScopeNotActive(_) => ("scopeNotActive", None, None),
+        UnknownEntity(_) => ("unknownEntity", None, None),
+        NotFound { entity, id } => ("notFound", Some(entity), Some(id)),
+        Ownership { entity, id } => ("ownership", Some(entity), Some(id)),
+        Conflict { entity, id } => ("conflict", Some(entity), Some(id)),
+        Mqdb { .. } if e.is_corruption() => ("corruption", None, None),
+        Mqdb { .. } if e.is_permanent_mutation() => ("constraint", None, None),
+        Mqdb { .. } => ("mqdb", None, None),
+        Mqtt(_) => ("mqtt", None, None),
+        ConnectionClosed => ("connectionClosed", None, None),
+        Timeout(_) => ("timeout", None, None),
+        Config(_) => ("config", None, None),
+        SessionInvalid => ("sessionInvalid", None, None),
+        Serde(_) => ("serde", None, None),
+        Io(_) => ("io", None, None),
+    }
+}
+
+fn stitch_err(e: stitch::Error) -> JsValue {
+    let message = e.to_string();
+    let (kind, entity, id) = error_parts(&e);
+    js_error(&message, kind, entity, id)
+}
+
+fn thrown_message(thrown: &JsValue) -> String {
+    js_sys::Reflect::get(thrown, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .or_else(|| thrown.as_string())
+        .unwrap_or_else(|| "unknown error".to_string())
+}
+
 fn err<E: std::fmt::Display>(e: E) -> JsValue {
-    JsValue::from_str(&e.to_string())
+    js_error(&e.to_string(), "invalidInput", None, None)
+}
+
+fn invalid_input(thrown: JsValue) -> JsValue {
+    js_error(&thrown_message(&thrown), "invalidInput", None, None)
+}
+
+fn internal_err(message: &str) -> JsValue {
+    js_error(message, "internal", None, None)
 }
 
 fn to_js(value: &serde_json::Value) -> Result<JsValue, JsValue> {
-    let text = serde_json::to_string(value).map_err(err)?;
-    js_sys::JSON::parse(&text)
+    let text = serde_json::to_string(value).map_err(|e| internal_err(&e.to_string()))?;
+    js_sys::JSON::parse(&text).map_err(|e| internal_err(&thrown_message(&e)))
 }
 
 fn json_from_js(js: &JsValue) -> Result<serde_json::Value, JsValue> {
-    let text = js_sys::JSON::stringify(js)?;
+    let text = js_sys::JSON::stringify(js).map_err(invalid_input)?;
     serde_json::from_str(&String::from(text)).map_err(err)
 }
 
 fn record_from_js(js: &JsValue) -> Result<Record, JsValue> {
     match json_from_js(js)? {
         serde_json::Value::Object(map) => Ok(map),
-        other => Err(JsValue::from_str(&format!("expected object, got {other}"))),
+        other => Err(js_error(
+            &format!("expected object, got {other}"),
+            "invalidInput",
+            None,
+            None,
+        )),
     }
 }
 
@@ -318,7 +387,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the underlying database fails to open.
     pub async fn initialize(&self) -> Result<(), JsValue> {
-        self.inner.initialize().await.map_err(err)
+        self.inner.initialize().await.map_err(stitch_err)
     }
 
     /// Current remote connection status as a string (`"Offline"`,
@@ -329,7 +398,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "connectionStatus")]
     pub fn connection_status(&self) -> Result<String, JsValue> {
-        let status = self.inner.connection_status().map_err(err)?;
+        let status = self.inner.connection_status().map_err(stitch_err)?;
         Ok(format!("{status:?}"))
     }
 
@@ -341,7 +410,9 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "setAuthenticatedUser")]
     pub fn set_authenticated_user(&self, user_id: Option<String>) -> Result<(), JsValue> {
-        self.inner.set_authenticated_user(user_id).map_err(err)
+        self.inner
+            .set_authenticated_user(user_id)
+            .map_err(stitch_err)
     }
 
     /// Register a callback fired when the broker rejects the session
@@ -356,7 +427,7 @@ impl Store {
             .set_session_invalid_handler(move || {
                 let _ = callback.call0(&JsValue::NULL);
             })
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Number of offline-queued mutations buffered for `scopeId` (the
@@ -367,7 +438,10 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "pendingMutationCount")]
     pub async fn pending_mutation_count(&self, scope_id: String) -> Result<usize, JsValue> {
-        self.inner.pending_count(&scope_id).await.map_err(err)
+        self.inner
+            .pending_count(&scope_id)
+            .await
+            .map_err(stitch_err)
     }
 
     /// Insert a row into `entity` under `scopeId`. Returns the new row's id.
@@ -385,7 +459,7 @@ impl Store {
         self.inner
             .create(&entity, &scope_id, record, origin_from_tag(tag))
             .await
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Read a single row from the in-memory cache, or `null` if absent.
@@ -393,7 +467,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the read fails.
     pub fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
-        match self.inner.read_sync(&entity, &id).map_err(err)? {
+        match self.inner.read_sync(&entity, &id).map_err(stitch_err)? {
             Some(record) => to_js(&serde_json::Value::Object(record)),
             None => Ok(JsValue::NULL),
         }
@@ -414,7 +488,7 @@ impl Store {
         self.inner
             .update(&entity, &id, record, origin_from_tag(tag))
             .await
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Delete a row. No-op if absent.
@@ -430,7 +504,7 @@ impl Store {
         self.inner
             .delete(&entity, &id, origin_from_tag(tag))
             .await
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Read a row straight from durable persistence, bypassing the in-memory
@@ -445,7 +519,7 @@ impl Store {
             .inner
             .read_local_state(&entity, &id)
             .await
-            .map_err(err)?
+            .map_err(stitch_err)?
         {
             Some(record) => to_js(&serde_json::Value::Object(record)),
             None => Ok(JsValue::NULL),
@@ -460,7 +534,10 @@ impl Store {
     /// Returns an error if the load fails.
     #[wasm_bindgen(js_name = "replaceScope")]
     pub async fn replace_scope(&self, scope_id: String) -> Result<(), JsValue> {
-        self.inner.replace_scope(&scope_id).await.map_err(err)
+        self.inner
+            .replace_scope(&scope_id)
+            .await
+            .map_err(stitch_err)
     }
 
     /// Load a scope's rows into the in-memory cache from caller-supplied data,
@@ -473,7 +550,10 @@ impl Store {
     pub async fn load_scope(&self, scope_id: String, data: JsValue) -> Result<(), JsValue> {
         let parsed: HashMap<String, Vec<Record>> =
             serde_json::from_value(json_from_js(&data)?).map_err(err)?;
-        self.inner.load_scope(&scope_id, parsed).await.map_err(err)
+        self.inner
+            .load_scope(&scope_id, parsed)
+            .await
+            .map_err(stitch_err)
     }
 
     /// Clear a scope from the in-memory cache. Equivalent to TS `clearScope`.
@@ -482,7 +562,7 @@ impl Store {
     /// Returns an error if the operation fails.
     #[wasm_bindgen(js_name = "clearScope")]
     pub async fn clear_scope(&self, scope_id: String) -> Result<(), JsValue> {
-        self.inner.clear_scope(&scope_id).await.map_err(err)
+        self.inner.clear_scope(&scope_id).await.map_err(stitch_err)
     }
 
     /// Snapshot of all rows for `entity` within `scopeId`. Equivalent to TS
@@ -492,7 +572,10 @@ impl Store {
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getSnapshot")]
     pub fn snapshot(&self, entity: String, scope_id: String) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
+        let rows = self
+            .inner
+            .snapshot_sync(&entity, &scope_id)
+            .map_err(stitch_err)?;
         let array = rows.into_iter().map(serde_json::Value::Object).collect();
         to_js(&serde_json::Value::Array(array))
     }
@@ -513,7 +596,7 @@ impl Store {
                 projection: dto.projection,
             })
         };
-        let rows = self.inner.list(&entity, filter).await.map_err(err)?;
+        let rows = self.inner.list(&entity, filter).await.map_err(stitch_err)?;
         let array = rows.into_iter().map(serde_json::Value::Object).collect();
         to_js(&serde_json::Value::Array(array))
     }
@@ -532,7 +615,11 @@ impl Store {
                 serde_json::from_value(json_from_js(&sort)?).map_err(err)?;
             dtos.into_iter().map(SortField::from).collect()
         };
-        let rows = self.inner.list_root_entities(sort).await.map_err(err)?;
+        let rows = self
+            .inner
+            .list_root_entities(sort)
+            .await
+            .map_err(stitch_err)?;
         let array = rows.into_iter().map(serde_json::Value::Object).collect();
         to_js(&serde_json::Value::Array(array))
     }
@@ -543,7 +630,9 @@ impl Store {
     /// Returns an error if the read fails.
     #[wasm_bindgen(js_name = "getChildCount")]
     pub fn get_child_count(&self, entity: String, scope_id: String) -> Result<usize, JsValue> {
-        self.inner.child_count_sync(&entity, &scope_id).map_err(err)
+        self.inner
+            .child_count_sync(&entity, &scope_id)
+            .map_err(stitch_err)
     }
 
     /// Change token for `(scopeId, entity)`: increments on every mutation and on
@@ -559,7 +648,7 @@ impl Store {
         self.inner
             .version(&scope_id, &entity)
             .map(|v| v as f64)
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Snapshot of `entity` within `scopeId` as an object keyed by row id.
@@ -572,7 +661,10 @@ impl Store {
         entity: String,
         scope_id: String,
     ) -> Result<JsValue, JsValue> {
-        let rows = self.inner.snapshot_sync(&entity, &scope_id).map_err(err)?;
+        let rows = self
+            .inner
+            .snapshot_sync(&entity, &scope_id)
+            .map_err(stitch_err)?;
         let mut map = serde_json::Map::new();
         for row in rows {
             let id = row.get("id").and_then(|v| v.as_str()).map(str::to_string);
@@ -590,7 +682,7 @@ impl Store {
     /// Returns an error if the operation fails.
     #[wasm_bindgen(js_name = "closeScope")]
     pub async fn close_scope(&self, scope_id: String) -> Result<(), JsValue> {
-        self.inner.close_scope(&scope_id).await.map_err(err)
+        self.inner.close_scope(&scope_id).await.map_err(stitch_err)
     }
 
     /// `true` once [`Store::initialize`] has completed.
@@ -605,7 +697,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "hasPersistence")]
     pub fn has_persistence(&self) -> Result<bool, JsValue> {
-        self.inner.has_persistence().map_err(err)
+        self.inner.has_persistence().map_err(stitch_err)
     }
 
     /// `true` if remote sync is configured.
@@ -614,7 +706,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "hasRemote")]
     pub fn has_remote(&self) -> Result<bool, JsValue> {
-        self.inner.has_remote().map_err(err)
+        self.inner.has_remote().map_err(stitch_err)
     }
 
     /// `true` while the remote client is between connections.
@@ -623,7 +715,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "isReconnecting")]
     pub fn is_reconnecting(&self) -> Result<bool, JsValue> {
-        self.inner.is_reconnecting().map_err(err)
+        self.inner.is_reconnecting().map_err(stitch_err)
     }
 
     /// Disconnect the remote client. Memory and persistence are unaffected.
@@ -631,7 +723,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the disconnect fails.
     pub async fn disconnect(&self) -> Result<(), JsValue> {
-        self.inner.disconnect().await.map_err(err)
+        self.inner.disconnect().await.map_err(stitch_err)
     }
 
     /// Reconnect the remote client, optionally with a fresh JWT ticket or
@@ -649,7 +741,7 @@ impl Store {
         self.inner
             .reconnect(&server_url, ticket, username, password)
             .await
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Disconnect, clear auth + sync state. Persistence and the offline queue
@@ -659,7 +751,7 @@ impl Store {
     /// Returns an error if the operation fails.
     #[wasm_bindgen(js_name = "resetForLogout")]
     pub async fn reset_for_logout(&self) -> Result<(), JsValue> {
-        self.inner.reset_for_logout().await.map_err(err)
+        self.inner.reset_for_logout().await.map_err(stitch_err)
     }
 
     /// Disconnect the remote, close persistence, and abort background tasks.
@@ -667,7 +759,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the operation fails.
     pub async fn destroy(&self) -> Result<(), JsValue> {
-        self.inner.shutdown().await.map_err(err)
+        self.inner.shutdown().await.map_err(stitch_err)
     }
 
     /// Defer memory-bus notifications until [`Store::end_batch`]; rapid bursts
@@ -677,7 +769,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "beginBatch")]
     pub fn begin_batch(&self) -> Result<(), JsValue> {
-        self.inner.begin_batch().map_err(err)
+        self.inner.begin_batch().map_err(stitch_err)
     }
 
     /// Flush the batch opened by [`Store::begin_batch`].
@@ -686,7 +778,7 @@ impl Store {
     /// Returns an error if the store is not initialized.
     #[wasm_bindgen(js_name = "endBatch")]
     pub fn end_batch(&self) -> Result<(), JsValue> {
-        self.inner.end_batch().map_err(err)
+        self.inner.end_batch().map_err(stitch_err)
     }
 
     /// Upsert into persistence directly, bypassing memory and remote.
@@ -704,7 +796,7 @@ impl Store {
         self.inner
             .update_local_state(&entity, &id, record)
             .await
-            .map_err(err)
+            .map_err(stitch_err)
     }
 
     /// Send an arbitrary MQTT request and await the broker's response.
@@ -713,7 +805,11 @@ impl Store {
     /// Returns an error if no remote is configured or the request fails.
     pub async fn request(&self, topic: String, payload: JsValue) -> Result<JsValue, JsValue> {
         let payload = json_from_js(&payload)?;
-        let record = self.inner.request(&topic, payload).await.map_err(err)?;
+        let record = self
+            .inner
+            .request(&topic, payload)
+            .await
+            .map_err(stitch_err)?;
         to_js(&serde_json::Value::Object(record))
     }
 
@@ -729,7 +825,7 @@ impl Store {
         entity: String,
         callback: js_sys::Function,
     ) -> Result<JsValue, JsValue> {
-        let rx = self.inner.subscribe_entity(&entity).map_err(err)?;
+        let rx = self.inner.subscribe_entity(&entity).map_err(stitch_err)?;
         Ok(spawn_mutation_forwarder(rx, move |event| {
             let data = match event.data {
                 Some(record) => to_js(&serde_json::Value::Object(record)).unwrap_or(JsValue::NULL),
@@ -758,7 +854,7 @@ impl Store {
         let rx = self
             .inner
             .subscribe_scope_entity(&scope_id, &entity)
-            .map_err(err)?;
+            .map_err(stitch_err)?;
         Ok(spawn_mutation_forwarder(rx, move |_event| {
             let _ = callback.call0(&JsValue::NULL);
         }))
@@ -775,7 +871,11 @@ impl Store {
         &self,
         callback: js_sys::Function,
     ) -> Result<JsValue, JsValue> {
-        let Some(mut rx) = self.inner.subscribe_connection_status().map_err(err)? else {
+        let Some(mut rx) = self
+            .inner
+            .subscribe_connection_status()
+            .map_err(stitch_err)?
+        else {
             return Ok(Closure::once_into_js(|| {}));
         };
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -850,5 +950,38 @@ mod tests {
         assert!(cfg.user_scope_field.is_none());
         assert!(cfg.top_level_entities.is_empty());
         assert!(cfg.local_only_entities.is_empty());
+    }
+
+    fn prop(val: &JsValue, key: &str) -> Option<String> {
+        js_sys::Reflect::get(val, &JsValue::from_str(key))
+            .ok()
+            .and_then(|v| v.as_string())
+    }
+
+    #[wasm_bindgen_test]
+    fn stitch_err_maps_conflict_to_structured_error() {
+        let js = stitch_err(stitch::Error::Conflict {
+            entity: "hold".into(),
+            id: "seat-1".into(),
+        });
+        assert_eq!(prop(&js, "kind").as_deref(), Some("conflict"));
+        assert_eq!(prop(&js, "entity").as_deref(), Some("hold"));
+        assert_eq!(prop(&js, "id").as_deref(), Some("seat-1"));
+        let message = prop(&js, "message").unwrap_or_default();
+        assert!(
+            message.contains("conflict for hold/seat-1"),
+            "message: {message}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn stitch_err_omits_entity_id_when_absent_and_err_is_invalid_input() {
+        let js = stitch_err(stitch::Error::Timeout(500));
+        assert_eq!(prop(&js, "kind").as_deref(), Some("timeout"));
+        assert!(prop(&js, "entity").is_none());
+        assert!(prop(&js, "id").is_none());
+
+        let generic = err("bad input");
+        assert_eq!(prop(&generic, "kind").as_deref(), Some("invalidInput"));
     }
 }
