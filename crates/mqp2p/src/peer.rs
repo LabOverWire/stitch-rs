@@ -1,7 +1,8 @@
 use crate::error::{Error, Result};
 use crate::quic::{self, CertIdentity, QuicEndpoint};
 use crate::signaling::{
-    Candidate, CandidateKind, ConnectionOffer, ConnectionSync, PeerInfo, SignalingClient,
+    Candidate, CandidateKind, ConnectionOffer, ConnectionSync, PEER_LEASE_SECS, PeerInfo,
+    SignalingClient, heartbeat_interval_secs,
 };
 use crate::stun;
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
@@ -18,6 +19,7 @@ pub struct PeerConfig {
     pub bind_addr: SocketAddr,
     pub stun_server: Option<String>,
     pub credentials: Option<(String, String)>,
+    pub lease_secs: u64,
 }
 
 impl PeerConfig {
@@ -28,7 +30,13 @@ impl PeerConfig {
             bind_addr: "0.0.0.0:0".parse().unwrap_or_else(|_| unreachable!()),
             stun_server: Some(stun::DEFAULT_STUN_SERVER.into()),
             credentials: None,
+            lease_secs: PEER_LEASE_SECS,
         }
+    }
+
+    pub fn with_lease_secs(mut self, lease_secs: u64) -> Self {
+        self.lease_secs = lease_secs.max(1);
+        self
     }
 
     pub fn with_bind_addr(mut self, addr: SocketAddr) -> Self {
@@ -63,10 +71,13 @@ pub struct Peer {
     identity: CertIdentity,
     signaling: SignalingClient,
     quic: QuicEndpoint,
+    record_id: String,
     peer_id: Option<String>,
     std_socket: std::net::UdpSocket,
     host_addr: SocketAddr,
     srflx_addr: Option<SocketAddr>,
+    lease_secs: u64,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Peer {
@@ -131,19 +142,28 @@ impl Peer {
             identity,
             signaling,
             quic,
+            record_id: uuid::Uuid::new_v4().to_string(),
             peer_id: None,
             std_socket,
             host_addr,
             srflx_addr,
+            lease_secs: config.lease_secs,
+            heartbeat: None,
         })
     }
 
     pub async fn register(&mut self) -> Result<PeerId> {
         let quic_port = self.quic.local_addr()?.port();
+        let peer_id = self.record_id.clone();
 
-        let peer_id = self
-            .signaling
-            .register_peer(&self.name, quic_port, &self.identity.fingerprint)
+        self.signaling
+            .register_peer(
+                &peer_id,
+                &self.name,
+                quic_port,
+                &self.identity.fingerprint,
+                self.lease_secs,
+            )
             .await?;
 
         if let Some(addr) = self.srflx_addr {
@@ -151,6 +171,34 @@ impl Peer {
         }
 
         self.peer_id = Some(peer_id.clone());
+
+        let signaling = self.signaling.clone();
+        let renew_id = peer_id.clone();
+        let renew_name = self.name.clone();
+        let renew_fingerprint = self.identity.fingerprint.clone();
+        let lease_secs = self.lease_secs;
+        self.heartbeat = Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                heartbeat_interval_secs(lease_secs),
+            ));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(e) = signaling
+                    .ensure_registered(
+                        &renew_id,
+                        &renew_name,
+                        quic_port,
+                        &renew_fingerprint,
+                        lease_secs,
+                    )
+                    .await
+                {
+                    warn!(peer_id = renew_id, error = %e, "peer presence renewal failed");
+                }
+            }
+        }));
+
         info!(peer_id, name = self.name, "peer registered");
         Ok(peer_id)
     }
@@ -371,6 +419,7 @@ impl Peer {
             quic_port: remote_addr.port(),
             cert_fingerprint: offer.cert_fingerprint,
             public_addr: Some(remote_addr.to_string()),
+            expires_at: None,
         };
 
         info!(
@@ -385,13 +434,24 @@ impl Peer {
         })
     }
 
-    pub async fn shutdown(self) -> Result<()> {
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(handle) = self.heartbeat.take() {
+            handle.abort();
+        }
         if let Some(peer_id) = &self.peer_id {
             let _ = self.signaling.deregister_peer(peer_id).await;
         }
         self.quic.close();
         info!("peer shut down");
         Ok(())
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.heartbeat.take() {
+            handle.abort();
+        }
     }
 }
 
