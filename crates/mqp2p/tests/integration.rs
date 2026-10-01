@@ -57,8 +57,17 @@ fn delete_peer_record(port: u16, id: &str) {
     let broker = format!("127.0.0.1:{port}");
     let status = Command::new("mqdb")
         .args([
-            "delete", "peers", id, "--broker", &broker, "--user", "testuser", "--pass", "testpass",
-            "--timeout", "5",
+            "delete",
+            "peers",
+            id,
+            "--broker",
+            &broker,
+            "--user",
+            "testuser",
+            "--pass",
+            "testpass",
+            "--timeout",
+            "5",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -72,8 +81,18 @@ fn wait_for_broker_ready(port: u16) {
     for _ in 0..100 {
         let ok = Command::new("mqdb")
             .args([
-                "list", "peers", "--broker", &broker, "--user", "testuser", "--pass", "testpass",
-                "--timeout", "2", "--limit", "1",
+                "list",
+                "peers",
+                "--broker",
+                &broker,
+                "--user",
+                "testuser",
+                "--pass",
+                "testpass",
+                "--timeout",
+                "2",
+                "--limit",
+                "1",
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -247,7 +266,10 @@ async fn presence_lease_expires_without_heartbeat() {
     )
     .await
     .expect("observer creation failed");
-    observer.register().await.expect("observer registration failed");
+    observer
+        .register()
+        .await
+        .expect("observer registration failed");
 
     let ephemeral_id = {
         let mut ephemeral = Peer::new(
@@ -270,7 +292,10 @@ async fn presence_lease_expires_without_heartbeat() {
             .expect("discovery failed")
             .into_iter()
             .any(|p| p.id == id);
-        assert!(seen, "ephemeral peer should be discoverable while registered");
+        assert!(
+            seen,
+            "ephemeral peer should be discoverable while registered"
+        );
 
         id
     };
@@ -279,7 +304,9 @@ async fn presence_lease_expires_without_heartbeat() {
     loop {
         let peers = observer.discover_peers().await.expect("discovery failed");
         let ephemeral_present = peers.iter().any(|p| p.id == ephemeral_id);
-        let observer_present = peers.iter().any(|p| Some(p.id.as_str()) == observer.peer_id());
+        let observer_present = peers
+            .iter()
+            .any(|p| Some(p.id.as_str()) == observer.peer_id());
 
         assert!(
             observer_present,
@@ -375,7 +402,9 @@ async fn reregister_preserves_public_addr() {
         .with_credentials("testuser", b"testpass");
     let client = mqtt5::client::MqttClient::with_options(opts);
     let sig = mqp2p::signaling::SignalingClient::new(client);
-    sig.connect(&broker_addr).await.expect("signaling connect failed");
+    sig.connect(&broker_addr)
+        .await
+        .expect("signaling connect failed");
 
     let id = "peer-with-public-addr";
     let public_addr = "203.0.113.5:9000";

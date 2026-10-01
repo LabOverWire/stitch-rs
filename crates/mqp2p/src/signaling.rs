@@ -151,8 +151,15 @@ impl SignalingClient {
             Ok(()) => Ok(()),
             Err(e) => {
                 debug!(peer_id = id, error = %e, "lease renewal failed, re-creating record");
-                self.register_peer(id, name, quic_port, cert_fingerprint, public_addr, lease_secs)
-                    .await
+                self.register_peer(
+                    id,
+                    name,
+                    quic_port,
+                    cert_fingerprint,
+                    public_addr,
+                    lease_secs,
+                )
+                .await
             }
         }
     }
