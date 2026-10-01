@@ -352,3 +352,62 @@ async fn presence_recreates_after_record_reaped() {
 
     resilient.shutdown().await.expect("shutdown failed");
 }
+
+#[tokio::test]
+async fn reregister_preserves_public_addr() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn")
+        .with_test_writer()
+        .try_init();
+
+    let tmpdir = tempfile::tempdir().expect("failed to create tmpdir");
+    let db_dir = tmpdir.path().join("db");
+    std::fs::create_dir_all(&db_dir).expect("failed to create db dir");
+    let passwd_file = create_passwd_file(tmpdir.path());
+
+    let broker_port = pick_free_port();
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file);
+    wait_for_port(broker_port);
+    wait_for_broker_ready(broker_port);
+
+    let broker_addr = format!("127.0.0.1:{broker_port}");
+    let opts = mqtt5::ConnectOptions::new("sig-test".to_string())
+        .with_credentials("testuser", b"testpass");
+    let client = mqtt5::client::MqttClient::with_options(opts);
+    let sig = mqp2p::signaling::SignalingClient::new(client);
+    sig.connect(&broker_addr).await.expect("signaling connect failed");
+
+    let id = "peer-with-public-addr";
+    let public_addr = "203.0.113.5:9000";
+    sig.register_peer(id, "edge", 4433, "fp-abc", Some(public_addr), 2)
+        .await
+        .expect("register failed");
+
+    let found = sig
+        .list_peers()
+        .await
+        .expect("list failed")
+        .into_iter()
+        .find(|p| p.id == id)
+        .expect("peer should be present after registration");
+    assert_eq!(found.public_addr.as_deref(), Some(public_addr));
+
+    delete_peer_record(broker_port, id);
+
+    sig.ensure_registered(id, "edge", 4433, "fp-abc", Some(public_addr), 2)
+        .await
+        .expect("ensure_registered failed");
+
+    let found = sig
+        .list_peers()
+        .await
+        .expect("list failed")
+        .into_iter()
+        .find(|p| p.id == id)
+        .expect("peer should be present after re-create");
+    assert_eq!(
+        found.public_addr.as_deref(),
+        Some(public_addr),
+        "public_addr must survive re-registration"
+    );
+}

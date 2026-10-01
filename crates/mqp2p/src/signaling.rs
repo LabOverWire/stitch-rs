@@ -11,6 +11,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
 pub const PEER_LEASE_SECS: u64 = 15;
 
+pub const MIN_LEASE_SECS: u64 = 2;
+
 pub fn heartbeat_interval_secs(lease_secs: u64) -> u64 {
     (lease_secs / 3).max(1)
 }
@@ -23,7 +25,7 @@ fn unix_now_secs() -> u64 {
 }
 
 fn peer_is_live(expires_at: Option<u64>, now: u64) -> bool {
-    expires_at.map(|e| e >= now).unwrap_or(true)
+    expires_at.map(|e| e > now).unwrap_or(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,9 +99,10 @@ impl SignalingClient {
         name: &str,
         quic_port: u16,
         cert_fingerprint: &str,
+        public_addr: Option<&str>,
         lease_secs: u64,
     ) -> Result<()> {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "id": id,
             "name": name,
             "status": "online",
@@ -107,6 +110,9 @@ impl SignalingClient {
             "cert_fingerprint": cert_fingerprint,
             "_expires_at": unix_now_secs() + lease_secs,
         });
+        if let Some(addr) = public_addr {
+            payload["public_addr"] = Value::String(addr.to_string());
+        }
 
         let response = self
             .publish_and_wait("$DB/peers/create", &serde_json::to_vec(&payload)?)
@@ -138,12 +144,14 @@ impl SignalingClient {
         name: &str,
         quic_port: u16,
         cert_fingerprint: &str,
+        public_addr: Option<&str>,
         lease_secs: u64,
     ) -> Result<()> {
         match self.renew_lease(id, lease_secs).await {
             Ok(()) => Ok(()),
-            Err(_) => {
-                self.register_peer(id, name, quic_port, cert_fingerprint, lease_secs)
+            Err(e) => {
+                debug!(peer_id = id, error = %e, "lease renewal failed, re-creating record");
+                self.register_peer(id, name, quic_port, cert_fingerprint, public_addr, lease_secs)
                     .await
             }
         }
@@ -370,7 +378,11 @@ mod tests {
     #[test]
     fn future_lease_is_live() {
         assert!(peer_is_live(Some(1001), 1000));
-        assert!(peer_is_live(Some(1000), 1000));
+    }
+
+    #[test]
+    fn lease_at_current_second_is_stale() {
+        assert!(!peer_is_live(Some(1000), 1000));
     }
 
     #[test]

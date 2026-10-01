@@ -1,8 +1,8 @@
 use crate::error::{Error, Result};
 use crate::quic::{self, CertIdentity, QuicEndpoint};
 use crate::signaling::{
-    Candidate, CandidateKind, ConnectionOffer, ConnectionSync, PEER_LEASE_SECS, PeerInfo,
-    SignalingClient, heartbeat_interval_secs,
+    Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
+    PeerInfo, SignalingClient, heartbeat_interval_secs,
 };
 use crate::stun;
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
@@ -35,7 +35,7 @@ impl PeerConfig {
     }
 
     pub fn with_lease_secs(mut self, lease_secs: u64) -> Self {
-        self.lease_secs = lease_secs.max(1);
+        self.lease_secs = lease_secs;
         self
     }
 
@@ -147,7 +147,7 @@ impl Peer {
             std_socket,
             host_addr,
             srflx_addr,
-            lease_secs: config.lease_secs,
+            lease_secs: config.lease_secs.max(MIN_LEASE_SECS),
             heartbeat: None,
         })
     }
@@ -155,6 +155,7 @@ impl Peer {
     pub async fn register(&mut self) -> Result<PeerId> {
         let quic_port = self.quic.local_addr()?.port();
         let peer_id = self.record_id.clone();
+        let public_addr = self.srflx_addr.map(|a| a.to_string());
 
         self.signaling
             .register_peer(
@@ -162,20 +163,22 @@ impl Peer {
                 &self.name,
                 quic_port,
                 &self.identity.fingerprint,
+                public_addr.as_deref(),
                 self.lease_secs,
             )
             .await?;
 
-        if let Some(addr) = self.srflx_addr {
-            self.signaling.update_peer_addr(&peer_id, addr).await?;
-        }
-
         self.peer_id = Some(peer_id.clone());
+
+        if let Some(handle) = self.heartbeat.take() {
+            handle.abort();
+        }
 
         let signaling = self.signaling.clone();
         let renew_id = peer_id.clone();
         let renew_name = self.name.clone();
         let renew_fingerprint = self.identity.fingerprint.clone();
+        let renew_public_addr = public_addr;
         let lease_secs = self.lease_secs;
         self.heartbeat = Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
@@ -190,6 +193,7 @@ impl Peer {
                         &renew_name,
                         quic_port,
                         &renew_fingerprint,
+                        renew_public_addr.as_deref(),
                         lease_secs,
                     )
                     .await
