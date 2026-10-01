@@ -4,10 +4,29 @@ use mqtt5::types::{PublishOptions, PublishProperties};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, trace};
 
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+pub const PEER_LEASE_SECS: u64 = 15;
+
+pub const MIN_LEASE_SECS: u64 = 2;
+
+pub fn heartbeat_interval_secs(lease_secs: u64) -> u64 {
+    (lease_secs / 3).max(1)
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn peer_is_live(expires_at: Option<u64>, now: u64) -> bool {
+    expires_at.map(|e| e > now).unwrap_or(true)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -18,6 +37,8 @@ pub struct PeerInfo {
     pub cert_fingerprint: String,
     #[serde(default)]
     pub public_addr: Option<String>,
+    #[serde(rename = "_expires_at", default)]
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +70,7 @@ pub enum CandidateKind {
     Srflx,
 }
 
+#[derive(Clone)]
 pub struct SignalingClient {
     client: MqttClient,
 }
@@ -73,31 +95,73 @@ impl SignalingClient {
 
     pub async fn register_peer(
         &self,
+        id: &str,
         name: &str,
         quic_port: u16,
         cert_fingerprint: &str,
-    ) -> Result<String> {
-        let payload = serde_json::json!({
+        public_addr: Option<&str>,
+        lease_secs: u64,
+    ) -> Result<()> {
+        let mut payload = serde_json::json!({
+            "id": id,
             "name": name,
             "status": "online",
             "quic_port": quic_port,
             "cert_fingerprint": cert_fingerprint,
+            "_expires_at": unix_now_secs() + lease_secs,
         });
+        if let Some(addr) = public_addr {
+            payload["public_addr"] = Value::String(addr.to_string());
+        }
 
         let response = self
             .publish_and_wait("$DB/peers/create", &serde_json::to_vec(&payload)?)
             .await?;
 
         check_response(&response)?;
-
-        let id = response
-            .pointer("/data/id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Signaling("no peer ID in create response".into()))?
-            .to_string();
-
         debug!(peer_id = id, name, "peer registered");
-        Ok(id)
+        Ok(())
+    }
+
+    pub async fn renew_lease(&self, peer_id: &str, lease_secs: u64) -> Result<()> {
+        let topic = format!("$DB/peers/{peer_id}/update");
+        let payload = serde_json::json!({
+            "_expires_at": unix_now_secs() + lease_secs,
+        });
+
+        let response = self
+            .publish_and_wait(&topic, &serde_json::to_vec(&payload)?)
+            .await?;
+
+        check_response(&response)?;
+        trace!(peer_id, "peer lease renewed");
+        Ok(())
+    }
+
+    pub async fn ensure_registered(
+        &self,
+        id: &str,
+        name: &str,
+        quic_port: u16,
+        cert_fingerprint: &str,
+        public_addr: Option<&str>,
+        lease_secs: u64,
+    ) -> Result<()> {
+        match self.renew_lease(id, lease_secs).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                debug!(peer_id = id, error = %e, "lease renewal failed, re-creating record");
+                self.register_peer(
+                    id,
+                    name,
+                    quic_port,
+                    cert_fingerprint,
+                    public_addr,
+                    lease_secs,
+                )
+                .await
+            }
+        }
     }
 
     pub async fn update_peer_addr(&self, peer_id: &str, public_addr: SocketAddr) -> Result<()> {
@@ -131,9 +195,11 @@ impl SignalingClient {
             other => vec![other],
         };
 
+        let now = unix_now_secs();
         let peers: Vec<PeerInfo> = items
             .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
+            .filter_map(|v| serde_json::from_value::<PeerInfo>(v).ok())
+            .filter(|p| peer_is_live(p.expires_at, now))
             .collect();
 
         debug!(count = peers.len(), "peers discovered");
@@ -304,5 +370,68 @@ fn check_response(response: &Value) -> Result<()> {
             .unwrap_or("unknown error");
         error!(status, msg, "signaling DB operation failed");
         Err(Error::Signaling(format!("DB error: {msg}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leaseless_peer_is_live() {
+        assert!(peer_is_live(None, 1000));
+    }
+
+    #[test]
+    fn future_lease_is_live() {
+        assert!(peer_is_live(Some(1001), 1000));
+    }
+
+    #[test]
+    fn lease_at_current_second_is_stale() {
+        assert!(!peer_is_live(Some(1000), 1000));
+    }
+
+    #[test]
+    fn past_lease_is_stale() {
+        assert!(!peer_is_live(Some(999), 1000));
+    }
+
+    #[test]
+    fn heartbeat_interval_is_a_third_of_lease_min_one() {
+        assert_eq!(heartbeat_interval_secs(15), 5);
+        assert_eq!(heartbeat_interval_secs(3), 1);
+        assert_eq!(heartbeat_interval_secs(2), 1);
+        assert_eq!(heartbeat_interval_secs(1), 1);
+    }
+
+    #[test]
+    fn expires_at_round_trips_as_mqdb_field() {
+        let info = PeerInfo {
+            id: "p1".into(),
+            name: "edge".into(),
+            status: "online".into(),
+            quic_port: 4433,
+            cert_fingerprint: "ab".into(),
+            public_addr: None,
+            expires_at: Some(1234),
+        };
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json.get("_expires_at").and_then(Value::as_u64), Some(1234));
+        let back: PeerInfo = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.expires_at, Some(1234));
+    }
+
+    #[test]
+    fn missing_expires_at_deserializes_to_none() {
+        let json = serde_json::json!({
+            "id": "p1",
+            "name": "edge",
+            "status": "online",
+            "quic_port": 4433,
+            "cert_fingerprint": "ab",
+        });
+        let info: PeerInfo = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(info.expires_at, None);
     }
 }
