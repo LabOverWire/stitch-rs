@@ -52,7 +52,22 @@ pub fn compute_fingerprint(cert_der: &[u8]) -> String {
     format!("sha256:{hex}")
 }
 
-fn build_server_config(identity: &CertIdentity) -> Result<ServerConfig> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentationOffload {
+    Enabled,
+    Disabled,
+}
+
+fn transport_config(offload: SegmentationOffload) -> Arc<quinn::TransportConfig> {
+    let mut transport = quinn::TransportConfig::default();
+    transport.enable_segmentation_offload(offload == SegmentationOffload::Enabled);
+    Arc::new(transport)
+}
+
+fn build_server_config(
+    identity: &CertIdentity,
+    offload: SegmentationOffload,
+) -> Result<ServerConfig> {
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
 
@@ -66,12 +81,15 @@ fn build_server_config(identity: &CertIdentity) -> Result<ServerConfig> {
     let quic_server_config = quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
         .map_err(|e| Error::Quic(format!("QUIC server config failed: {e}")))?;
 
-    Ok(ServerConfig::with_crypto(Arc::new(quic_server_config)))
+    let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
+    server_config.transport_config(transport_config(offload));
+    Ok(server_config)
 }
 
 fn build_client_config(
     identity: &CertIdentity,
     expected_fingerprint: &str,
+    offload: SegmentationOffload,
 ) -> Result<quinn::ClientConfig> {
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
@@ -89,7 +107,9 @@ fn build_client_config(
     let quic_client_config = quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
         .map_err(|e| Error::Quic(format!("QUIC client config failed: {e}")))?;
 
-    Ok(quinn::ClientConfig::new(Arc::new(quic_client_config)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
+    client_config.transport_config(transport_config(offload));
+    Ok(client_config)
 }
 
 #[derive(Debug)]
@@ -215,11 +235,20 @@ impl rustls::server::danger::ClientCertVerifier for CollectClientCert {
 pub struct QuicEndpoint {
     endpoint: Endpoint,
     identity: CertIdentity,
+    offload: SegmentationOffload,
 }
 
 impl QuicEndpoint {
     pub fn bind(socket: std::net::UdpSocket, identity: CertIdentity) -> Result<Self> {
-        let server_config = build_server_config(&identity)?;
+        Self::bind_with_offload(socket, identity, SegmentationOffload::Enabled)
+    }
+
+    pub fn bind_with_offload(
+        socket: std::net::UdpSocket,
+        identity: CertIdentity,
+        offload: SegmentationOffload,
+    ) -> Result<Self> {
+        let server_config = build_server_config(&identity, offload)?;
         let runtime = quinn::default_runtime()
             .ok_or_else(|| Error::Quic("no async runtime available".into()))?;
 
@@ -234,9 +263,13 @@ impl QuicEndpoint {
         let local = endpoint
             .local_addr()
             .map_err(|e| Error::Quic(format!("{e}")))?;
-        info!(addr = %local, "QUIC endpoint bound");
+        info!(addr = %local, ?offload, "QUIC endpoint bound");
 
-        Ok(Self { endpoint, identity })
+        Ok(Self {
+            endpoint,
+            identity,
+            offload,
+        })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
@@ -250,7 +283,7 @@ impl QuicEndpoint {
     }
 
     pub async fn connect(&self, addr: SocketAddr, remote_fingerprint: &str) -> Result<Connection> {
-        let client_config = build_client_config(&self.identity, remote_fingerprint)?;
+        let client_config = build_client_config(&self.identity, remote_fingerprint, self.offload)?;
 
         let connection = self
             .endpoint
