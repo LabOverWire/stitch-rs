@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::quic::{self, CertIdentity, QuicEndpoint};
+use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
     PeerInfo, SignalingClient, heartbeat_interval_secs,
@@ -20,6 +20,7 @@ pub struct PeerConfig {
     pub stun_server: Option<String>,
     pub credentials: Option<(String, String)>,
     pub lease_secs: u64,
+    pub segmentation_offload: SegmentationOffload,
 }
 
 impl PeerConfig {
@@ -31,6 +32,7 @@ impl PeerConfig {
             stun_server: Some(stun::DEFAULT_STUN_SERVER.into()),
             credentials: None,
             lease_secs: PEER_LEASE_SECS,
+            segmentation_offload: SegmentationOffload::Enabled,
         }
     }
 
@@ -51,6 +53,11 @@ impl PeerConfig {
 
     pub fn without_stun(mut self) -> Self {
         self.stun_server = None;
+        self
+    }
+
+    pub fn without_segmentation_offload(mut self) -> Self {
+        self.segmentation_offload = SegmentationOffload::Disabled;
         self
     }
 
@@ -118,13 +125,14 @@ impl Peer {
         };
 
         let quic_socket = std_socket.try_clone()?;
-        let quic = QuicEndpoint::bind(
+        let quic = QuicEndpoint::bind_with_offload(
             quic_socket,
             CertIdentity {
                 cert_der: identity.cert_der.clone(),
                 key_der: identity.key_der.clone(),
                 fingerprint: identity.fingerprint.clone(),
             },
+            config.segmentation_offload,
         )?;
 
         let client_id = format!("mqp2p-{}", config.name);
