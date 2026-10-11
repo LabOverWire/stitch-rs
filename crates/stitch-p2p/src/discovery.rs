@@ -61,6 +61,16 @@ fn track(bridges: &Bridges, handle: JoinHandle<()>) {
 impl Swarm {
     #[must_use]
     pub fn spawn(peer: Arc<Peer>, node: SyncNode, pull_interval: Duration) -> Self {
+        Self::spawn_with_discovery_interval(peer, node, pull_interval, pull_interval)
+    }
+
+    #[must_use]
+    pub fn spawn_with_discovery_interval(
+        peer: Arc<Peer>,
+        node: SyncNode,
+        pull_interval: Duration,
+        discovery_interval: Duration,
+    ) -> Self {
         let connected: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let bridges: Bridges = Arc::new(Mutex::new(Vec::new()));
         let accept = tokio::spawn(accept_loop(
@@ -76,6 +86,7 @@ impl Swarm {
             connected,
             Arc::clone(&bridges),
             pull_interval,
+            discovery_interval,
         ));
         Self {
             handles: vec![accept, connect],
@@ -135,6 +146,7 @@ async fn connect_loop(
     connected: Arc<Mutex<HashSet<String>>>,
     bridges: Bridges,
     pull_interval: Duration,
+    discovery_interval: Duration,
 ) {
     let my_id = match peer.peer_id() {
         Some(id) => id.to_string(),
@@ -171,7 +183,7 @@ async fn connect_loop(
                 }
             }
         }
-        tokio::time::sleep(pull_interval).await;
+        tokio::time::sleep(discovery_interval).await;
     }
 }
 
