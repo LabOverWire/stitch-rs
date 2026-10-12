@@ -87,6 +87,7 @@ Implemented and tested (the full verified core, transport excluded):
   `stitch-tasks` demo. `tests/discovery_broker.rs` runs two peers through a real
   `mqdb` broker — register, discover, NAT-traverse to QUIC, and converge — end to
   end.
+  `Swarm::spawn` polls the broker for peers at the sync `pull_interval`; `Swarm::spawn_with_discovery_interval` sets a separate, usually longer, discovery interval so the broker is not queried as often as sessions pull.
 
 - `store` — `Store`, the app-facing document facade over `SyncNode`. JSON
   records keyed by `(entity, id)`; `create`/`read`/`update` (read-merge-write)/

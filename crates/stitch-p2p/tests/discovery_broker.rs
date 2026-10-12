@@ -94,6 +94,21 @@ async fn make_peer(name: &str, broker: &str) -> (Arc<Peer>, SyncNode) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_peers_discover_and_sync_over_broker() {
+    let pull = Duration::from_millis(500);
+    discover_and_sync(|peer, node| Swarm::spawn(peer, node, pull)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_polls_on_its_own_interval() {
+    let pull = Duration::from_millis(500);
+    let discovery = Duration::from_secs(3);
+    discover_and_sync(|peer, node| {
+        Swarm::spawn_with_discovery_interval(peer, node, pull, discovery)
+    })
+    .await;
+}
+
+async fn discover_and_sync(spawn: impl Fn(Arc<Peer>, SyncNode) -> Swarm) {
     if !mqdb_available() {
         eprintln!("skipping: `mqdb` binary not found on PATH");
         return;
@@ -112,9 +127,8 @@ async fn two_peers_discover_and_sync_over_broker() {
     let (peer_a, node_a) = make_peer("alice", &broker_addr).await;
     let (peer_b, node_b) = make_peer("bob", &broker_addr).await;
 
-    let pull = Duration::from_millis(500);
-    let swarm_a = Swarm::spawn(peer_a, node_a.clone(), pull);
-    let swarm_b = Swarm::spawn(peer_b, node_b.clone(), pull);
+    let swarm_a = spawn(peer_a, node_a.clone());
+    let swarm_b = spawn(peer_b, node_b.clone());
 
     node_a
         .local_write(Op::Insert, "task", "t1", b"from-alice".to_vec())
