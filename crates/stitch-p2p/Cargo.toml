@@ -17,6 +17,7 @@ mqp2p = { version = "0.3.0", path = "../mqp2p", optional = true }
 serde_json = { version = "1.0.150", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["sync", "io-util", "macros", "rt", "rt-multi-thread", "time", "net"] }
+tracing = "0.1.44"
 
 [dev-dependencies]
 tempfile = "3.27.0"

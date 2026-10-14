@@ -21,6 +21,8 @@ pub enum WireError {
     EntityTooLong,
     #[error("id exceeds 255 bytes")]
     IdTooLong,
+    #[error("payload exceeds u32::MAX bytes")]
+    DataTooLong,
     #[error("entity or id is not valid UTF-8")]
     Utf8,
     #[error("invalid signature presence flag {0}")]
@@ -60,7 +62,7 @@ impl WriteFrame {
         let id_bytes = self.id.as_bytes();
         let entity_len = u8::try_from(entity_bytes.len()).map_err(|_| WireError::EntityTooLong)?;
         let id_len = u8::try_from(id_bytes.len()).map_err(|_| WireError::IdTooLong)?;
-        let data_len = u32::try_from(self.data.len()).expect("payload exceeds u32");
+        let data_len = u32::try_from(self.data.len()).map_err(|_| WireError::DataTooLong)?;
 
         let mut out =
             Vec::with_capacity(HEADER_LEN + entity_bytes.len() + id_bytes.len() + self.data.len());
@@ -172,6 +174,15 @@ impl WriteFrame {
                 0
             }
     }
+}
+
+/// Check that a write with these fields fits the frame format, so a frame
+/// built from them always encodes.
+pub fn check_lengths(entity: &str, id: &str, data: &[u8]) -> Result<(), WireError> {
+    u8::try_from(entity.len()).map_err(|_| WireError::EntityTooLong)?;
+    u8::try_from(id.len()).map_err(|_| WireError::IdTooLong)?;
+    u32::try_from(data.len()).map_err(|_| WireError::DataTooLong)?;
+    Ok(())
 }
 
 fn op_to_u8(op: Op) -> u8 {

@@ -14,6 +14,9 @@ pub enum RecordOutcome {
     },
     /// The frame failed authentication/authorization and was not recorded.
     Rejected,
+    /// The frame could not be written to durable storage and was not
+    /// recorded; the peer offers it again on a later pull.
+    Unpersisted,
 }
 
 #[derive(Debug)]
@@ -56,20 +59,29 @@ impl ReplLog {
         self.cursor_for(origin) + 1
     }
 
-    pub fn record(&mut self, frame: WriteFrame) -> RecordOutcome {
-        let origin = frame.stamp.peer;
-        let have = self.cursor_for(&origin);
-        if frame.seq <= have {
-            return RecordOutcome::Duplicate;
-        }
-        if frame.seq != have + 1 {
-            return RecordOutcome::Gap {
+    /// What [`ReplLog::record`] would do with `frame`, without recording it.
+    #[must_use]
+    pub fn classify(&self, frame: &WriteFrame) -> RecordOutcome {
+        let have = self.cursor_for(&frame.stamp.peer);
+        match frame.seq {
+            seq if seq <= have => RecordOutcome::Duplicate,
+            seq if seq == have + 1 => RecordOutcome::Appended,
+            got => RecordOutcome::Gap {
                 expected: have + 1,
-                got: frame.seq,
-            };
+                got,
+            },
         }
-        self.observed.entry(origin).or_default().push(frame);
-        RecordOutcome::Appended
+    }
+
+    pub fn record(&mut self, frame: WriteFrame) -> RecordOutcome {
+        let outcome = self.classify(&frame);
+        if outcome == RecordOutcome::Appended {
+            self.observed
+                .entry(frame.stamp.peer)
+                .or_default()
+                .push(frame);
+        }
+        outcome
     }
 
     #[must_use]

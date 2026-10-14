@@ -12,7 +12,7 @@ use rand::{RngExt, SeedableRng};
 use std::collections::HashMap;
 use std::time::Duration;
 use stitch_p2p::membership::Role;
-use stitch_p2p::{Identity, PeerId, Store, session};
+use stitch_p2p::{Identity, PeerId, Store, StoreError, session};
 use tokio::io::split;
 use tokio::task::JoinHandle;
 
@@ -72,18 +72,19 @@ impl Cluster {
     }
 
     /// Owner invites every other peer as a member.
-    pub async fn invite_all(&self) {
+    pub async fn invite_all(&self) -> Result<(), StoreError> {
         for i in 1..self.boards.len() {
             self.boards[0]
                 .store()
                 .invite(self.ids[i], Role::Member)
-                .await;
+                .await?;
         }
+        Ok(())
     }
 
     /// Owner revokes peer `i`.
-    pub async fn revoke(&self, i: usize) {
-        self.boards[0].store().revoke(self.ids[i]).await;
+    pub async fn revoke(&self, i: usize) -> Result<(), StoreError> {
+        self.boards[0].store().revoke(self.ids[i]).await
     }
 
     /// Establish a bidirectional session between peers `a` and `b` (idempotent).
@@ -220,10 +221,10 @@ pub struct ChaosReport {
 /// Run a randomized, partition-and-membership-churning workload against a fresh
 /// cluster, then heal, restore membership, and wait for convergence. Returns a
 /// report; `report.converged` is the invariant a caller asserts.
-pub async fn run_chaos(cfg: Chaos) -> (Chaos, ChaosReport) {
+pub async fn run_chaos(cfg: Chaos) -> Result<(Chaos, ChaosReport), StoreError> {
     let mut cluster = Cluster::new(cfg.peers, cfg.pull);
     cluster.full_mesh();
-    cluster.invite_all().await;
+    cluster.invite_all().await?;
 
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let ids: Vec<String> = (0..cfg.id_pool).map(|i| format!("t{i}")).collect();
@@ -235,21 +236,23 @@ pub async fn run_chaos(cfg: Chaos) -> (Chaos, ChaosReport) {
         let id = ids[rng.random_range(0..cfg.id_pool)].clone();
         match rng.random_range(0..4u8) {
             0 => {
-                board.add(&id, &format!("t-{}", rng.random::<u16>())).await;
+                board
+                    .add(&id, &format!("t-{}", rng.random::<u16>()))
+                    .await?;
                 report.adds += 1;
             }
             1 => {
                 board
                     .rename(&id, &format!("r-{}", rng.random::<u16>()))
-                    .await;
+                    .await?;
                 report.renames += 1;
             }
             2 => {
-                board.set_done(&id, rng.random::<bool>()).await;
+                board.set_done(&id, rng.random::<bool>()).await?;
                 report.toggles += 1;
             }
             _ => {
-                board.remove(&id).await;
+                board.remove(&id).await?;
                 report.removes += 1;
             }
         }
@@ -269,7 +272,7 @@ pub async fn run_chaos(cfg: Chaos) -> (Chaos, ChaosReport) {
         }
 
         if cfg.peers > 1 && rng.random_range(0..40u8) == 0 {
-            cluster.revoke(rng.random_range(1..cfg.peers)).await;
+            cluster.revoke(rng.random_range(1..cfg.peers)).await?;
             report.revokes += 1;
         }
 
@@ -277,8 +280,8 @@ pub async fn run_chaos(cfg: Chaos) -> (Chaos, ChaosReport) {
     }
 
     cluster.full_mesh();
-    cluster.invite_all().await;
+    cluster.invite_all().await?;
     report.converged = cluster.await_convergence(Duration::from_secs(20)).await;
     report.final_tasks = cluster.board(0).len().await;
-    (cfg, report)
+    Ok((cfg, report))
 }

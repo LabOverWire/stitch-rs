@@ -122,7 +122,9 @@ async fn run_peer(args: &[String]) {
         for member in PEERS {
             if member != OWNER {
                 let id = Identity::from_seed(seed_from_name(member)).peer_id();
-                board.store().invite(id, Role::Member).await;
+                if let Err(error) = board.store().invite(id, Role::Member).await {
+                    emit(&format!("ERR {name} invite {member}: {error}"));
+                }
             }
         }
     }
@@ -165,11 +167,17 @@ async fn run_peer(args: &[String]) {
         let cmd = parts.next().unwrap_or("");
         let id = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("");
+        let written = match cmd {
+            "add" => Some(board.add(id, rest).await),
+            "rename" => Some(board.rename(id, rest).await),
+            "done" => Some(board.set_done(id, rest == "true").await),
+            "remove" => Some(board.remove(id).await),
+            _ => None,
+        };
+        if let Some(Err(error)) = written {
+            emit(&format!("ERR {name} {cmd} {id}: {error}"));
+        }
         match cmd {
-            "add" => board.add(id, rest).await,
-            "rename" => board.rename(id, rest).await,
-            "done" => board.set_done(id, rest == "true").await,
-            "remove" => board.remove(id).await,
             "offline" => {
                 if let Some((peer, swarm)) = link.take() {
                     disconnect(peer, swarm).await;

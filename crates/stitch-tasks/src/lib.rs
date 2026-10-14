@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-use stitch_p2p::Store;
+use stitch_p2p::{Store, StoreError};
 
 pub mod harness;
 
@@ -41,27 +41,26 @@ impl TaskBoard {
 
     /// Add a task under `id` (caller supplies the id so the harness can pick
     /// collision-prone ids deliberately).
-    pub async fn add(&self, id: &str, title: &str) {
-        let _ = self
-            .store
+    pub async fn add(&self, id: &str, title: &str) -> Result<(), StoreError> {
+        self.store
             .create(ENTITY, id, json!({ "title": title, "done": false }))
-            .await;
+            .await
     }
 
-    pub async fn rename(&self, id: &str, title: &str) {
+    pub async fn rename(&self, id: &str, title: &str) -> Result<(), StoreError> {
         let mut fields = serde_json::Map::new();
         fields.insert("title".into(), json!(title));
-        let _ = self.store.update(ENTITY, id, fields).await;
+        self.store.update(ENTITY, id, fields).await
     }
 
-    pub async fn set_done(&self, id: &str, done: bool) {
+    pub async fn set_done(&self, id: &str, done: bool) -> Result<(), StoreError> {
         let mut fields = serde_json::Map::new();
         fields.insert("done".into(), json!(done));
-        let _ = self.store.update(ENTITY, id, fields).await;
+        self.store.update(ENTITY, id, fields).await
     }
 
-    pub async fn remove(&self, id: &str) {
-        self.store.delete(ENTITY, id).await;
+    pub async fn remove(&self, id: &str) -> Result<(), StoreError> {
+        self.store.delete(ENTITY, id).await
     }
 
     #[must_use]
@@ -107,8 +106,8 @@ mod tests {
     #[tokio::test]
     async fn add_get_snapshot() {
         let board = TaskBoard::new(Store::new(peer(1)));
-        board.add("t1", "write tests").await;
-        board.add("t2", "ship it").await;
+        board.add("t1", "write tests").await.expect("write");
+        board.add("t2", "ship it").await.expect("write");
         assert_eq!(
             board.get("t1").await,
             Some(Task {
@@ -122,9 +121,9 @@ mod tests {
     #[tokio::test]
     async fn rename_toggle_remove() {
         let board = TaskBoard::new(Store::new(peer(1)));
-        board.add("t1", "draft").await;
-        board.rename("t1", "final").await;
-        board.set_done("t1", true).await;
+        board.add("t1", "draft").await.expect("write");
+        board.rename("t1", "final").await.expect("write");
+        board.set_done("t1", true).await.expect("write");
         assert_eq!(
             board.get("t1").await,
             Some(Task {
@@ -132,7 +131,7 @@ mod tests {
                 done: true
             })
         );
-        board.remove("t1").await;
+        board.remove("t1").await.expect("write");
         assert_eq!(board.get("t1").await, None);
         assert!(board.is_empty().await);
     }

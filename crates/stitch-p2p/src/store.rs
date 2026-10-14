@@ -1,7 +1,7 @@
 use crate::hlc::PeerId;
 use crate::lww::Op;
 use crate::node::SyncNode;
-use crate::sync_state::MutationEvent;
+use crate::sync_state::{MutationEvent, WriteError};
 use serde_json::{Map, Value};
 use tokio::sync::broadcast;
 
@@ -28,6 +28,8 @@ pub struct Store {
 pub enum StoreError {
     #[error("serialize: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    Write(#[from] WriteError),
 }
 
 impl Store {
@@ -48,7 +50,7 @@ impl Store {
     ) -> Result<Self, crate::persistence::PersistError> {
         let log = std::sync::Arc::new(crate::persistence::FjallLog::open(path)?);
         Ok(Self {
-            node: SyncNode::with_persister(self_id, log),
+            node: SyncNode::with_persister(self_id, log)?,
             owner: None,
         })
     }
@@ -106,7 +108,7 @@ impl Store {
     ) -> Result<Self, crate::persistence::PersistError> {
         let log = std::sync::Arc::new(crate::persistence::FjallLog::open(path)?);
         let mut state = crate::SyncState::new(identity.peer_id());
-        for frame in crate::FramePersister::load(log.as_ref()) {
+        for frame in crate::FramePersister::load(log.as_ref())? {
             state.replay(frame);
         }
         state.set_persister(log);
@@ -126,7 +128,7 @@ impl Store {
     /// Insert or replace a record.
     pub async fn create(&self, entity: &str, id: &str, record: Value) -> Result<(), StoreError> {
         let data = serde_json::to_vec(&record)?;
-        self.node.local_write(Op::Insert, entity, id, data).await;
+        self.node.local_write(Op::Insert, entity, id, data).await?;
         Ok(())
     }
 
@@ -158,15 +160,16 @@ impl Store {
             merged.insert(k, v);
         }
         let data = serde_json::to_vec(&Value::Object(merged))?;
-        self.node.local_write(Op::Update, entity, id, data).await;
+        self.node.local_write(Op::Update, entity, id, data).await?;
         Ok(())
     }
 
     /// Delete a record (writes a tombstone).
-    pub async fn delete(&self, entity: &str, id: &str) {
+    pub async fn delete(&self, entity: &str, id: &str) -> Result<(), StoreError> {
         self.node
             .local_write(Op::Delete, entity, id, Vec::new())
-            .await;
+            .await?;
+        Ok(())
     }
 
     /// All visible records of an entity, filtered to authorized authors when the
@@ -201,7 +204,11 @@ impl Store {
     /// is evaluated). No-op semantics if the caller lacks authority: the record
     /// is written but ignored by `authorized_members`.
     #[cfg(feature = "membership")]
-    pub async fn invite(&self, target: PeerId, role: crate::membership::Role) {
+    pub async fn invite(
+        &self,
+        target: PeerId,
+        role: crate::membership::Role,
+    ) -> Result<(), StoreError> {
         let id = crate::membership::member_record_id(&target);
         self.node
             .local_write(
@@ -210,12 +217,13 @@ impl Store {
                 &id,
                 vec![role.as_byte()],
             )
-            .await;
+            .await?;
+        Ok(())
     }
 
     /// Revoke a peer's membership.
     #[cfg(feature = "membership")]
-    pub async fn revoke(&self, target: PeerId) {
+    pub async fn revoke(&self, target: PeerId) -> Result<(), StoreError> {
         let id = crate::membership::member_record_id(&target);
         self.node
             .local_write(
@@ -224,7 +232,8 @@ impl Store {
                 &id,
                 Vec::new(),
             )
-            .await;
+            .await?;
+        Ok(())
     }
 
     async fn author_authorized(&self, author: PeerId) -> bool {
@@ -306,7 +315,7 @@ mod tests {
     async fn delete_removes_record() {
         let store = Store::new(peer(1));
         store.create("task", "t1", json!({"x": 1})).await.unwrap();
-        store.delete("task", "t1").await;
+        store.delete("task", "t1").await.expect("write");
         assert_eq!(store.read("task", "t1").await, None);
     }
 
@@ -316,7 +325,7 @@ mod tests {
         store.create("task", "t1", json!({"n": 1})).await.unwrap();
         store.create("task", "t2", json!({"n": 2})).await.unwrap();
         store.create("note", "n1", json!({"n": 3})).await.unwrap();
-        store.delete("task", "t2").await;
+        store.delete("task", "t2").await.expect("write");
         let tasks = store.list("task").await;
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0], json!({"n": 1}));

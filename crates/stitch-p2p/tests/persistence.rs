@@ -4,7 +4,7 @@
 //! advancing so post-reopen writes still win.
 
 use serde_json::json;
-use stitch_p2p::{PEER_ID_LEN, PeerId, Store};
+use stitch_p2p::{PEER_ID_LEN, PeerId, Store, StoreError, WireError, WriteError};
 use tempfile::TempDir;
 
 fn peer(n: u8) -> PeerId {
@@ -28,7 +28,7 @@ async fn state_survives_reopen() {
             .create("task", "t2", json!({"title": "beta"}))
             .await
             .unwrap();
-        store.delete("task", "t2").await;
+        store.delete("task", "t2").await.expect("write");
         assert_eq!(
             store.read("task", "t1").await,
             Some(json!({"title": "alpha"}))
@@ -71,4 +71,41 @@ async fn post_reopen_write_wins_over_prior_state() {
     drop(store);
     let reopened = Store::open(peer(1), &path).unwrap();
     assert_eq!(reopened.read("doc", "d1").await, Some(json!({"v": 2})));
+}
+
+#[tokio::test]
+async fn refused_write_leaves_no_hole_in_the_log() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("log");
+
+    {
+        let store = Store::open(peer(1), &path).unwrap();
+        let refused = store
+            .create("task", &"L".repeat(300), json!({"title": "long"}))
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(StoreError::Write(WriteError::Wire(WireError::IdTooLong)))
+            ),
+            "{refused:?}"
+        );
+        store
+            .create("task", "t2", json!({"title": "beta"}))
+            .await
+            .unwrap();
+    }
+
+    let store = Store::open(peer(1), &path).unwrap();
+    assert_eq!(
+        store.read("task", "t2").await,
+        Some(json!({"title": "beta"})),
+        "the write after the refused one replays"
+    );
+    let next = store
+        .node()
+        .local_write(stitch_p2p::Op::Insert, "task", "t3", b"{}".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(next.seq, 2, "sequence continues after the replayed write");
 }

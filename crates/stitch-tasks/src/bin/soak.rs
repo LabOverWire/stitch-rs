@@ -27,7 +27,13 @@ async fn main() {
         cfg.peers, cfg.rounds, cfg.seed
     );
     let start = Instant::now();
-    let (_, report) = run_chaos(cfg).await;
+    let report = match run_chaos(cfg).await {
+        Ok((_, report)) => report,
+        Err(error) => {
+            eprintln!("  write failed: {error}");
+            std::process::exit(1);
+        }
+    };
     let elapsed = start.elapsed();
 
     println!(

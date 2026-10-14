@@ -1,5 +1,5 @@
 use crate::lww::Op;
-use crate::sync_state::SyncState;
+use crate::sync_state::{SyncState, WriteError};
 use crate::wire::WriteFrame;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,17 +48,21 @@ impl SyncNode {
 
     /// Build a node whose state is rebuilt by replaying the persister's stored
     /// frames, then continues to persist new writes to it.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// When the persister cannot load its frames. Starting without them would
+    /// reuse sequence numbers peers already hold.
     pub fn with_persister(
         self_id: crate::hlc::PeerId,
         persister: Arc<dyn crate::sync_state::FramePersister>,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let mut state = SyncState::new(self_id);
-        for frame in persister.load() {
+        for frame in persister.load()? {
             state.replay(frame);
         }
         state.set_persister(persister);
-        Self::from_state(state)
+        Ok(Self::from_state(state))
     }
 
     #[must_use]
@@ -76,22 +80,26 @@ impl SyncNode {
 
     /// Apply a local mutation and fan it out to every live session. Closed
     /// session channels are pruned.
+    ///
+    /// # Errors
+    ///
+    /// See [`SyncState::local_write`]; a refused write is not sent.
     pub async fn local_write(
         &self,
         op: Op,
         entity: impl Into<String>,
         id: impl Into<String>,
         data: Vec<u8>,
-    ) -> WriteFrame {
+    ) -> Result<WriteFrame, WriteError> {
         let frame = {
             let mut guard = self.state.lock().await;
-            guard.local_write(now_millis(), op, entity, id, data)
+            guard.local_write(now_millis(), op, entity, id, data)?
         };
         self.sessions
             .lock()
             .expect("sessions lock")
             .retain(|tx| tx.send(frame.clone()).is_ok());
-        frame
+        Ok(frame)
     }
 
     #[must_use]
@@ -141,8 +149,47 @@ impl SyncNode {
         self.state.lock().await.reclaim(members)
     }
 
+    /// Live sessions: those whose receiver has not been dropped.
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.sessions.lock().expect("sessions lock").len()
+        let mut sessions = self.sessions.lock().expect("sessions lock");
+        sessions.retain(|tx| !tx.is_closed());
+        sessions.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Unreadable;
+
+    impl crate::sync_state::FramePersister for Unreadable {
+        fn append(&self, _: &WriteFrame) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn load(&self) -> std::io::Result<Vec<WriteFrame>> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "corrupt frame",
+            ))
+        }
+    }
+
+    #[test]
+    fn session_count_skips_dropped_sessions() {
+        let node = SyncNode::new([1; crate::hlc::PEER_ID_LEN]);
+        let live = node.register_session();
+        drop(node.register_session());
+        assert_eq!(node.session_count(), 1);
+        drop(live);
+        assert_eq!(node.session_count(), 0);
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_loaded_is_an_error() {
+        let opened = SyncNode::with_persister([1; crate::hlc::PEER_ID_LEN], Arc::new(Unreadable));
+        assert!(opened.is_err());
     }
 }
