@@ -523,3 +523,39 @@ async fn update_accepts_null_optional_field_and_keeps_record() {
         "list_by_scope must still return the record after null update",
     );
 }
+
+#[tokio::test]
+async fn list_with_projection_returns_only_projected_fields() {
+    let dir = TempDir::new().unwrap();
+    let layer = open_layer(&dir).await;
+    layer
+        .create(
+            "task",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hidden")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let rows = layer
+        .list_with_projection(
+            "task",
+            Vec::new(),
+            Vec::new(),
+            None,
+            vec!["id".to_string(), "projectId".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("projectId").and_then(Value::as_str), Some("p1"));
+    assert!(
+        rows[0].get("title").is_none(),
+        "a projection must drop unlisted fields: {:?}",
+        rows[0]
+    );
+}

@@ -5,6 +5,19 @@ All notable changes to the `stitch-sync` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- mqtt5 updated to 0.48.1 (native), mqtt5-protocol to 0.16.1 and mqtt5-wasm to 2.1.7 (wasm), mqdb-agent to 0.8.37 and mqdb-core to 0.7.12, so native builds carry a single mqtt5. mqdb-wasm is 0.3.6.
+- A broker `DISCONNECT` with `NotAuthorized`, `BadUsernameOrPassword` or `BadAuthenticationMethod` now reports `ConnectionStatus::Error` with the auth-failure flag, as a failed re-authentication already did. mqtt5 0.39 started reporting broker disconnects with their reason code.
+- Brokers on mqdb-agent 0.8.33 or later send a response only to a topic the requester may publish to. An ACL must grant write (readwrite) on the response prefix, `$DB/clients/<client id>/#` by default; with read only, every request times out.
+
+### Fixed
+
+- A `Store` restarted with the same client id connects again. stitch keeps its MQTT session across restarts (`clean_start: false`, 3600 s session expiry), and since mqtt5 0.41 a new client that finds a stored session refuses the connection unless it asks to resume one. Both the native and the wasm client now ask to resume whenever `clean_start` is off.
+- `Store::list` with a `projection` now returns only the projected fields on native. The projection was passed to mqdb's `list` as its relationship includes, so no projection was applied.
+
 ## [0.5.0] - 2026-08-26
 
 ### Fixed

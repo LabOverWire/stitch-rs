@@ -5,6 +5,12 @@ All notable changes to the `stitch-wasm` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Built on stitch-sync with mqtt5-wasm 2.1.7. A store reloaded with the same client id now resumes its broker session instead of failing to connect; see the stitch-sync changelog. Minimum Rust version is 1.89.
+
 ## [0.5.0] - 2026-08-29
 
 ### Changed

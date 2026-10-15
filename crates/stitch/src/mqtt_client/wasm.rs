@@ -34,20 +34,21 @@ fn js_err(ctx: &str, e: &JsValue) -> Error {
 impl MqttClientApi for WasmMqttClientAdapter {
     async fn connect(&self, url: &str, args: ConnectArgs) -> Result<ConnectOutcome> {
         let mut opts = WasmConnectOptions::new();
-        opts.set_cleanStart(args.clean_start);
-        opts.set_keepAlive(u16::try_from(args.keep_alive_secs).unwrap_or(u16::MAX));
-        opts.set_sessionExpiryInterval(Some(args.session_expiry_secs));
+        opts.set_clean_start(args.clean_start);
+        opts.set_resume_existing_session(!args.clean_start);
+        opts.set_keep_alive(u16::try_from(args.keep_alive_secs).unwrap_or(u16::MAX));
+        opts.set_session_expiry_interval(Some(args.session_expiry_secs));
         if let Some(will) = &args.will {
             let mut message = WasmWillMessage::new(will.topic.clone(), will.payload.clone());
             message.set_qos(will.qos);
             message.set_retain(will.retain);
-            message.set_willDelayInterval(will.will_delay_interval_secs);
-            message.set_contentType(will.content_type.clone());
+            message.set_will_delay_interval(will.will_delay_interval_secs);
+            message.set_content_type(will.content_type.clone());
             opts.set_will(message);
         }
         if let Some(ticket) = &args.jwt_ticket {
-            opts.set_authenticationMethod(Some("JWT".into()));
-            opts.set_authenticationData(ticket.as_bytes());
+            opts.set_authentication_method(Some("JWT".into()));
+            opts.set_authentication_data(ticket.as_bytes());
             let on_challenge = Closure::<dyn FnMut()>::new(|| {});
             self.client.on_auth_challenge(
                 on_challenge
@@ -89,14 +90,15 @@ impl MqttClientApi for WasmMqttClientAdapter {
     async fn publish(&self, topic: String, payload: Vec<u8>, args: PublishArgs) -> Result<()> {
         let mut opts = WasmPublishOptions::new();
         opts.set_qos(QoS::AtLeastOnce as u8);
-        opts.set_responseTopic(Some(args.response_topic));
-        opts.set_correlationData(&args.correlation_data);
+        opts.set_response_topic(Some(args.response_topic));
+        opts.set_correlation_data(&args.correlation_data);
         for (key, value) in args.user_properties {
-            opts.addUserProperty(key, value);
+            opts.add_user_property(key, value);
         }
         self.client
             .publish_with_options(&topic, &payload, &opts)
             .await
+            .map(|_| ())
             .map_err(|e| js_err("publish", &e))
     }
 
