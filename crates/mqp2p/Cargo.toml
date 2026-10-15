@@ -9,7 +9,7 @@ repository = "https://github.com/LabOverWire/stitch-rs"
 publish = false
 
 [dependencies]
-mqtt5 = "0.48.1"
+mqtt5 = { version = "0.48.1", default-features = false }
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = { version = "1.14", features = ["std"] }
@@ -28,4 +28,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rand = "0.10.0"
-mqtt5 = "0.48.1"
+mqtt5 = { version = "0.48.1", default-features = false }

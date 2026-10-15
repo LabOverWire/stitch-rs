@@ -61,6 +61,7 @@ impl MqttClientApi for NativeMqttClient {
             options = options.with_credentials(user.clone(), pass.clone());
         }
 
+        self.client.set_queue_on_disconnect(false).await;
         let result = self
             .client
             .connect_with_options(url, options)
@@ -158,5 +159,59 @@ impl MqttClientApi for NativeMqttClient {
             })
             .await
             .map_err(|e| Error::Mqtt(format!("on_connection_event: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stitch_harness::BrokerHarness;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publish_while_disconnected_fails_instead_of_queueing_in_mqtt5() {
+        let broker = BrokerHarness::new().start().await.expect("start broker");
+        let client = NativeMqttClient::new("queue-check");
+        client
+            .connect(
+                &broker.tcp_url(),
+                ConnectArgs {
+                    clean_start: false,
+                    keep_alive_secs: 60,
+                    session_expiry_secs: 3600,
+                    jwt_ticket: None,
+                    username: None,
+                    password: None,
+                    will: None,
+                },
+            )
+            .await
+            .expect("connect");
+        broker.shutdown().await;
+        for _ in 0..100 {
+            if !client.is_connected().await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            !client.is_connected().await,
+            "client must notice the broker is gone"
+        );
+
+        let published = client
+            .publish(
+                "$DB/notes/create".into(),
+                b"{}".to_vec(),
+                PublishArgs {
+                    response_topic: "$DB/clients/queue-check/r1".into(),
+                    correlation_data: b"r1".to_vec(),
+                    user_properties: Vec::new(),
+                },
+            )
+            .await;
+        assert!(
+            published.is_err(),
+            "a publish while disconnected must fail so only stitch's offline queue replays it"
+        );
     }
 }
