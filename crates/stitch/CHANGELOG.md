@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A `Store` restarted with the same client id connects again. stitch keeps its MQTT session across restarts (`clean_start: false`, 3600 s session expiry), and since mqtt5 0.41 a new client that finds a stored session refuses the connection unless it asks to resume one. Both the native and the wasm client now ask to resume whenever `clean_start` is off.
+- The native client turns off mqtt5's own offline publish queue explicitly. mqtt5 enables it for clients built with `clean_start: false`; stitch's client is built with mqtt5's defaults, so it was already off, and a publish while disconnected fails and is replayed only from stitch's offline queue. Setting it explicitly keeps a change in how the client is built from sending a write twice after a reconnect.
 - `Store::list` with a `projection` now returns only the projected fields on native. The projection was passed to mqdb's `list` as its relationship includes, so no projection was applied.
 
 ## [0.5.0] - 2026-08-26
