@@ -615,7 +615,7 @@ checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "sha2 0.11.0",
+ "sha2",
  "subtle",
 ]
 
@@ -830,11 +830,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -1363,9 +1361,9 @@ dependencies = [
 
 [[package]]
 name = "mqdb-agent"
-version = "0.8.10"
+version = "0.8.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4067cf38b8c59d79024687bd2e18eee9f22e35a6eefd7415ef4f0df3026eb69b"
+checksum = "3d55479519f523418762245c8480c3f9c90dce5c5fe8ab08d2bf24356f43617f"
 dependencies = [
  "arc-swap",
  "comfy-table",
@@ -1374,7 +1372,7 @@ dependencies = [
  "glob",
  "lru",
  "mqdb-core",
- "mqtt5 0.31.4",
+ "mqtt5",
  "regex",
  "ring",
  "serde",
@@ -1389,9 +1387,9 @@ dependencies = [
 
 [[package]]
 name = "mqdb-core"
-version = "0.7.3"
+version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cd6878281d8ac6039cebb9a6e97078b64799571d10bed6f994649cf9f461027"
+checksum = "7f1868ce47980e19cab42326692a40a8e517e7fe4021c91a2e510c77798439a2"
 dependencies = [
  "arc-swap",
  "bebytes",
@@ -1412,9 +1410,9 @@ dependencies = [
 
 [[package]]
 name = "mqdb-wasm"
-version = "0.3.3"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8cb94ee438c45a11fc28dbeb5686eec110d237cb12af02d654bab3019a3f26d"
+checksum = "311d162dce884fd5df7fc436935bde1c44bea7ba46139921a66a67b8a752ab05"
 dependencies = [
  "console_error_panic_hook",
  "futures-channel",
@@ -1436,7 +1434,7 @@ version = "0.3.0"
 dependencies = [
  "clap",
  "flume",
- "mqtt5 0.38.2",
+ "mqtt5",
  "quinn",
  "rand 0.10.2",
  "rcgen",
@@ -1455,53 +1453,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.31.4"
+version = "0.48.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18cdc6fd7da80a9f1f7d09d111384f2dffb90c0e35a45fd2bcc7c637ea3146e4"
-dependencies = [
- "argon2",
- "base64",
- "bebytes",
- "bytes",
- "flume",
- "futures",
- "futures-util",
- "getrandom 0.3.4",
- "hex",
- "http",
- "http-body-util",
- "humantime-serde",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "mqtt5-protocol 0.12.0",
- "parking_lot",
- "quinn",
- "rand 0.9.5",
- "regex",
- "ring",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite 0.28.0",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "url",
- "webpki-roots",
- "zeroize",
-]
-
-[[package]]
-name = "mqtt5"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e969d1327b7ce3ce6a1f19fbcef90f0ddb1dad35c228381d9929c26c84b86aca"
+checksum = "6451bf85e391b7938bf8834977251b1fcdf4202b741228fda28c9dfdef3839fe"
 dependencies = [
  "argon2",
  "base64",
@@ -1518,22 +1472,23 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "mqtt5-protocol 0.14.3",
+ "mqtt5-protocol",
  "parking_lot",
  "quinn",
  "rand 0.10.2",
  "regex",
  "ring",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2",
  "thiserror",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite 0.29.0",
- "toml 1.1.4+spec-1.1.0",
+ "tokio-tungstenite",
+ "toml",
  "tracing",
  "url",
  "webpki-roots",
@@ -1542,26 +1497,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.12.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2673a581b938357355f8c7854ea056e6c0179ea943b75f8247971e8204091a"
-dependencies = [
- "bebytes",
- "bytes",
- "hashbrown 0.16.1",
- "portable-atomic",
- "portable-atomic-util",
- "serde",
- "thiserror",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "mqtt5-protocol"
-version = "0.14.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16ea23fbb2ab11fb239d77da902e0f71ebac91de86618b8ea332264f6f697f17"
+checksum = "7127c4e0f1719483c3606ce51e0b27d036c4a22b985bef7ad375d89c34d5d145"
 dependencies = [
  "bebytes",
  "bytes",
@@ -1576,9 +1514,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-wasm"
-version = "1.4.4"
+version = "2.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d34a8551ad9c916fabdf324e108601a605780eea7bb563b9bc527786e0873cf"
+checksum = "4a38a367859511af2cbf08b81a1df62a97ecd4c4ad5959a9c20b102316e23556"
 dependencies = [
  "bytes",
  "console_error_panic_hook",
@@ -1588,8 +1526,8 @@ dependencies = [
  "getrandom 0.4.3",
  "gloo-timers",
  "js-sys",
- "mqtt5-protocol 0.14.3",
- "sha2 0.11.0",
+ "mqtt5-protocol",
+ "sha2",
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2041,9 +1979,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -2063,15 +2001,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -2113,9 +2042,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2274,17 +2203,6 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
@@ -2384,7 +2302,7 @@ version = "0.1.0"
 dependencies = [
  "mqdb-agent",
  "mqdb-core",
- "mqtt5 0.38.2",
+ "mqtt5",
  "tempfile",
  "tokio",
 ]
@@ -2415,8 +2333,8 @@ dependencies = [
  "mqdb-agent",
  "mqdb-core",
  "mqdb-wasm",
- "mqtt5 0.38.2",
- "mqtt5-protocol 0.14.3",
+ "mqtt5",
+ "mqtt5-protocol",
  "mqtt5-wasm",
  "serde",
  "serde_json",
@@ -2640,22 +2558,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-native-certs",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite 0.28.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
@@ -2667,22 +2569,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.29.0",
-]
-
-[[package]]
-name = "toml"
-version = "0.9.12+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
-dependencies = [
- "indexmap",
- "serde_core",
- "serde_spanned",
- "toml_datetime 0.7.5+spec-1.1.0",
- "toml_parser",
- "toml_writer",
- "winnow 0.7.15",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2694,19 +2581,10 @@ dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned",
- "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_datetime",
  "toml_parser",
  "toml_writer",
- "winnow 1.0.4",
-]
-
-[[package]]
-name = "toml_datetime"
-version = "0.7.5+spec-1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
-dependencies = [
- "serde_core",
+ "winnow",
 ]
 
 [[package]]
@@ -2724,7 +2602,7 @@ version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
- "winnow 1.0.4",
+ "winnow",
 ]
 
 [[package]]
@@ -2808,25 +2686,6 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
@@ -2890,12 +2749,6 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
-
-[[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"
@@ -3222,12 +3075,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 
 [[package]]
 name = "winnow"

@@ -6,7 +6,8 @@ use crate::error::{Error, Result};
 use crate::types::ConnectionStatus;
 use mqtt5::client::{ConnectionEvent, DisconnectReason, JwtAuthHandler};
 use mqtt5::types::{
-    ConnectOptions, Message, PublishOptions, PublishProperties, SubscribeOptions, WillMessage,
+    ConnectOptions, Message, PublishOptions, PublishProperties, ReasonCode, SubscribeOptions,
+    WillMessage,
 };
 use mqtt5::{MqttClient, QoS};
 use std::time::Duration;
@@ -30,6 +31,7 @@ impl MqttClientApi for NativeMqttClient {
     async fn connect(&self, url: &str, args: ConnectArgs) -> Result<ConnectOutcome> {
         let mut options = ConnectOptions::new(&self.client_id)
             .with_clean_start(args.clean_start)
+            .with_resume_existing_session(!args.clean_start)
             .with_keep_alive(Duration::from_secs(args.keep_alive_secs))
             .with_session_expiry_interval(args.session_expiry_secs);
 
@@ -140,11 +142,17 @@ impl MqttClientApi for NativeMqttClient {
                     ConnectionEvent::Connecting => (ConnectionStatus::Connecting, false),
                     ConnectionEvent::Connected { .. } => (ConnectionStatus::Connected, false),
                     ConnectionEvent::Disconnected {
-                        reason: DisconnectReason::AuthFailure,
+                        reason:
+                            DisconnectReason::AuthFailure
+                            | DisconnectReason::ServerDisconnect(
+                                ReasonCode::NotAuthorized
+                                | ReasonCode::BadUsernameOrPassword
+                                | ReasonCode::BadAuthenticationMethod,
+                            ),
                     } => (ConnectionStatus::Error, true),
-                    ConnectionEvent::Disconnected { .. } => (ConnectionStatus::Disconnected, false),
                     ConnectionEvent::Reconnecting { .. } => (ConnectionStatus::Connecting, false),
                     ConnectionEvent::ReconnectFailed { .. } => (ConnectionStatus::Error, false),
+                    _ => (ConnectionStatus::Disconnected, false),
                 };
                 handler(status, auth_failure);
             })

@@ -122,8 +122,8 @@ impl Db for NativeDb {
                 filters,
                 sort,
                 pagination,
-                projection,
-                None,
+                Vec::new(),
+                (!projection.is_empty()).then_some(projection),
             )
             .await
             .map_err(|e| Error::mqdb(format!("list:{entity}"), e))

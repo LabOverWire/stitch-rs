@@ -2,7 +2,7 @@
 name = "stitch-wasm"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "Browser (wasm-bindgen) bindings for the stitch reactive state-sync store."
 authors = ["LabOverWire"]

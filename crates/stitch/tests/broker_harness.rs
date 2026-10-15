@@ -84,6 +84,34 @@ async fn authenticated_store_crud_round_trips_through_broker() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarted_store_with_the_same_client_id_resumes_its_session() {
+    init_tracing();
+    let broker = BrokerHarness::new()
+        .scope("project", "projectId")
+        .user("app", "secret")
+        .allow("app", "$DB/#", Access::ReadWrite)
+        .start()
+        .await
+        .expect("start broker");
+
+    for run in 0..2 {
+        let store = Store::with_client_id(
+            fixture_config(),
+            authed_options(broker.tcp_url(), "app", "secret"),
+            "stable-client".into(),
+        );
+        store.initialize().await.expect("initialize");
+        assert!(
+            reaches_connected(&store).await,
+            "run {run}: a store reusing its client id must reconnect to its stored session"
+        );
+        store.shutdown().await.expect("shutdown store");
+    }
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wrong_password_never_reaches_connected() {
     init_tracing();
     let broker = BrokerHarness::new()
