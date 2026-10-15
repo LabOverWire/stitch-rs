@@ -3,10 +3,10 @@ use mqtt5::client::MqttClient;
 use mqtt5::types::{PublishOptions, PublishProperties};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, trace};
 
 const DEFAULT_TIMEOUT_MS: u64 = 5000;
@@ -68,6 +68,35 @@ fn apply_presence(table: &mut PresenceTable, event: PresenceEvent) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LeaseSighting {
+    expires_at: u64,
+    seen_at: Instant,
+}
+
+type LeaseTable = HashMap<String, LeaseSighting>;
+
+fn lease_is_live(table: &mut LeaseTable, peer: &PeerInfo, now: Instant, unix_now: u64) -> bool {
+    let (Some(expires_at), Some(lease_secs)) = (peer.expires_at, peer.lease_secs) else {
+        return peer_is_live(peer.expires_at, unix_now);
+    };
+    let seen_at = match table.get(&peer.id) {
+        Some(sighting) if sighting.expires_at == expires_at => sighting.seen_at,
+        None if table.len() >= MAX_TRACKED_CLIENTS => {
+            return peer_is_live(peer.expires_at, unix_now);
+        }
+        _ => now,
+    };
+    table.insert(
+        peer.id.clone(),
+        LeaseSighting {
+            expires_at,
+            seen_at,
+        },
+    );
+    now.duration_since(seen_at) < Duration::from_secs(lease_secs)
+}
+
 fn departed(table: &PresenceTable, name: &str) -> bool {
     table
         .get(&client_id_for(name))
@@ -96,6 +125,8 @@ pub struct PeerInfo {
     pub public_addr: Option<String>,
     #[serde(rename = "_expires_at", default)]
     pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub lease_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +162,7 @@ pub enum CandidateKind {
 pub struct SignalingClient {
     client: MqttClient,
     presence: Arc<Mutex<PresenceTable>>,
+    leases: Arc<Mutex<LeaseTable>>,
 }
 
 impl SignalingClient {
@@ -138,6 +170,7 @@ impl SignalingClient {
         Self {
             client,
             presence: Arc::new(Mutex::new(PresenceTable::new())),
+            leases: Arc::new(Mutex::new(LeaseTable::new())),
         }
     }
 
@@ -195,6 +228,7 @@ impl SignalingClient {
             "quic_port": quic_port,
             "cert_fingerprint": cert_fingerprint,
             "_expires_at": unix_now_secs() + lease_secs,
+            "lease_secs": lease_secs,
         });
         if let Some(addr) = public_addr {
             payload["public_addr"] = Value::String(addr.to_string());
@@ -213,6 +247,7 @@ impl SignalingClient {
         let topic = format!("$DB/peers/{peer_id}/update");
         let payload = serde_json::json!({
             "_expires_at": unix_now_secs() + lease_secs,
+            "lease_secs": lease_secs,
         });
 
         let response = self
@@ -281,15 +316,28 @@ impl SignalingClient {
             other => vec![other],
         };
 
-        let now = unix_now_secs();
+        let unix_now = unix_now_secs();
+        let now = Instant::now();
+        let records: Vec<PeerInfo> = items
+            .into_iter()
+            .filter_map(|v| serde_json::from_value::<PeerInfo>(v).ok())
+            .collect();
         let presence = self
             .presence
             .lock()
             .map_err(|_| Error::Signaling("presence table poisoned".into()))?;
-        let peers: Vec<PeerInfo> = items
-            .into_iter()
-            .filter_map(|v| serde_json::from_value::<PeerInfo>(v).ok())
-            .filter(|p| peer_is_live(p.expires_at, now) && !departed(&presence, &p.name))
+        let mut leases = self
+            .leases
+            .lock()
+            .map_err(|_| Error::Signaling("lease table poisoned".into()))?;
+        let listed: HashSet<&str> = records.iter().map(|p| p.id.as_str()).collect();
+        leases.retain(|id, _| listed.contains(id.as_str()));
+        let peers: Vec<PeerInfo> = records
+            .iter()
+            .filter(|p| {
+                lease_is_live(&mut leases, p, now, unix_now) && !departed(&presence, &p.name)
+            })
+            .cloned()
             .collect();
 
         debug!(count = peers.len(), "peers discovered");
@@ -516,6 +564,93 @@ mod tests {
         assert!(departed(&table, "p0"));
     }
 
+    fn leased(id: &str, expires_at: u64, lease_secs: Option<u64>) -> PeerInfo {
+        PeerInfo {
+            id: id.into(),
+            name: id.into(),
+            status: "online".into(),
+            quic_port: 4433,
+            cert_fingerprint: "fp".into(),
+            public_addr: None,
+            expires_at: Some(expires_at),
+            lease_secs,
+        }
+    }
+
+    #[test]
+    fn lease_runs_from_when_the_observer_saw_the_renewal() {
+        let mut table = LeaseTable::new();
+        let start = Instant::now();
+        let peer = leased("p1", 100, Some(15));
+        assert!(lease_is_live(&mut table, &peer, start, 1_000_000));
+        assert!(lease_is_live(
+            &mut table,
+            &peer,
+            start + Duration::from_secs(14),
+            0
+        ));
+        assert!(!lease_is_live(
+            &mut table,
+            &peer,
+            start + Duration::from_secs(15),
+            0
+        ));
+        let renewed = leased("p1", 105, Some(15));
+        assert!(lease_is_live(
+            &mut table,
+            &renewed,
+            start + Duration::from_secs(20),
+            0
+        ));
+        assert!(lease_is_live(
+            &mut table,
+            &renewed,
+            start + Duration::from_secs(34),
+            0
+        ));
+    }
+
+    #[test]
+    fn a_record_without_lease_secs_falls_back_to_its_timestamp() {
+        let mut table = LeaseTable::new();
+        let now = Instant::now();
+        assert!(lease_is_live(
+            &mut table,
+            &leased("old", 1001, None),
+            now,
+            1000
+        ));
+        assert!(!lease_is_live(
+            &mut table,
+            &leased("old", 999, None),
+            now,
+            1000
+        ));
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn lease_table_stops_growing_at_its_limit() {
+        let mut table = LeaseTable::new();
+        let now = Instant::now();
+        for i in 0..MAX_TRACKED_CLIENTS {
+            lease_is_live(&mut table, &leased(&format!("p{i}"), 1, Some(15)), now, 0);
+        }
+        assert!(!lease_is_live(
+            &mut table,
+            &leased("late", 999, Some(15)),
+            now,
+            1000
+        ));
+        assert!(lease_is_live(
+            &mut table,
+            &leased("late", 1001, Some(15)),
+            now,
+            1000
+        ));
+        assert_eq!(table.len(), MAX_TRACKED_CLIENTS);
+    }
+
     #[test]
     fn leaseless_peer_is_live() {
         assert!(peer_is_live(None, 1000));
@@ -554,6 +689,7 @@ mod tests {
             cert_fingerprint: "ab".into(),
             public_addr: None,
             expires_at: Some(1234),
+            lease_secs: None,
         };
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(json.get("_expires_at").and_then(Value::as_u64), Some(1234));

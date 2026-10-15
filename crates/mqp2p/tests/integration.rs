@@ -629,3 +629,141 @@ async fn presence_hides_a_departed_peer_before_its_lease_expires() {
     returning.shutdown().await.expect("shutdown failed");
     observer.shutdown().await.expect("observer shutdown failed");
 }
+
+fn write_peer_record(port: u16, verb: &str, id: &str, data: &serde_json::Value) {
+    let broker = format!("127.0.0.1:{port}");
+    let mut args = vec![verb.to_string(), "peers".to_string()];
+    if verb == "update" {
+        args.push(id.to_string());
+    }
+    args.extend(
+        [
+            "--data",
+            &data.to_string(),
+            "--broker",
+            &broker,
+            "--user",
+            "testuser",
+            "--pass",
+            "testpass",
+            "--timeout",
+            "5",
+        ]
+        .map(String::from),
+    );
+    let status = Command::new("mqdb")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("failed to run mqdb");
+    assert!(status.success(), "mqdb {verb} of peer {id} failed");
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[tokio::test]
+async fn lease_is_judged_by_the_observer_clock_not_the_writer_clock() {
+    let tmpdir = tempfile::tempdir().expect("failed to create tmpdir");
+    let db_dir = tmpdir.path().join("db");
+    std::fs::create_dir_all(&db_dir).expect("failed to create db dir");
+    let passwd_file = create_passwd_file(tmpdir.path());
+    let port = pick_free_port();
+    let _broker = start_broker(port, &db_dir, &passwd_file, &[]);
+    wait_for_port(port);
+    wait_for_broker_ready(port);
+    let broker_addr = format!("127.0.0.1:{port}");
+
+    let observer = Peer::new(peer_config("observer", &broker_addr))
+        .await
+        .expect("observer creation failed");
+    let lease_secs = 2;
+    let skewed_now = unix_now() - 3600;
+    let record = |expires_at: u64| {
+        serde_json::json!({
+            "id": "lagging",
+            "name": "lagging",
+            "status": "online",
+            "quic_port": 4433,
+            "cert_fingerprint": "fp",
+            "_expires_at": expires_at,
+            "lease_secs": lease_secs,
+        })
+    };
+    let listed = |peers: Vec<mqp2p::PeerInfo>| peers.iter().any(|p| p.id == "lagging");
+
+    write_peer_record(port, "create", "lagging", &record(skewed_now + lease_secs));
+    assert!(
+        listed(observer.discover_peers().await.expect("discovery failed")),
+        "a peer whose clock runs an hour behind must still be live while it renews"
+    );
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    write_peer_record(
+        port,
+        "update",
+        "lagging",
+        &record(skewed_now + 1 + lease_secs),
+    );
+    assert!(
+        listed(observer.discover_peers().await.expect("discovery failed")),
+        "a renewal seen by the observer must keep the peer live"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !listed(observer.discover_peers().await.expect("discovery failed")),
+        "a peer that stops renewing must expire one lease after the observer last saw it renew"
+    );
+
+    observer.shutdown().await.expect("observer shutdown failed");
+}
+
+#[tokio::test]
+async fn a_writer_clock_ahead_does_not_keep_a_dead_peer_live() {
+    let tmpdir = tempfile::tempdir().expect("failed to create tmpdir");
+    let db_dir = tmpdir.path().join("db");
+    std::fs::create_dir_all(&db_dir).expect("failed to create db dir");
+    let passwd_file = create_passwd_file(tmpdir.path());
+    let port = pick_free_port();
+    let _broker = start_broker(port, &db_dir, &passwd_file, &[]);
+    wait_for_port(port);
+    wait_for_broker_ready(port);
+    let broker_addr = format!("127.0.0.1:{port}");
+
+    let observer = Peer::new(peer_config("observer", &broker_addr))
+        .await
+        .expect("observer creation failed");
+    let lease_secs = 2;
+    write_peer_record(
+        port,
+        "create",
+        "racing",
+        &serde_json::json!({
+            "id": "racing",
+            "name": "racing",
+            "status": "online",
+            "quic_port": 4433,
+            "cert_fingerprint": "fp",
+            "_expires_at": unix_now() + 3600 + lease_secs,
+            "lease_secs": lease_secs,
+        }),
+    );
+    let listed = |peers: Vec<mqp2p::PeerInfo>| peers.iter().any(|p| p.id == "racing");
+    assert!(listed(
+        observer.discover_peers().await.expect("discovery failed")
+    ));
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !listed(observer.discover_peers().await.expect("discovery failed")),
+        "a peer whose clock runs an hour ahead must still expire once it stops renewing"
+    );
+
+    observer.shutdown().await.expect("observer shutdown failed");
+}

@@ -465,6 +465,7 @@ impl Peer {
             cert_fingerprint: offer.cert_fingerprint,
             public_addr: Some(remote_addr.to_string()),
             expires_at: None,
+            lease_secs: None,
         };
 
         info!(
