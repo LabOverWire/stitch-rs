@@ -3,7 +3,9 @@ use mqtt5::client::MqttClient;
 use mqtt5::types::{PublishOptions, PublishProperties};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, trace};
 
@@ -13,8 +15,63 @@ pub const PEER_LEASE_SECS: u64 = 15;
 
 pub const MIN_LEASE_SECS: u64 = 2;
 
+pub const CLIENT_ID_PREFIX: &str = "mqp2p-";
+
+const PRESENCE_TOPIC: &str = "$DB/_presence/#";
+
+const MAX_TRACKED_CLIENTS: usize = 4096;
+
 pub fn heartbeat_interval_secs(lease_secs: u64) -> u64 {
     (lease_secs / 3).max(1)
+}
+
+pub fn client_id_for(name: &str) -> String {
+    format!("{CLIENT_ID_PREFIX}{name}")
+}
+
+#[derive(Debug, Deserialize)]
+struct PresenceEvent {
+    client_id: String,
+    event: String,
+    ts: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PresenceMark {
+    ts: u64,
+    online: bool,
+}
+
+type PresenceTable = HashMap<String, PresenceMark>;
+
+fn apply_presence(table: &mut PresenceTable, event: PresenceEvent) {
+    if !event.client_id.starts_with(CLIENT_ID_PREFIX) {
+        return;
+    }
+    let online = match event.event.as_str() {
+        "connect" => true,
+        "disconnect" => false,
+        _ => return,
+    };
+    match table.get(&event.client_id) {
+        Some(mark) if mark.ts > event.ts => {}
+        None if table.len() >= MAX_TRACKED_CLIENTS => {}
+        _ => {
+            table.insert(
+                event.client_id,
+                PresenceMark {
+                    ts: event.ts,
+                    online,
+                },
+            );
+        }
+    }
+}
+
+fn departed(table: &PresenceTable, name: &str) -> bool {
+    table
+        .get(&client_id_for(name))
+        .is_some_and(|mark| !mark.online)
 }
 
 fn unix_now_secs() -> u64 {
@@ -73,11 +130,15 @@ pub enum CandidateKind {
 #[derive(Clone)]
 pub struct SignalingClient {
     client: MqttClient,
+    presence: Arc<Mutex<PresenceTable>>,
 }
 
 impl SignalingClient {
     pub fn new(client: MqttClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            presence: Arc::new(Mutex::new(PresenceTable::new())),
+        }
     }
 
     pub fn mqtt_client(&self) -> &MqttClient {
@@ -90,6 +151,31 @@ impl SignalingClient {
             .await
             .map_err(|e| Error::Signaling(format!("MQTT connect failed: {e}")))?;
         debug!(broker = broker_addr, "signaling client connected");
+        Ok(())
+    }
+
+    pub async fn disconnect(&self) -> Result<()> {
+        self.client
+            .disconnect()
+            .await
+            .map_err(|e| Error::Signaling(format!("MQTT disconnect failed: {e}")))?;
+        debug!("signaling client disconnected");
+        Ok(())
+    }
+
+    pub async fn track_presence(&self) -> Result<()> {
+        let presence = Arc::clone(&self.presence);
+        self.client
+            .subscribe(PRESENCE_TOPIC, move |msg| {
+                if let Ok(event) = serde_json::from_slice::<PresenceEvent>(&msg.payload)
+                    && let Ok(mut table) = presence.lock()
+                {
+                    apply_presence(&mut table, event);
+                }
+            })
+            .await
+            .map_err(|e| Error::Signaling(format!("subscribe presence failed: {e}")))?;
+        debug!("tracking broker presence");
         Ok(())
     }
 
@@ -196,10 +282,14 @@ impl SignalingClient {
         };
 
         let now = unix_now_secs();
+        let presence = self
+            .presence
+            .lock()
+            .map_err(|_| Error::Signaling("presence table poisoned".into()))?;
         let peers: Vec<PeerInfo> = items
             .into_iter()
             .filter_map(|v| serde_json::from_value::<PeerInfo>(v).ok())
-            .filter(|p| peer_is_live(p.expires_at, now))
+            .filter(|p| peer_is_live(p.expires_at, now) && !departed(&presence, &p.name))
             .collect();
 
         debug!(count = peers.len(), "peers discovered");
@@ -376,6 +466,55 @@ fn check_response(response: &Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event(client_id: &str, event: &str, ts: u64) -> PresenceEvent {
+        PresenceEvent {
+            client_id: client_id.into(),
+            event: event.into(),
+            ts,
+        }
+    }
+
+    #[test]
+    fn disconnect_marks_a_peer_departed_until_it_reconnects() {
+        let mut table = PresenceTable::new();
+        apply_presence(&mut table, event("mqp2p-edge", "connect", 1));
+        assert!(!departed(&table, "edge"));
+        apply_presence(&mut table, event("mqp2p-edge", "disconnect", 2));
+        assert!(departed(&table, "edge"));
+        apply_presence(&mut table, event("mqp2p-edge", "connect", 3));
+        assert!(!departed(&table, "edge"));
+    }
+
+    #[test]
+    fn an_older_presence_event_does_not_override_a_newer_one() {
+        let mut table = PresenceTable::new();
+        apply_presence(&mut table, event("mqp2p-edge", "connect", 5));
+        apply_presence(&mut table, event("mqp2p-edge", "disconnect", 4));
+        assert!(!departed(&table, "edge"));
+    }
+
+    #[test]
+    fn unknown_peers_and_foreign_clients_are_not_departed() {
+        let mut table = PresenceTable::new();
+        apply_presence(&mut table, event("stitch-app", "disconnect", 1));
+        apply_presence(&mut table, event("mqp2p-edge", "expired", 1));
+        assert!(table.is_empty());
+        assert!(!departed(&table, "edge"));
+    }
+
+    #[test]
+    fn presence_table_stops_growing_at_its_limit() {
+        let mut table = PresenceTable::new();
+        for i in 0..MAX_TRACKED_CLIENTS {
+            apply_presence(&mut table, event(&format!("mqp2p-p{i}"), "connect", 1));
+        }
+        apply_presence(&mut table, event("mqp2p-late", "disconnect", 2));
+        assert_eq!(table.len(), MAX_TRACKED_CLIENTS);
+        assert!(!departed(&table, "late"));
+        apply_presence(&mut table, event("mqp2p-p0", "disconnect", 2));
+        assert!(departed(&table, "p0"));
+    }
 
     #[test]
     fn leaseless_peer_is_live() {
