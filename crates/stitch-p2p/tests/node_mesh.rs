@@ -62,11 +62,14 @@ async fn line_topology_converges_through_hub() {
     assert_eq!(b.session_count(), 2, "hub B should hold two sessions");
 
     a.local_write(Op::Insert, "task", "t1", b"from-a".to_vec())
-        .await;
+        .await
+        .expect("write");
     b.local_write(Op::Insert, "task", "t2", b"from-b".to_vec())
-        .await;
+        .await
+        .expect("write");
     c.local_write(Op::Insert, "task", "t3", b"from-c".to_vec())
-        .await;
+        .await
+        .expect("write");
 
     let converged = wait_until(Duration::from_secs(5), || async {
         a.visible("task", "t3").await.is_some() && c.visible("task", "t1").await.is_some()
@@ -101,7 +104,8 @@ async fn write_after_connect_reaches_far_end() {
 
     // Write at A only after the mesh is live; it must reach the far end C.
     a.local_write(Op::Insert, "task", "late", b"v".to_vec())
-        .await;
+        .await
+        .expect("write");
 
     let reached = wait_until(Duration::from_secs(5), || async {
         c.visible("task", "late").await.is_some()

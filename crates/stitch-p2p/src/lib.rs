@@ -40,8 +40,8 @@ pub use lww::{Applier, MergeOutcome, Op, StampedWrite};
 pub use node::SyncNode;
 pub use protocol::{MAX_MESSAGE_LEN, ProtocolError, SyncMessage};
 pub use replog::{Cursors, RecordOutcome, ReplLog};
-pub use sync_state::{MutationEvent, SyncState, WriteOrigin};
-pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame};
+pub use sync_state::{MutationEvent, SyncState, WriteError, WriteOrigin};
+pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame, check_lengths};
 
 pub use sync_state::{FrameAuth, FramePersister};
 

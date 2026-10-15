@@ -23,9 +23,12 @@ fn line_topology_converges_transitively() {
     let mut p2 = SyncState::new(peer(2));
     let mut p3 = SyncState::new(peer(3));
 
-    p1.local_write(10, Op::Insert, "task", "t1", b"from1".to_vec());
-    p2.local_write(11, Op::Insert, "task", "t2", b"from2".to_vec());
-    p3.local_write(12, Op::Insert, "task", "t3", b"from3".to_vec());
+    p1.local_write(10, Op::Insert, "task", "t1", b"from1".to_vec())
+        .expect("write");
+    p2.local_write(11, Op::Insert, "task", "t2", b"from2".to_vec())
+        .expect("write");
+    p3.local_write(12, Op::Insert, "task", "t3", b"from3".to_vec())
+        .expect("write");
 
     // Gossip only along the links 1—2 and 2—3. Two rounds is enough for a
     // 3-node line: round 1 fills peer 2, round 2 spreads to the ends.
@@ -54,8 +57,10 @@ fn concurrent_same_record_edits_converge_across_line() {
 
     // p1 and p3 both write "shared" at the same wall time, never having seen
     // each other. Peer-id tiebreak must pick the same winner everywhere.
-    p1.local_write(50, Op::Insert, "task", "shared", b"by1".to_vec());
-    p3.local_write(50, Op::Insert, "task", "shared", b"by3".to_vec());
+    p1.local_write(50, Op::Insert, "task", "shared", b"by1".to_vec())
+        .expect("write");
+    p3.local_write(50, Op::Insert, "task", "shared", b"by3".to_vec())
+        .expect("write");
 
     for round in 0..3 {
         let wall = 200 + round;
@@ -81,7 +86,8 @@ fn delete_propagates_across_line() {
     let mut p2 = SyncState::new(peer(2));
     let mut p3 = SyncState::new(peer(3));
 
-    p1.local_write(10, Op::Insert, "task", "t1", b"alive".to_vec());
+    p1.local_write(10, Op::Insert, "task", "t1", b"alive".to_vec())
+        .expect("write");
     for round in 0..2 {
         pull(&mut p2, &p1, 100 + round);
         pull(&mut p3, &p2, 100 + round);
@@ -89,7 +95,8 @@ fn delete_propagates_across_line() {
     assert_eq!(p3.visible("task", "t1"), Some(&b"alive"[..]));
 
     // p3 deletes; the tombstone travels back up the line to p1.
-    p3.local_write(200, Op::Delete, "task", "t1", Vec::new());
+    p3.local_write(200, Op::Delete, "task", "t1", Vec::new())
+        .expect("write");
     for round in 0..2 {
         pull(&mut p2, &p3, 300 + round);
         pull(&mut p1, &p2, 300 + round);

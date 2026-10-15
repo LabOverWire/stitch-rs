@@ -70,7 +70,8 @@ Implemented and tested (the full verified core, transport excluded):
   no broker, no STUN).
 - `node` — `SyncNode`, the fan-out layer. One shared `SyncState` across all of
   a device's sessions; `register_session` hands a session its outbound channel,
-  `local_write` applies and fans out to every live session. **Transitive
+  `local_write` applies and fans out to every live session, and
+  `session_count` counts the sessions whose receiver is still alive. **Transitive
   forwarding falls out of the shared state**: a write pulled from one peer is
   served to the others on their next pull — no re-broadcast, no echo
   suppression. `tests/node_mesh.rs` proves a line `A—B—C` converges through the
@@ -99,21 +100,27 @@ Implemented and tested (the full verified core, transport excluded):
 
 | Feature | Default | Pulls in | Gates |
 |---|---|---|---|
-| (none) | — | `tokio`, `thiserror` | the verified core: `hlc`, `lww`, `wire`, `replog`, `sync_state`, `protocol`, `session`, `node` |
+| (none) | — | `tokio`, `thiserror`, `tracing` | the verified core: `hlc`, `lww`, `wire`, `replog`, `sync_state`, `protocol`, `session`, `node` |
 | `store` | on | `serde_json` | `stitch_p2p::store::Store` (JSON document facade) |
 | `discovery` | on | `mqp2p` (→ quinn, mqtt5) | `stitch_p2p::discovery::Swarm` (peer discovery + NAT + QUIC) |
 | `persistence` | on | `fjall` | `stitch_p2p::persistence::FjallLog` + `Store::open(path)` (durable replication log) |
 | `membership` | on | `ed25519-dalek` | `stitch_p2p::membership::Identity` — Ed25519-signed writes; `Store::with_identity` |
 
 `default-features = false` builds the formally-verified engine with just
-`tokio` + `thiserror` — no networking, no JSON, no transitive QUIC/MQTT stack.
+`tokio` + `thiserror` + `tracing` — no networking, no JSON, no transitive QUIC/MQTT stack.
 Add `store` for the document API, `discovery` for the mqp2p transport.
 
 - `persistence` — `FjallLog`, a durable replication log. `SyncState` gains a
-  `FramePersister` hook (core trait, no deps); every appended frame is persisted
-  and `Store::open(path)` rebuilds state by replaying the log — recovering the
+  `FramePersister` hook (core trait, no deps); every frame is persisted before
+  it enters the log, and `Store::open(path)` rebuilds state by replaying the log — recovering the
   HLC so post-restart writes still win. `tests/persistence.rs` proves state and
   tombstones survive a reopen.
+  A local write the persister cannot store is refused (`WriteError::Persist`)
+  and takes no sequence number, a received frame it cannot store is not
+  recorded (`RecordOutcome::Unpersisted`) and is pulled again, and a log that
+  cannot be read fails `Store::open` rather than replaying around the hole. A
+  write whose entity or id exceeds 255 bytes is refused up front
+  (`WriteError::Wire`), so every frame in the log encodes.
 
 - `membership` — Ed25519 `Identity` (peer id == public key) signing every
   local write; `SyncState` verifies inbound frames and rejects bad signatures

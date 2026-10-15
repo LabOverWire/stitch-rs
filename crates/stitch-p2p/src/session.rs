@@ -1,4 +1,5 @@
 use crate::protocol::{ProtocolError, SyncMessage, read_message, write_message};
+use crate::replog::RecordOutcome;
 use crate::sync_state::SyncState;
 use crate::wire::WriteFrame;
 use std::sync::Arc;
@@ -93,7 +94,17 @@ async fn apply(state: &Mutex<SyncState>, frames: Vec<WriteFrame>) {
     let now = now_millis();
     let mut guard = state.lock().await;
     for frame in frames {
-        guard.receive(frame, now);
+        let origin = frame.stamp.peer;
+        let seq = frame.seq;
+        match guard.receive(frame, now) {
+            RecordOutcome::Appended | RecordOutcome::Duplicate | RecordOutcome::Unpersisted => {}
+            RecordOutcome::Gap { expected, got } => {
+                tracing::debug!(origin = ?&origin[..4], expected, got, "frame ahead of the log, waiting for the missing ones");
+            }
+            RecordOutcome::Rejected => {
+                tracing::warn!(origin = ?&origin[..4], seq, "frame failed verification and was dropped");
+            }
+        }
     }
 }
 
@@ -125,11 +136,13 @@ mod tests {
         a_state
             .lock()
             .await
-            .local_write(10, Op::Insert, "task", "t1", b"from-a".to_vec());
+            .local_write(10, Op::Insert, "task", "t1", b"from-a".to_vec())
+            .expect("write");
         b_state
             .lock()
             .await
-            .local_write(11, Op::Insert, "task", "t2", b"from-b".to_vec());
+            .local_write(11, Op::Insert, "task", "t2", b"from-b".to_vec())
+            .expect("write");
 
         let (a_io, b_io) = tokio::io::duplex(16 * 1024);
         let (a_r, a_w) = split(a_io);
@@ -178,13 +191,11 @@ mod tests {
         let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
 
         // Write on A *after* the session is live; push it through A's outbound.
-        let frame = a_state.lock().await.local_write(
-            now_millis(),
-            Op::Insert,
-            "task",
-            "late",
-            b"v".to_vec(),
-        );
+        let frame = a_state
+            .lock()
+            .await
+            .local_write(now_millis(), Op::Insert, "task", "late", b"v".to_vec())
+            .expect("write");
         a_tx.send(frame).unwrap();
 
         let ok = wait_until(Duration::from_secs(2), || async {

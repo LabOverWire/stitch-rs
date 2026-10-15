@@ -59,7 +59,7 @@ async fn member_writes_visible_outsider_filtered() {
     let outsider = Store::join(outsider_id, owner_pid);
 
     // Owner invites the member (not the outsider).
-    owner.invite(member_pid, Role::Member).await;
+    owner.invite(member_pid, Role::Member).await.expect("write");
 
     // Each writes a record under its own identity.
     member
@@ -112,7 +112,7 @@ async fn revocation_hides_records() {
     let owner = Store::with_owner(owner_id);
     let member = Store::join(member_id, owner_pid);
 
-    owner.invite(member_pid, Role::Member).await;
+    owner.invite(member_pid, Role::Member).await.expect("write");
     member.create("task", "m", json!({"x": 1})).await.unwrap();
 
     let (a_io, b_io) = tokio::io::duplex(64 * 1024);
@@ -126,7 +126,7 @@ async fn revocation_hides_records() {
         "member write should be visible before revocation"
     );
 
-    owner.revoke(member_pid).await;
+    owner.revoke(member_pid).await.expect("write");
 
     assert!(
         wait_until(Duration::from_secs(5), || async {

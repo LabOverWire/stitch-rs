@@ -35,11 +35,13 @@ async fn two_peers_converge_over_real_quic() {
     a_state
         .lock()
         .await
-        .local_write(10, Op::Insert, "task", "t1", b"from-a".to_vec());
+        .local_write(10, Op::Insert, "task", "t1", b"from-a".to_vec())
+        .expect("write");
     b_state
         .lock()
         .await
-        .local_write(11, Op::Insert, "task", "t2", b"from-b".to_vec());
+        .local_write(11, Op::Insert, "task", "t2", b"from-b".to_vec())
+        .expect("write");
 
     // Acceptor B: accept connection (verifying A's fingerprint), then the bidi
     // stream A opens once it writes its Hello.

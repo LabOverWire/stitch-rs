@@ -132,10 +132,12 @@ async fn discover_and_sync(spawn: impl Fn(Arc<Peer>, SyncNode) -> Swarm) {
 
     node_a
         .local_write(Op::Insert, "task", "t1", b"from-alice".to_vec())
-        .await;
+        .await
+        .expect("write");
     node_b
         .local_write(Op::Insert, "task", "t2", b"from-bob".to_vec())
-        .await;
+        .await
+        .expect("write");
 
     let converged = wait_until(Duration::from_secs(30), || async {
         node_a.visible("task", "t2").await.is_some() && node_b.visible("task", "t1").await.is_some()

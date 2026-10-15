@@ -14,7 +14,8 @@ async fn soak_converges_across_seeds() {
             seed,
             ..Chaos::default()
         })
-        .await;
+        .await
+        .expect("chaos run writes");
         assert!(report.converged, "peers failed to converge (seed {seed})");
         assert!(
             report.final_tasks > 0,

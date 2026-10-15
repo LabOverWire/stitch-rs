@@ -300,7 +300,9 @@ mod tests {
         let id = Arc::new(Identity::from_seed([5u8; 32]));
         let mut state = SyncState::new(id.peer_id());
         state.set_auth(id.clone());
-        let frame = state.local_write(1, Op::Insert, "task", "t1", vec![9]);
+        let frame = state
+            .local_write(1, Op::Insert, "task", "t1", vec![9])
+            .expect("write");
         assert!(frame.signature.is_some());
         assert!(verify_frame(&frame));
     }
