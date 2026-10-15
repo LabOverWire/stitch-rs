@@ -35,6 +35,25 @@ jobs:
       - run: cargo check -p stitch-sync --target wasm32-unknown-unknown
       - run: cargo clippy -p stitch-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      MQDB_VERSION: v0.8.52
+      MQDB_SHA256: 3a266aa80b3aebe7d43565eadc7a7572e337185b0dfb8fc9ce535a6f6594d818
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mqdb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/mqdb" "https://github.com/LabOverWire/MQDB/releases/download/$MQDB_VERSION/mqdb-linux-amd64"
+          echo "$MQDB_SHA256  $RUNNER_TEMP/bin/mqdb" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/bin/mqdb"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: mqdb --version
+      - run: cargo test -p mqp2p -p stitch-p2p -p stitch-tasks
+
   wasm-test:
     runs-on: ubuntu-latest
     steps:
