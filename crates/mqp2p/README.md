@@ -44,6 +44,13 @@ This RTT-synchronized approach (similar to [libp2p DCUtR](https://github.com/lib
 - QUIC mutual TLS verifies both sides match the expected fingerprint (TOFU model)
 - File integrity is verified end-to-end with SHA-256
 
+### Liveness
+
+- **Lease:** a registered peer's record carries `_expires_at`, set `lease_secs` ahead (default 15 s, `PeerConfig::with_lease_secs`), and a heartbeat renews it every third of the lease. Discovery skips records whose lease has passed, so a peer that vanishes without deregistering disappears within one lease.
+- **MQTT keepalive:** the signaling client's keepalive defaults to a third of the lease (5 s for the default lease), The mqtt5 broker drops a client after 1.5 keepalives of silence and checks once per keepalive, so it notices a dead link 1.5 to 2.5 keepalives after it goes quiet: 7.5 to 12.5 s with the default lease, where mqtt5's own 60 s default took about 115 s for a partitioned peer in the c2-fusion harness. Raise it with `PeerConfig::with_keepalive_secs` on links where pings are expensive.
+- **Clean shutdown:** `Peer::shutdown` deregisters the peer and sends MQTT `DISCONNECT`; dropping a `Peer` inside a Tokio runtime also sends `DISCONNECT`, so a stopped peer never leaves its client connected and reconnecting under its client id.
+- **Presence (optional):** with `PeerConfig::with_presence` and a broker started with `--presence`, the peer follows MQDB's presence feed (`$DB/_presence/#`) and discovery also skips a peer whose MQTT client (`mqp2p-<name>`) has disconnected, until it connects again. This removes a stopped or partitioned peer as soon as the broker sees its connection end; the lease stays as the backstop when the broker runs without `--presence`.
+
 ## Usage
 
 ### As a library
@@ -95,9 +102,11 @@ mqp2p uses [MQDB](https://github.com/LabOverWire/MQDB) as both the MQTT broker a
 # Generate password file
 mqdb passwd -b mypassword -n myuser >> passwd.txt
 
-# Start broker with authentication
+# Start broker with authentication (add --presence for PeerConfig::with_presence)
 mqdb agent start --bind 0.0.0.0:1883 --passwd passwd.txt
 ```
+
+With an ACL file, grant each peer user readwrite on `$DB/peers/#`, `mqp2p/responses/#` and `p2p/#`, and read on `$DB/_presence/#` when presence is used. MQDB 0.8.33 and later sends a response only to a topic the requester may publish to, so read-only access to `mqp2p/responses/#` makes every registry request time out. The presence feed shows every client id and user name on the broker, so grant it only to users that may see them.
 
 ## Architecture
 

@@ -1,4 +1,6 @@
 use mqp2p::{Peer, PeerConfig, TransferProgress};
+use mqtt5::ConnectOptions;
+use mqtt5::client::MqttClient;
 use rand::RngExt;
 use ring::digest;
 use std::io::Write;
@@ -23,7 +25,12 @@ fn pick_free_port() -> u16 {
         .port()
 }
 
-fn start_broker(port: u16, db_dir: &std::path::Path, passwd_file: &std::path::Path) -> BrokerGuard {
+fn start_broker(
+    port: u16,
+    db_dir: &std::path::Path,
+    passwd_file: &std::path::Path,
+    extra_args: &[&str],
+) -> BrokerGuard {
     let child = Command::new("mqdb")
         .args([
             "agent",
@@ -35,6 +42,7 @@ fn start_broker(port: u16, db_dir: &std::path::Path, passwd_file: &std::path::Pa
             "--passwd",
             &passwd_file.to_string_lossy(),
         ])
+        .args(extra_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -138,7 +146,7 @@ async fn test_full_file_transfer() {
     let passwd_file = create_passwd_file(tmpdir.path());
 
     let broker_port = pick_free_port();
-    let _broker = start_broker(broker_port, &db_dir, &passwd_file);
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file, &[]);
     wait_for_port(broker_port);
     wait_for_broker_ready(broker_port);
 
@@ -249,7 +257,7 @@ async fn presence_lease_expires_without_heartbeat() {
     let passwd_file = create_passwd_file(tmpdir.path());
 
     let broker_port = pick_free_port();
-    let _broker = start_broker(broker_port, &db_dir, &passwd_file);
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file, &[]);
     wait_for_port(broker_port);
     wait_for_broker_ready(broker_port);
 
@@ -339,7 +347,7 @@ async fn presence_recreates_after_record_reaped() {
     let passwd_file = create_passwd_file(tmpdir.path());
 
     let broker_port = pick_free_port();
-    let _broker = start_broker(broker_port, &db_dir, &passwd_file);
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file, &[]);
     wait_for_port(broker_port);
     wait_for_broker_ready(broker_port);
 
@@ -393,7 +401,7 @@ async fn reregister_preserves_public_addr() {
     let passwd_file = create_passwd_file(tmpdir.path());
 
     let broker_port = pick_free_port();
-    let _broker = start_broker(broker_port, &db_dir, &passwd_file);
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file, &[]);
     wait_for_port(broker_port);
     wait_for_broker_ready(broker_port);
 
@@ -439,4 +447,185 @@ async fn reregister_preserves_public_addr() {
         Some(public_addr),
         "public_addr must survive re-registration"
     );
+}
+
+struct PresenceBroker {
+    _broker: BrokerGuard,
+    _tmpdir: tempfile::TempDir,
+    addr: String,
+}
+
+async fn start_presence_broker() -> PresenceBroker {
+    let tmpdir = tempfile::tempdir().expect("failed to create tmpdir");
+    let db_dir = tmpdir.path().join("db");
+    std::fs::create_dir_all(&db_dir).expect("failed to create db dir");
+    let passwd_file = create_passwd_file(tmpdir.path());
+    let port = pick_free_port();
+    let broker = start_broker(port, &db_dir, &passwd_file, &["--presence"]);
+    wait_for_port(port);
+    wait_for_broker_ready(port);
+    PresenceBroker {
+        _broker: broker,
+        _tmpdir: tmpdir,
+        addr: format!("127.0.0.1:{port}"),
+    }
+}
+
+fn peer_config(name: &str, broker_addr: &str) -> PeerConfig {
+    PeerConfig::new(name, broker_addr)
+        .with_bind_addr("127.0.0.1:0".parse().unwrap())
+        .without_stun()
+        .with_credentials("testuser", "testpass")
+}
+
+async fn watch_presence(
+    broker_addr: &str,
+    client_id: &str,
+) -> (MqttClient, flume::Receiver<serde_json::Value>) {
+    let watcher_id = format!("presence-watcher-{}", uuid::Uuid::new_v4());
+    let watcher = MqttClient::with_options(
+        ConnectOptions::new(watcher_id).with_credentials("testuser", "testpass".as_bytes()),
+    );
+    watcher
+        .connect(broker_addr)
+        .await
+        .expect("watcher connect failed");
+    let (tx, rx) = flume::unbounded();
+    watcher
+        .subscribe(&format!("$DB/_presence/{client_id}"), move |msg| {
+            if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                let _ = tx.try_send(event);
+            }
+        })
+        .await
+        .expect("watcher subscribe failed");
+    (watcher, rx)
+}
+
+async fn next_disconnect(events: &flume::Receiver<serde_json::Value>) -> Option<serde_json::Value> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let event = events.recv_async().await.ok()?;
+            if event["event"] == "disconnect" {
+                return Some(event);
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[tokio::test]
+async fn shutdown_sends_a_clean_mqtt_disconnect() {
+    let broker = start_presence_broker().await;
+    let (watcher, events) = watch_presence(&broker.addr, "mqp2p-leaver").await;
+
+    let mut leaver = Peer::new(peer_config("leaver", &broker.addr))
+        .await
+        .expect("peer creation failed");
+    leaver.register().await.expect("registration failed");
+    leaver.shutdown().await.expect("shutdown failed");
+
+    let event = next_disconnect(&events)
+        .await
+        .expect("the broker must see the peer's MQTT session end at shutdown");
+    assert_eq!(
+        event["unexpected"], false,
+        "shutdown must send DISCONNECT, not drop the socket: {event}"
+    );
+    watcher
+        .disconnect()
+        .await
+        .expect("watcher disconnect failed");
+}
+
+#[tokio::test]
+async fn dropping_a_peer_sends_a_clean_mqtt_disconnect() {
+    let broker = start_presence_broker().await;
+    let (watcher, events) = watch_presence(&broker.addr, "mqp2p-dropped").await;
+
+    let peer = Peer::new(peer_config("dropped", &broker.addr))
+        .await
+        .expect("peer creation failed");
+    drop(peer);
+
+    let event = next_disconnect(&events)
+        .await
+        .expect("a dropped peer must not leave its MQTT client connected");
+    assert_eq!(event["unexpected"], false, "{event}");
+    watcher
+        .disconnect()
+        .await
+        .expect("watcher disconnect failed");
+}
+
+#[tokio::test]
+async fn presence_hides_a_departed_peer_before_its_lease_expires() {
+    let broker = start_presence_broker().await;
+
+    let mut observer = Peer::new(
+        peer_config("watcher", &broker.addr)
+            .with_lease_secs(60)
+            .with_presence(),
+    )
+    .await
+    .expect("observer creation failed");
+    observer
+        .register()
+        .await
+        .expect("observer registration failed");
+
+    let mut departing = Peer::new(peer_config("departing", &broker.addr).with_lease_secs(60))
+        .await
+        .expect("departing peer creation failed");
+    let departing_id = departing.register().await.expect("registration failed");
+    assert!(
+        observer
+            .discover_peers()
+            .await
+            .expect("discovery failed")
+            .iter()
+            .any(|p| p.id == departing_id),
+        "a connected peer must be discoverable"
+    );
+
+    drop(departing);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while observer
+        .discover_peers()
+        .await
+        .expect("discovery failed")
+        .iter()
+        .any(|p| p.id == departing_id)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a peer whose MQTT client disconnected must leave discovery long before its 60 s lease"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let mut returning = Peer::new(peer_config("departing", &broker.addr).with_lease_secs(60))
+        .await
+        .expect("returning peer creation failed");
+    let returning_id = returning.register().await.expect("re-registration failed");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !observer
+        .discover_peers()
+        .await
+        .expect("discovery failed")
+        .iter()
+        .any(|p| p.id == returning_id)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a peer that reconnects under the same name must be discoverable again"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    returning.shutdown().await.expect("shutdown failed");
+    observer.shutdown().await.expect("observer shutdown failed");
 }

@@ -2,7 +2,7 @@ use crate::error::{Error, Result};
 use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
-    PeerInfo, SignalingClient, heartbeat_interval_secs,
+    PeerInfo, SignalingClient, client_id_for, heartbeat_interval_secs,
 };
 use crate::stun;
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
@@ -11,6 +11,7 @@ use mqtt5::client::MqttClient;
 use quinn::Connection;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 pub struct PeerConfig {
@@ -20,6 +21,8 @@ pub struct PeerConfig {
     pub stun_server: Option<String>,
     pub credentials: Option<(String, String)>,
     pub lease_secs: u64,
+    pub keepalive_secs: Option<u64>,
+    pub presence: bool,
     pub segmentation_offload: SegmentationOffload,
 }
 
@@ -32,6 +35,8 @@ impl PeerConfig {
             stun_server: Some(stun::DEFAULT_STUN_SERVER.into()),
             credentials: None,
             lease_secs: PEER_LEASE_SECS,
+            keepalive_secs: None,
+            presence: false,
             segmentation_offload: SegmentationOffload::Enabled,
         }
     }
@@ -39,6 +44,25 @@ impl PeerConfig {
     pub fn with_lease_secs(mut self, lease_secs: u64) -> Self {
         self.lease_secs = lease_secs;
         self
+    }
+
+    pub fn with_keepalive_secs(mut self, keepalive_secs: u64) -> Self {
+        self.keepalive_secs = Some(keepalive_secs);
+        self
+    }
+
+    pub fn with_presence(mut self) -> Self {
+        self.presence = true;
+        self
+    }
+
+    fn effective_lease_secs(&self) -> u64 {
+        self.lease_secs.max(MIN_LEASE_SECS)
+    }
+
+    fn effective_keepalive_secs(&self) -> u64 {
+        self.keepalive_secs
+            .unwrap_or_else(|| heartbeat_interval_secs(self.effective_lease_secs()))
     }
 
     pub fn with_bind_addr(mut self, addr: SocketAddr) -> Self {
@@ -135,15 +159,24 @@ impl Peer {
             config.segmentation_offload,
         )?;
 
-        let client_id = format!("mqp2p-{}", config.name);
-        let mqtt = if let Some((ref user, ref pass)) = config.credentials {
-            let opts = ConnectOptions::new(client_id).with_credentials(user, pass.as_bytes());
-            MqttClient::with_options(opts)
-        } else {
-            MqttClient::new(client_id)
+        let lease_secs = config.effective_lease_secs();
+        let keepalive_secs = config.effective_keepalive_secs();
+        let options = ConnectOptions::new(client_id_for(&config.name))
+            .with_keep_alive(Duration::from_secs(keepalive_secs));
+        let options = match config.credentials {
+            Some((ref user, ref pass)) => options.with_credentials(user, pass.as_bytes()),
+            None => options,
         };
-        let signaling = SignalingClient::new(mqtt);
+        let signaling = SignalingClient::new(MqttClient::with_options(options));
         signaling.connect(&config.broker_addr).await?;
+        if config.presence {
+            signaling.track_presence().await?;
+        }
+        debug!(
+            keepalive_secs,
+            presence = config.presence,
+            "signaling configured"
+        );
 
         Ok(Self {
             name: config.name,
@@ -155,7 +188,7 @@ impl Peer {
             std_socket,
             host_addr,
             srflx_addr,
-            lease_secs: config.lease_secs.max(MIN_LEASE_SECS),
+            lease_secs,
             heartbeat: None,
         })
     }
@@ -450,8 +483,13 @@ impl Peer {
         if let Some(handle) = self.heartbeat.take() {
             handle.abort();
         }
-        if let Some(peer_id) = &self.peer_id {
-            let _ = self.signaling.deregister_peer(peer_id).await;
+        if let Some(peer_id) = &self.peer_id
+            && let Err(e) = self.signaling.deregister_peer(peer_id).await
+        {
+            warn!(peer_id, error = %e, "peer deregistration failed at shutdown");
+        }
+        if let Err(e) = self.signaling.disconnect().await {
+            warn!(error = %e, "signaling disconnect failed at shutdown");
         }
         self.quic.close();
         info!("peer shut down");
@@ -463,6 +501,16 @@ impl Drop for Peer {
     fn drop(&mut self) {
         if let Some(handle) = self.heartbeat.take() {
             handle.abort();
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let signaling = self.signaling.clone();
+            runtime.spawn(async move {
+                if signaling.mqtt_client().is_connected().await
+                    && let Err(e) = signaling.disconnect().await
+                {
+                    debug!(error = %e, "signaling disconnect failed on drop");
+                }
+            });
         }
     }
 }
@@ -526,5 +574,33 @@ impl P2pConnection {
     pub fn close(self) -> Result<()> {
         self.connection.close(0u32.into(), b"done");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keepalive_defaults_to_a_third_of_the_lease() {
+        let config = PeerConfig::new("edge", "127.0.0.1:1883");
+        assert_eq!(config.effective_keepalive_secs(), PEER_LEASE_SECS / 3);
+        let config = config.with_lease_secs(30);
+        assert_eq!(config.effective_keepalive_secs(), 10);
+    }
+
+    #[test]
+    fn keepalive_follows_the_lease_floor() {
+        let config = PeerConfig::new("edge", "127.0.0.1:1883").with_lease_secs(0);
+        assert_eq!(config.effective_lease_secs(), MIN_LEASE_SECS);
+        assert_eq!(config.effective_keepalive_secs(), 1);
+    }
+
+    #[test]
+    fn explicit_keepalive_overrides_the_default() {
+        let config = PeerConfig::new("edge", "127.0.0.1:1883")
+            .with_lease_secs(15)
+            .with_keepalive_secs(60);
+        assert_eq!(config.effective_keepalive_secs(), 60);
     }
 }
