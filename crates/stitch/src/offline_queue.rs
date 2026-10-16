@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
@@ -167,6 +167,60 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
     result
 }
 
+async fn replay_or_reject_insert(
+    mutation: &ConsolidatedMutation,
+    sender: &dyn MutationSender,
+    conflict: &Error,
+) -> FlushOutcome {
+    match sender.read_entity(&mutation.entity, &mutation.id).await {
+        Ok(Some(_)) => {
+            tracing::info!(
+                entity = %mutation.entity,
+                id = %mutation.id,
+                "queued insert already applied by the broker; sending its data as an update"
+            );
+            let Some(data) = mutation.data.clone() else {
+                return FlushOutcome::Drop;
+            };
+            match sender
+                .sync_update(&mutation.entity, &mutation.scope_id, &mutation.id, data)
+                .await
+            {
+                Ok(()) => FlushOutcome::Drop,
+                Err(e) if e.is_transient() => FlushOutcome::Keep,
+                Err(e) => {
+                    tracing::error!(
+                        entity = %mutation.entity,
+                        id = %mutation.id,
+                        error = %e,
+                        "dropping replayed insert after its update failed"
+                    );
+                    FlushOutcome::Drop
+                }
+            }
+        }
+        Ok(None) => {
+            tracing::warn!(
+                entity = %mutation.entity,
+                id = %mutation.id,
+                error = %conflict,
+                "dropping rejected queued insert; rolling back the optimistic local row"
+            );
+            FlushOutcome::DropRejected
+        }
+        Err(e) if e.is_transient() => FlushOutcome::Keep,
+        Err(e) => {
+            tracing::warn!(
+                entity = %mutation.entity,
+                id = %mutation.id,
+                error = %e,
+                "could not check a rejected queued insert; rolling back the optimistic local row"
+            );
+            FlushOutcome::DropRejected
+        }
+    }
+}
+
 async fn flush_consolidated(
     consolidated: Vec<ConsolidatedMutation>,
     sender: &dyn MutationSender,
@@ -205,10 +259,10 @@ async fn flush_consolidated(
         let outcome = match attempt {
             Ok(()) => FlushOutcome::Drop,
             Err(err) if err.is_transient() => FlushOutcome::Keep,
-            Err(err)
-                if (err.is_conflict() || err.is_ownership())
-                    && mutation.op == Operation::Insert =>
-            {
+            Err(err) if err.is_conflict() && mutation.op == Operation::Insert => {
+                replay_or_reject_insert(&mutation, sender, &err).await
+            }
+            Err(err) if err.is_ownership() && mutation.op == Operation::Insert => {
                 tracing::warn!(
                     entity = %mutation.entity,
                     id = %mutation.id,
