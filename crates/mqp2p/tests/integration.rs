@@ -6,6 +6,7 @@ use ring::digest;
 use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::time::Duration;
 
 struct BrokerGuard(Child);
@@ -554,6 +555,48 @@ async fn dropping_a_peer_sends_a_clean_mqtt_disconnect() {
         .await
         .expect("a dropped peer must not leave its MQTT client connected");
     assert_eq!(event["unexpected"], false, "{event}");
+    watcher
+        .disconnect()
+        .await
+        .expect("watcher disconnect failed");
+}
+
+#[tokio::test]
+async fn disconnecting_a_shared_peer_deregisters_it_and_sends_a_clean_mqtt_disconnect() {
+    let broker = start_presence_broker().await;
+    let (watcher, events) = watch_presence(&broker.addr, "mqp2p-shared").await;
+
+    let mut shared = Peer::new(peer_config("shared", &broker.addr))
+        .await
+        .expect("peer creation failed");
+    let shared_id = shared.register().await.expect("registration failed");
+    let mut observer = Peer::new(peer_config("shared-observer", &broker.addr))
+        .await
+        .expect("observer creation failed");
+    observer
+        .register()
+        .await
+        .expect("observer registration failed");
+
+    let shared = Arc::new(shared);
+    let still_held = Arc::clone(&shared);
+    shared.disconnect().await;
+
+    let event = next_disconnect(&events)
+        .await
+        .expect("the broker must see a shared peer's MQTT session end at disconnect");
+    assert_eq!(event["unexpected"], false, "{event}");
+    let listed = observer
+        .discover_peers()
+        .await
+        .expect("observer discovery failed");
+    assert!(
+        listed.iter().all(|peer| peer.id != shared_id),
+        "a disconnected peer must leave the registry: {listed:?}"
+    );
+
+    drop(still_held);
+    observer.shutdown().await.expect("observer shutdown failed");
     watcher
         .disconnect()
         .await

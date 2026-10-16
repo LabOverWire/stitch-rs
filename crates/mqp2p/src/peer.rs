@@ -480,20 +480,24 @@ impl Peer {
         })
     }
 
-    pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(handle) = self.heartbeat.take() {
+    pub async fn disconnect(&self) {
+        if let Some(handle) = &self.heartbeat {
             handle.abort();
         }
         if let Some(peer_id) = &self.peer_id
             && let Err(e) = self.signaling.deregister_peer(peer_id).await
         {
-            warn!(peer_id, error = %e, "peer deregistration failed at shutdown");
+            warn!(peer_id, error = %e, "peer deregistration failed at disconnect");
         }
         if let Err(e) = self.signaling.disconnect().await {
-            warn!(error = %e, "signaling disconnect failed at shutdown");
+            warn!(error = %e, "signaling disconnect failed at disconnect");
         }
         self.quic.close();
-        info!("peer shut down");
+        info!("peer disconnected");
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        self.disconnect().await;
         Ok(())
     }
 }
