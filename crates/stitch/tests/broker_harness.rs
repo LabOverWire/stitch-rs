@@ -211,3 +211,86 @@ async fn losing_create_on_unique_conflict_returns_err_and_leaves_no_phantom() {
     store.shutdown().await.expect("shutdown store");
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queued_create_the_broker_already_holds_is_kept_after_flush() {
+    init_tracing();
+    let broker = BrokerHarness::new()
+        .scope("project", "projectId")
+        .unique_constraint("task", ["title"])
+        .start()
+        .await
+        .expect("start broker");
+    let task = || {
+        make_record(&[
+            ("id", json!("t1")),
+            ("title", json!("seatA")),
+            ("projectId", json!("p1")),
+        ])
+    };
+
+    let online = Store::with_client_id(
+        fixture_config(),
+        StoreOptions {
+            persistence: None,
+            remote: Some(RemoteConfig::new(broker.tcp_url())),
+        },
+        "first-sender".into(),
+    );
+    online.initialize().await.expect("initialize");
+    assert!(reaches_connected(&online).await);
+    online
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .expect("create project");
+    online
+        .create("task", "p1", task(), Origin::Local)
+        .await
+        .expect("create applied by the broker");
+
+    let mut remote = RemoteConfig::new(broker.tcp_url());
+    remote.auto_connect = false;
+    let replaying = Store::with_client_id(
+        fixture_config(),
+        StoreOptions {
+            persistence: None,
+            remote: Some(remote),
+        },
+        "replaying-sender".into(),
+    );
+    replaying.initialize().await.expect("initialize");
+    replaying
+        .create("task", "p1", task(), Origin::Local)
+        .await
+        .expect("queued while disconnected");
+    replaying
+        .reconnect(&broker.tcp_url(), None, None, None)
+        .await
+        .expect("reconnect");
+    assert!(reaches_connected(&replaying).await);
+
+    for _ in 0..100 {
+        if replaying.pending_count("p1").await.expect("pending") == 0 {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        replaying.pending_count("p1").await.expect("pending"),
+        0,
+        "the queued create must be flushed"
+    );
+    assert!(
+        replaying.read("task", "t1").await.expect("read").is_some(),
+        "a queued create the broker already holds must not be rolled back on flush"
+    );
+
+    online.shutdown().await.expect("shutdown");
+    replaying.shutdown().await.expect("shutdown");
+    broker.shutdown().await;
+}

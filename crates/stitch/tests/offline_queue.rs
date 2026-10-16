@@ -689,3 +689,66 @@ async fn user_scoped_isolation() {
     assert!(queue_a.pending_for_scope("p1").await.unwrap().is_empty());
     assert_eq!(queue_b.pending_for_scope("p1").await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn conflict_on_an_insert_the_broker_already_holds_becomes_an_update() {
+    let queue = InMemoryOfflineQueue::new("project".to_string());
+    queue
+        .queue(pending(
+            Operation::Insert,
+            "task",
+            "t1",
+            "p1",
+            make_record(&[("id", json!("t1")), ("title", json!("x"))]),
+        ))
+        .await
+        .unwrap();
+
+    let sender = MockSender::new(Behavior::Ok);
+    sender.set("create", Behavior::Conflict);
+    sender.set_read(
+        "task",
+        "t1",
+        make_record(&[("id", json!("t1")), ("title", json!("x"))]),
+    );
+    let summary = queue.flush(sender.as_ref()).await.unwrap();
+    let log = sender.log();
+    assert_eq!(
+        log,
+        ["create:task:p1", "read:task:t1", "update:task:p1:t1"],
+        "a replayed insert must be checked and resent as an update"
+    );
+    assert!(
+        summary.rejected_inserts.is_empty(),
+        "an insert the broker already holds must not be rolled back: {:?}",
+        summary.rejected_inserts
+    );
+    assert_eq!(summary.retained, 0);
+    assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replayed_insert_is_kept_when_its_update_fails_transiently() {
+    let queue = InMemoryOfflineQueue::new("project".to_string());
+    queue
+        .queue(pending(
+            Operation::Insert,
+            "task",
+            "t1",
+            "p1",
+            make_record(&[("id", json!("t1")), ("title", json!("x"))]),
+        ))
+        .await
+        .unwrap();
+
+    let sender = MockSender::new(Behavior::Ok);
+    sender.set("create", Behavior::Conflict);
+    sender.set("update", Behavior::Transient);
+    sender.set_read("task", "t1", make_record(&[("id", json!("t1"))]));
+    let summary = queue.flush(sender.as_ref()).await.unwrap();
+    assert!(summary.rejected_inserts.is_empty());
+    assert_eq!(
+        summary.retained, 1,
+        "a transient failure keeps the insert for the next flush"
+    );
+}
