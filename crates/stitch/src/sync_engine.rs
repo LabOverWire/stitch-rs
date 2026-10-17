@@ -314,7 +314,7 @@ impl SyncEngine {
     }
 
     pub async fn bump_scope_version(&self, scope_id: &str) -> Result<()> {
-        let now = now_millis();
+        let now = i64::try_from(rt::now_millis()).unwrap_or(i64::MAX);
         let mut payload = Map::new();
         payload.insert(self.config.version_field.clone(), Value::from(now));
         payload.insert(self.config.updated_at_field.clone(), Value::from(now));
@@ -786,11 +786,4 @@ fn extract_id(response: &Map<String, Value>) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| Error::Mqtt("response missing data.id".into()))
-}
-
-fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }

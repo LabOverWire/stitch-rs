@@ -16,8 +16,7 @@ pub(crate) type Shared<T> = std::sync::Arc<T>;
 pub(crate) type Shared<T> = std::rc::Rc<T>;
 
 /// A fresh unique id string. Natively a time-ordered UUIDv7; on wasm a random
-/// UUIDv4, since `now_v7` reads `SystemTime`, which panics on
-/// `wasm32-unknown-unknown`.
+/// UUIDv4.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()

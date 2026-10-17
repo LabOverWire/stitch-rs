@@ -35,7 +35,6 @@ wasm-pack test --headless --chrome crates/stitch-wasm   # in-browser smoke test
 Browser remote sync (manual end-to-end): run an `mqtt5` broker with a WebSocket
 listener, then point a browser store at it —
 `createStore(config, { remote: { url: "ws://localhost:<ws-port>" } })`,
-`await store.initialize()` — and two tabs on the same scope converge live. The
-headless `wasm-pack` suite cannot host a broker, so it only asserts the wasm
-client builds and fails gracefully when the broker is unreachable; the native
-broker-backed `tests/wire.rs` covers the sync engine itself.
+`await store.initialize()` — and two tabs on the same scope converge live.
+
+The headless `wasm-pack` suite asserts the wasm client builds and fails gracefully when the broker is unreachable. When `STITCH_WASM_BROKER_URL` is set at build time (CI starts mqdb with `--ws-bind` and a `testuser`/`testpass` password file), it also syncs a child create to that live broker. The native broker-backed `tests/wire.rs` covers the rest of the sync engine.

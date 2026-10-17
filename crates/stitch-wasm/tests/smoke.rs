@@ -2,7 +2,9 @@
 //! through create/read/snapshot, registers a subscription, and exercises
 //! IndexedDB persistence (plaintext + encrypted) across a store reopen,
 //! proving the `mqdb-wasm`-backed core runs under real WebAssembly. Run with
-//! `wasm-pack test --headless --chrome crates/stitch-wasm`.
+//! `wasm-pack test --headless --chrome crates/stitch-wasm`. Setting
+//! `STITCH_WASM_BROKER_URL` (e.g. `ws://127.0.0.1:8083/mqtt`, user `testuser`,
+//! password `testpass`) at build time also syncs against that live broker.
 
 #![cfg(target_arch = "wasm32")]
 
@@ -705,4 +707,78 @@ async fn subscribe_to_scope_fires_on_replace_scope_in_browser() {
         "subscribeToScope must fire when replaceScope loads a scope"
     );
     closure.forget();
+}
+
+async fn sleep_ms(ms: u32) {
+    let sleep = js_sys::Function::new_with_args("ms", "return new Promise(r => setTimeout(r, ms))");
+    let promise: js_sys::Promise = sleep
+        .call1(&JsValue::NULL, &JsValue::from(ms))
+        .unwrap()
+        .into();
+    wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn child_create_syncs_to_a_live_broker_in_browser() {
+    let Some(url) = option_env!("STITCH_WASM_BROKER_URL") else {
+        return;
+    };
+    let opts = js_sys::JSON::parse(&format!(
+        r#"{{"remote":{{"url":"{url}","username":"testuser","password":"testpass"}}}}"#
+    ))
+    .unwrap();
+    let store = stitch_wasm::create_store(config(), opts).expect("create_store");
+    store.initialize().await.expect("initialize");
+    store
+        .set_authenticated_user(Some("testuser".into()))
+        .expect("set user");
+    for _ in 0..50 {
+        if store.connection_status().expect("connection_status") == "Connected" {
+            break;
+        }
+        sleep_ms(100).await;
+    }
+    assert_eq!(
+        store.connection_status().expect("connection_status"),
+        "Connected"
+    );
+
+    let project_id = store
+        .create(
+            "project".into(),
+            String::new(),
+            js_sys::JSON::parse(r#"{"name":"live"}"#).unwrap(),
+            None,
+        )
+        .await
+        .expect("create project");
+    store
+        .create(
+            "task".into(),
+            project_id.clone(),
+            js_sys::JSON::parse(r#"{"title":"synced"}"#).unwrap(),
+            None,
+        )
+        .await
+        .expect("create task");
+
+    for _ in 0..50 {
+        if store
+            .pending_mutation_count(project_id.clone())
+            .await
+            .expect("pending count")
+            == 0
+        {
+            break;
+        }
+        sleep_ms(100).await;
+    }
+    assert_eq!(
+        store
+            .pending_mutation_count(project_id.clone())
+            .await
+            .expect("pending count"),
+        0,
+        "the child create and its scope version bump must reach the broker"
+    );
 }

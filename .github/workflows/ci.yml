@@ -56,6 +56,9 @@ jobs:
 
   wasm-test:
     runs-on: ubuntu-latest
+    env:
+      MQDB_VERSION: v0.8.52
+      MQDB_SHA256: 3a266aa80b3aebe7d43565eadc7a7572e337185b0dfb8fc9ce535a6f6594d818
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.99.0
@@ -65,7 +68,22 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.15.0
+      - name: Install mqdb
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL -o "$RUNNER_TEMP/bin/mqdb" "https://github.com/LabOverWire/MQDB/releases/download/$MQDB_VERSION/mqdb-linux-amd64"
+          echo "$MQDB_SHA256  $RUNNER_TEMP/bin/mqdb" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/bin/mqdb"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Start mqdb with a WebSocket listener
+        run: |
+          mqdb passwd testuser -b testpass -n > "$RUNNER_TEMP/passwd.txt"
+          nohup mqdb agent start --memory-backend --bind 127.0.0.1:1883 --ws-bind 127.0.0.1:8083 --passwd "$RUNNER_TEMP/passwd.txt" --no-rate-limit > "$RUNNER_TEMP/mqdb.log" 2>&1 &
+          for _ in $(seq 50); do nc -z 127.0.0.1 8083 && exit 0; sleep 0.2; done
+          cat "$RUNNER_TEMP/mqdb.log"
+          exit 1
       - run: echo "$CHROMEWEBDRIVER" >> "$GITHUB_PATH"
       - run: wasm-pack test --headless --chrome crates/stitch-wasm
         env:
           CHROMEDRIVER: ${{ env.CHROMEWEBDRIVER }}/chromedriver
+          STITCH_WASM_BROKER_URL: ws://127.0.0.1:8083/mqtt
