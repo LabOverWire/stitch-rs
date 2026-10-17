@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Store.updateIf` / `Store.deleteIf` — compare-and-set update/delete gated on a
+  row's server `_version` (pass the value read from a prior row; `updateIf`
+  resolves to the new version). A stale version rejects with an
+  `err.kind = "preconditionFailed"` error and makes no local change. Mirrors
+  stitch-sync `update_if`/`delete_if`; requires a connected remote.
+
 ## [0.5.1] - 2026-10-17
 
 ### Fixed

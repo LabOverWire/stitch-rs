@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Store::update_if` / `Store::delete_if` — compare-and-set writes gated on a
+  row's server version. They require a live remote (sent to the broker first,
+  never queued) and apply locally only on success; a stale version returns the
+  new terminal `Error::PreconditionFailed` (classifier `is_precondition_failed`),
+  distinct from the retryable `Conflict`, leaving no local change. `Store::row_version`
+  reads a record's `_version` to pass as the expected version. This surfaces
+  mqdb's `_expected_version` compare-and-set (mqdb-core 0.7.12); it is
+  native-remote only (the embedded backend has no server version).
+
 ## [0.5.1] - 2026-10-17
 
 ### Changed
 
 - mqtt5 updated to 0.48.1 (native), mqtt5-protocol to 0.16.1 and mqtt5-wasm to 2.1.7 (wasm), mqdb-agent to 0.8.37 and mqdb-core to 0.7.12, so native builds carry a single mqtt5. mqdb-wasm is 0.3.6.
+- Refreshed the dependency lockfile to the latest semver-compatible set (incl. quinn-proto 0.11.19, wasm-bindgen 0.2.129, uuid 1.28, tokio 1.53.3).
 - A broker `DISCONNECT` with `NotAuthorized`, `BadUsernameOrPassword` or `BadAuthenticationMethod` now reports `ConnectionStatus::Error` with the auth-failure flag, as a failed re-authentication already did. mqtt5 0.39 started reporting broker disconnects with their reason code.
 - Brokers on mqdb-agent 0.8.33 or later send a response only to a topic the requester may publish to. An ACL must grant write (readwrite) on the response prefix, `$DB/clients/<client id>/#` by default; with read only, every request times out.
 

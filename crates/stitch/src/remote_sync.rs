@@ -179,6 +179,41 @@ impl RemoteSyncLayer {
         self.sync.sync_delete(entity, outbound_scope, id).await
     }
 
+    pub async fn sync_update_checked(
+        &self,
+        entity: &str,
+        scope_id: &str,
+        id: &str,
+        data: Record,
+        expected_version: u64,
+    ) -> Result<u64> {
+        let role = self.entity_role(entity);
+        let outbound_scope = match role {
+            EntityRole::Child => scope_id,
+            EntityRole::Root | EntityRole::TopLevel | EntityRole::Unknown => "",
+        };
+        self.sync
+            .sync_update_checked(entity, outbound_scope, id, data, expected_version)
+            .await
+    }
+
+    pub async fn sync_delete_checked(
+        &self,
+        entity: &str,
+        scope_id: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<()> {
+        let role = self.entity_role(entity);
+        let outbound_scope = match role {
+            EntityRole::Child => scope_id,
+            EntityRole::Root | EntityRole::TopLevel | EntityRole::Unknown => "",
+        };
+        self.sync
+            .sync_delete_checked(entity, outbound_scope, id, expected_version)
+            .await
+    }
+
     pub async fn apply_mutation_to_db(
         &self,
         mutation: SyncMutation,
