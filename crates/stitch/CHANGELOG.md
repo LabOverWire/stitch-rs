@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-17
+
 ### Changed
 
 - mqtt5 updated to 0.48.1 (native), mqtt5-protocol to 0.16.1 and mqtt5-wasm to 2.1.7 (wasm), mqdb-agent to 0.8.37 and mqdb-core to 0.7.12, so native builds carry a single mqtt5. mqdb-wasm is 0.3.6.
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The native client turns off mqtt5's own offline publish queue explicitly. mqtt5 enables it for clients built with `clean_start: false`; stitch's client is built with mqtt5's defaults, so it was already off, and a publish while disconnected fails and is replayed only from stitch's offline queue. Setting it explicitly keeps a change in how the client is built from sending a write twice after a reconnect.
 - A queued create that the broker had already applied is no longer rolled back when the offline queue flushes. When a create's response is lost (the link drops after the broker applied it), the create stays queued and is replayed after reconnecting. On an entity with a unique constraint, mqdb answers that replay with 409, and the flush treated it as a lost race and deleted the local row the broker still held. The flush now reads the record back on a 409: if the broker holds that id, the insert was applied, and its queued data is sent as an update; otherwise it is rolled back as before.
 - `Store::list` with a `projection` now returns only the projected fields on native. The projection was passed to mqdb's `list` as its relationship includes, so no projection was applied.
+- A child create, update or delete with a remote no longer panics on `wasm32-unknown-unknown` with `time not implemented on this platform`. The scope version bump read `std::time::SystemTime`; it now reads `Date.now()` on wasm (LabOverWire/MQDB#187).
 
 ## [0.5.0] - 2026-08-26
 
