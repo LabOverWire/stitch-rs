@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Publish to crates.io (npm publish for stitch-wasm is done manually)
+  # Publish both library crates to crates.io
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
@@ -45,10 +45,54 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  # Publish the wasm bindings to npm via OIDC trusted publishing (no token)
+  publish-npm:
+    name: Publish @laboverwire/stitch-wasm to npm
+    needs: [publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Build scoped package
+        run: wasm-pack build --scope laboverwire crates/stitch-wasm
+
+      - name: Publish if the version is new
+        working-directory: crates/stitch-wasm/pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "@laboverwire/stitch-wasm@$VERSION" version >/dev/null 2>&1; then
+            echo "@laboverwire/stitch-wasm@$VERSION already published"
+          else
+            npm publish --access public
+          fi
+
   # Create GitHub release
   create-release:
     name: Create GitHub Release
-    needs: [publish]
+    needs: [publish, publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
