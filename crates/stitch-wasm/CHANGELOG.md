@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-17
+
+### Fixed
+
+- Creating, updating or deleting a child row with a remote no longer panics with `time not implemented on this platform` and leaves the store unusable. Inherited from `stitch-sync` (LabOverWire/MQDB#187).
+
 ### Changed
 
 - Built on stitch-sync with mqtt5-wasm 2.1.7. A store reloaded with the same client id now resumes its broker session instead of failing to connect; see the stitch-sync changelog. Minimum Rust version is 1.89.
