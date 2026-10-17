@@ -83,9 +83,7 @@ wasm-pack build crates/stitch-wasm                       # produces pkg/
 wasm-pack test --headless --chrome crates/stitch-wasm    # in-browser smoke test
 ```
 
-The headless suite cannot host a broker, so it asserts the wasm client builds
-and fails gracefully when the broker is unreachable; the native broker-backed
-`stitch-sync` tests cover the sync engine itself.
+The headless suite asserts the wasm client builds and fails gracefully when the broker is unreachable. When `STITCH_WASM_BROKER_URL` is set at build time (for example `ws://127.0.0.1:8083/mqtt` against mqdb started with `--ws-bind` and a `testuser`/`testpass` password file), it also syncs a child create to that live broker. The native broker-backed `stitch-sync` tests cover the rest of the sync engine.
 
 ## License
 
