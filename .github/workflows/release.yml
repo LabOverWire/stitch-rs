@@ -23,12 +23,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify tag matches stitch-sync version
+      - name: Verify tag matches crate versions
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          CRATE_VERSION=$(grep '^version' crates/stitch/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          if [ "$TAG" != "$CRATE_VERSION" ]; then
-            echo "Tag v$TAG does not match stitch-sync version $CRATE_VERSION"
+          SYNC_VERSION=$(grep '^version' crates/stitch/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          WASM_VERSION=$(grep '^version' crates/stitch-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$SYNC_VERSION" ]; then
+            echo "Tag v$TAG does not match stitch-sync version $SYNC_VERSION"
+            exit 1
+          fi
+          if [ "$TAG" != "$WASM_VERSION" ]; then
+            echo "Tag v$TAG does not match stitch-wasm version $WASM_VERSION"
             exit 1
           fi
 
@@ -92,7 +97,7 @@ jobs:
   # Create GitHub release
   create-release:
     name: Create GitHub Release
-    needs: [publish, publish-npm]
+    needs: [publish]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
