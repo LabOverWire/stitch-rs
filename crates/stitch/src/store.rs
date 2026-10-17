@@ -431,17 +431,9 @@ impl Store {
             .any(|t| t.entity == entity);
 
         let existing = inner.memory.read(entity, id).await?;
-        let mut scope_id = existing.as_ref().and_then(|e| {
-            if entity == root_entity {
-                e.get("id").and_then(Value::as_str).map(str::to_string)
-            } else if is_top_level {
-                Some(String::new())
-            } else {
-                e.get(scope_field)
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }
-        });
+        let mut scope_id = existing
+            .as_ref()
+            .and_then(|e| Self::scope_from_row(e, entity, root_entity, is_top_level, scope_field));
 
         if existing.is_some() && scope_id.is_some() {
             inner
@@ -456,19 +448,8 @@ impl Store {
             if scope_id.is_none()
                 && let Some(p_existing) = persistence.read(entity, id).await?
             {
-                scope_id = if entity == root_entity {
-                    p_existing
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                } else if is_top_level {
-                    Some(String::new())
-                } else {
-                    p_existing
-                        .get(scope_field)
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                };
+                scope_id =
+                    Self::scope_from_row(&p_existing, entity, root_entity, is_top_level, scope_field);
                 if scope_id.is_some() && existing.is_none() {
                     inner
                         .memory
@@ -549,17 +530,9 @@ impl Store {
             .any(|t| t.entity == entity);
 
         let existing = inner.memory.read(entity, id).await?;
-        let mut scope_id = existing.as_ref().and_then(|e| {
-            if entity == root_entity {
-                e.get("id").and_then(Value::as_str).map(str::to_string)
-            } else if is_top_level {
-                Some(String::new())
-            } else {
-                e.get(scope_field)
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }
-        });
+        let mut scope_id = existing
+            .as_ref()
+            .and_then(|e| Self::scope_from_row(e, entity, root_entity, is_top_level, scope_field));
 
         if existing.is_some() && scope_id.is_some() {
             inner.memory.delete(entity, id, origin).await.ok();
@@ -571,19 +544,8 @@ impl Store {
             if scope_id.is_none()
                 && let Some(p_existing) = persistence.read(entity, id).await?
             {
-                scope_id = if entity == root_entity {
-                    p_existing
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                } else if is_top_level {
-                    Some(String::new())
-                } else {
-                    p_existing
-                        .get(scope_field)
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                };
+                scope_id =
+                    Self::scope_from_row(&p_existing, entity, root_entity, is_top_level, scope_field);
                 if scope_id.is_some() && existing.is_none() {
                     inner.memory.delete(entity, id, origin).await.ok();
                 }
@@ -638,6 +600,149 @@ impl Store {
             }
         }
 
+        Ok(())
+    }
+
+    fn scope_from_row(
+        row: &Record,
+        entity: &str,
+        root_entity: &str,
+        is_top_level: bool,
+        scope_field: &str,
+    ) -> Option<String> {
+        if entity == root_entity {
+            row.get("id").and_then(Value::as_str).map(str::to_string)
+        } else if is_top_level {
+            Some(String::new())
+        } else {
+            row.get(scope_field)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }
+    }
+
+    async fn resolve_scope_for_cas(
+        inner: &Shared<StoreInner>,
+        entity: &str,
+        id: &str,
+    ) -> Result<String> {
+        let root_entity = &inner.config.scope.root_entity;
+        let scope_field = &inner.config.scope.scope_field;
+        let is_top_level = inner
+            .config
+            .top_level_entities
+            .iter()
+            .any(|t| t.entity == entity);
+        let existing = match inner.memory.read(entity, id).await? {
+            Some(row) => Some(row),
+            None => match &inner.persistence {
+                Some(p) => p.read(entity, id).await?,
+                None => None,
+            },
+        };
+        let Some(existing) = existing else {
+            return Err(Error::NotFound {
+                entity: entity.to_string(),
+                id: id.to_string(),
+            });
+        };
+        Self::scope_from_row(&existing, entity, root_entity, is_top_level, scope_field).ok_or(
+            Error::NotFound {
+                entity: entity.to_string(),
+                id: id.to_string(),
+            },
+        )
+    }
+
+    /// mqdb's server-assigned row version (`_version`) from a record returned by
+    /// [`Store::read`] / [`Store::list`], to pass as `expected_version` to
+    /// [`Store::update_if`] / [`Store::delete_if`]. `None` until a server
+    /// round-trip has populated it.
+    #[must_use]
+    pub fn row_version(record: &Record) -> Option<u64> {
+        record.get("_version").and_then(Value::as_u64)
+    }
+
+    /// Compare-and-set update: apply `fields` only if the row's server version
+    /// still equals `expected_version`, returning the new version. Requires a
+    /// live remote — it is sent to the broker first (never queued) and applied
+    /// locally only on success; a stale version yields
+    /// [`Error::PreconditionFailed`] with no local change.
+    pub async fn update_if(
+        &self,
+        entity: &str,
+        id: &str,
+        fields: Record,
+        expected_version: u64,
+    ) -> Result<u64> {
+        let inner = self.inner()?;
+        let Some(remote) = &inner.remote else {
+            return Err(Error::Config("update_if requires a configured remote".into()));
+        };
+        if inner.state.lock_guard().last_connection_status != ConnectionStatus::Connected {
+            return Err(Error::ConnectionClosed);
+        }
+        let scope_id = Self::resolve_scope_for_cas(inner, entity, id).await?;
+        let new_version = remote
+            .sync_update_checked(entity, &scope_id, id, fields.clone(), expected_version)
+            .await?;
+        let mut local = fields;
+        local.insert("_version".to_string(), Value::from(new_version));
+        if let Err(e) = inner.memory.update(entity, id, local.clone(), Origin::Local).await {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::update_if: memory apply failed after server CAS; local cache is stale until next sync",
+            );
+        }
+        if let Some(persistence) = &inner.persistence
+            && let Err(e) = persistence.update(entity, id, local, Origin::Local).await
+        {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::update_if: persistence apply failed after server CAS; durable store is stale until next sync",
+            );
+        }
+        Ok(new_version)
+    }
+
+    /// Compare-and-set delete: remove the row only if its server version still
+    /// equals `expected_version`. Same remote-first, online-only semantics as
+    /// [`Store::update_if`]; a stale version yields [`Error::PreconditionFailed`]
+    /// with no local change.
+    pub async fn delete_if(&self, entity: &str, id: &str, expected_version: u64) -> Result<()> {
+        let inner = self.inner()?;
+        let Some(remote) = &inner.remote else {
+            return Err(Error::Config("delete_if requires a configured remote".into()));
+        };
+        if inner.state.lock_guard().last_connection_status != ConnectionStatus::Connected {
+            return Err(Error::ConnectionClosed);
+        }
+        let scope_id = Self::resolve_scope_for_cas(inner, entity, id).await?;
+        remote
+            .sync_delete_checked(entity, &scope_id, id, expected_version)
+            .await?;
+        if let Err(e) = inner.memory.delete(entity, id, Origin::Local).await {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::delete_if: memory delete failed after server CAS; local cache is stale until next sync",
+            );
+        }
+        if let Some(persistence) = &inner.persistence
+            && let Err(e) = persistence.delete(entity, id, Origin::Local).await
+        {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::delete_if: persistence delete failed after server CAS; durable store is stale until next sync",
+            );
+        }
         Ok(())
     }
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Store::update_if` / `Store::delete_if` — compare-and-set writes gated on a
+  row's server version. They require a live remote (sent to the broker first,
+  never queued) and apply locally only on success; a stale version returns the
+  new terminal `Error::PreconditionFailed` (classifier `is_precondition_failed`),
+  distinct from the retryable `Conflict`, leaving no local change. `Store::row_version`
+  reads a record's `_version` to pass as the expected version. This surfaces
+  mqdb's `_expected_version` compare-and-set (mqdb-core 0.7.12); it is
+  native-remote only (the embedded backend has no server version).
+
 ## [0.5.1] - 2026-10-17
 
 ### Changed

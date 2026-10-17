@@ -31,6 +31,9 @@ pub enum Error {
     #[error("conflict for {entity}/{id}")]
     Conflict { entity: String, id: String },
 
+    #[error("precondition failed for {entity}/{id}")]
+    PreconditionFailed { entity: String, id: String },
+
     #[error("mqdb error in {method}: {source}")]
     Mqdb {
         method: String,
@@ -99,6 +102,13 @@ impl Error {
     #[must_use]
     pub fn is_conflict(&self) -> bool {
         matches!(self, Self::Conflict { .. })
+    }
+
+    /// `true` if a compare-and-set precondition (an expected row version) did
+    /// not hold. Terminal — never retried.
+    #[must_use]
+    pub fn is_precondition_failed(&self) -> bool {
+        matches!(self, Self::PreconditionFailed { .. })
     }
 
     /// `true` for schema-level rejections that won't be fixed by retrying:

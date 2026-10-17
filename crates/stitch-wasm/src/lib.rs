@@ -123,7 +123,8 @@ fn js_error(message: &str, kind: &str, entity: Option<&str>, id: Option<&str>) -
 fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) {
     use stitch::Error::{
         AlreadyInitialized, Config, Conflict, ConnectionClosed, Io, Mqdb, Mqtt, NotFound,
-        NotInitialized, Ownership, ScopeNotActive, Serde, SessionInvalid, Timeout, UnknownEntity,
+        NotInitialized, Ownership, PreconditionFailed, ScopeNotActive, Serde, SessionInvalid,
+        Timeout, UnknownEntity,
     };
     match e {
         NotInitialized => ("notInitialized", None, None),
@@ -133,6 +134,7 @@ fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) 
         NotFound { entity, id } => ("notFound", Some(entity), Some(id)),
         Ownership { entity, id } => ("ownership", Some(entity), Some(id)),
         Conflict { entity, id } => ("conflict", Some(entity), Some(id)),
+        PreconditionFailed { entity, id } => ("preconditionFailed", Some(entity), Some(id)),
         Mqdb { .. } if e.is_corruption() => ("corruption", None, None),
         Mqdb { .. } if e.is_permanent_mutation() => ("constraint", None, None),
         Mqdb { .. } => ("mqdb", None, None),
@@ -238,6 +240,14 @@ fn origin_from_tag(tag: Option<String>) -> Origin {
         Some("load") => Origin::Load,
         Some("clear") => Origin::Clear,
         _ => Origin::Local,
+    }
+}
+
+fn expected_version_u64(value: f64) -> Result<u64, JsValue> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 {
+        Ok(value as u64)
+    } else {
+        Err(err("expectedVersion must be a non-negative integer"))
     }
 }
 
@@ -503,6 +513,52 @@ impl Store {
     ) -> Result<(), JsValue> {
         self.inner
             .delete(&entity, &id, origin_from_tag(tag))
+            .await
+            .map_err(stitch_err)
+    }
+
+    /// Compare-and-set update: apply `fields` only if the row's server version
+    /// still equals `expectedVersion` (from a prior row's `_version`). Returns
+    /// the new version. Requires a live remote; rejects with a
+    /// `preconditionFailed` error on a stale version.
+    ///
+    /// # Errors
+    /// Returns an error if the argument is malformed, there is no connected
+    /// remote, or the broker rejects the write (including version mismatch).
+    #[wasm_bindgen(js_name = "updateIf")]
+    pub async fn update_if(
+        &self,
+        entity: String,
+        id: String,
+        fields: JsValue,
+        expected_version: f64,
+    ) -> Result<f64, JsValue> {
+        let record = record_from_js(&fields)?;
+        let expected = expected_version_u64(expected_version)?;
+        let new_version = self
+            .inner
+            .update_if(&entity, &id, record, expected)
+            .await
+            .map_err(stitch_err)?;
+        Ok(new_version as f64)
+    }
+
+    /// Compare-and-set delete: remove the row only if its server version still
+    /// equals `expectedVersion`. Same semantics as `updateIf`.
+    ///
+    /// # Errors
+    /// Returns an error if the argument is malformed, there is no connected
+    /// remote, or the broker rejects the write (including version mismatch).
+    #[wasm_bindgen(js_name = "deleteIf")]
+    pub async fn delete_if(
+        &self,
+        entity: String,
+        id: String,
+        expected_version: f64,
+    ) -> Result<(), JsValue> {
+        let expected = expected_version_u64(expected_version)?;
+        self.inner
+            .delete_if(&entity, &id, expected)
             .await
             .map_err(stitch_err)
     }

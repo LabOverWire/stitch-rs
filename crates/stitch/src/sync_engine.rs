@@ -313,6 +313,50 @@ impl SyncEngine {
         Ok(())
     }
 
+    pub async fn sync_update_checked(
+        &self,
+        entity: &str,
+        scope_id: &str,
+        id: &str,
+        mut data: Record,
+        expected_version: u64,
+    ) -> Result<u64> {
+        data.insert(
+            "_expected_version".to_string(),
+            Value::Number(expected_version.into()),
+        );
+        let topic = format!("{}/{}/{}/update", self.prefix, entity, id);
+        let response = self.request(&topic, Value::Object(data)).await?;
+        check_response(&response)?;
+        let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
+        if is_child && !scope_id.is_empty() {
+            self.bump_scope_version(scope_id).await?;
+        }
+        extract_version(&response)
+    }
+
+    pub async fn sync_delete_checked(
+        &self,
+        entity: &str,
+        scope_id: &str,
+        id: &str,
+        expected_version: u64,
+    ) -> Result<()> {
+        let mut payload = Map::new();
+        payload.insert(
+            "_expected_version".to_string(),
+            Value::Number(expected_version.into()),
+        );
+        let topic = format!("{}/{}/{}/delete", self.prefix, entity, id);
+        let response = self.request(&topic, Value::Object(payload)).await?;
+        check_response(&response)?;
+        let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
+        if is_child && !scope_id.is_empty() {
+            self.bump_scope_version(scope_id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn bump_scope_version(&self, scope_id: &str) -> Result<()> {
         let now = i64::try_from(rt::now_millis()).unwrap_or(i64::MAX);
         let mut payload = Map::new();
@@ -773,6 +817,7 @@ fn check_response(response: &Map<String, Value>) -> Result<()> {
         403 => Error::Ownership { entity, id },
         404 => Error::NotFound { entity, id },
         409 => Error::Conflict { entity, id },
+        412 => Error::PreconditionFailed { entity, id },
         _ => Error::Mqtt(message),
     })
 }
@@ -786,4 +831,13 @@ fn extract_id(response: &Map<String, Value>) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| Error::Mqtt("response missing data.id".into()))
+}
+
+fn extract_version(response: &Map<String, Value>) -> Result<u64> {
+    response
+        .get("data")
+        .and_then(Value::as_object)
+        .and_then(|obj| obj.get("_version"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Error::Mqtt("response missing data._version".into()))
 }
