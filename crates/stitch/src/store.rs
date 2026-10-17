@@ -686,9 +686,25 @@ impl Store {
         let new_version = remote
             .sync_update_checked(entity, &scope_id, id, fields.clone(), expected_version)
             .await?;
-        let _ = inner.memory.update(entity, id, fields.clone(), Origin::Local).await;
-        if let Some(persistence) = &inner.persistence {
-            let _ = persistence.update(entity, id, fields, Origin::Local).await;
+        let mut local = fields;
+        local.insert("_version".to_string(), Value::from(new_version));
+        if let Err(e) = inner.memory.update(entity, id, local.clone(), Origin::Local).await {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::update_if: memory apply failed after server CAS; local cache is stale until next sync",
+            );
+        }
+        if let Some(persistence) = &inner.persistence
+            && let Err(e) = persistence.update(entity, id, local, Origin::Local).await
+        {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::update_if: persistence apply failed after server CAS; durable store is stale until next sync",
+            );
         }
         Ok(new_version)
     }
@@ -709,9 +725,23 @@ impl Store {
         remote
             .sync_delete_checked(entity, &scope_id, id, expected_version)
             .await?;
-        let _ = inner.memory.delete(entity, id, Origin::Local).await;
-        if let Some(persistence) = &inner.persistence {
-            let _ = persistence.delete(entity, id, Origin::Local).await;
+        if let Err(e) = inner.memory.delete(entity, id, Origin::Local).await {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::delete_if: memory delete failed after server CAS; local cache is stale until next sync",
+            );
+        }
+        if let Some(persistence) = &inner.persistence
+            && let Err(e) = persistence.delete(entity, id, Origin::Local).await
+        {
+            tracing::warn!(
+                entity,
+                id,
+                error = %e,
+                "Store::delete_if: persistence delete failed after server CAS; durable store is stale until next sync",
+            );
         }
         Ok(())
     }

@@ -331,6 +331,17 @@ async fn update_if_and_delete_if_fence_on_server_version() {
         .expect("CAS update with the current version succeeds");
     assert_eq!(v2, 2, "update_if returns the bumped server version");
 
+    let cached = store
+        .read("project", "p1")
+        .await
+        .expect("read p1")
+        .expect("row present after CAS update");
+    assert_eq!(
+        Store::row_version(&cached),
+        Some(v2),
+        "update_if must refresh the cached _version so a read-modify-write loop sees it"
+    );
+
     let stale = store
         .update_if("project", "p1", make_record(&[("name", json!("Gamma"))]), 1)
         .await
@@ -350,9 +361,13 @@ async fn update_if_and_delete_if_fence_on_server_version() {
     );
 
     store
-        .delete_if("project", "p1", v2)
+        .delete_if(
+            "project",
+            "p1",
+            Store::row_version(&cached).expect("cached version"),
+        )
         .await
-        .expect("CAS delete with the current version succeeds");
+        .expect("CAS delete with the cached version succeeds");
 
     store.shutdown().await.expect("shutdown store");
     broker.shutdown().await;

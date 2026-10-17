@@ -525,6 +525,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the argument is malformed, there is no connected
     /// remote, or the broker rejects the write (including version mismatch).
+    #[wasm_bindgen(js_name = "updateIf")]
     pub async fn update_if(
         &self,
         entity: String,
@@ -548,6 +549,7 @@ impl Store {
     /// # Errors
     /// Returns an error if the argument is malformed, there is no connected
     /// remote, or the broker rejects the write (including version mismatch).
+    #[wasm_bindgen(js_name = "deleteIf")]
     pub async fn delete_if(
         &self,
         entity: String,
