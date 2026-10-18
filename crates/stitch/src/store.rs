@@ -448,8 +448,13 @@ impl Store {
             if scope_id.is_none()
                 && let Some(p_existing) = persistence.read(entity, id).await?
             {
-                scope_id =
-                    Self::scope_from_row(&p_existing, entity, root_entity, is_top_level, scope_field);
+                scope_id = Self::scope_from_row(
+                    &p_existing,
+                    entity,
+                    root_entity,
+                    is_top_level,
+                    scope_field,
+                );
                 if scope_id.is_some() && existing.is_none() {
                     inner
                         .memory
@@ -544,8 +549,13 @@ impl Store {
             if scope_id.is_none()
                 && let Some(p_existing) = persistence.read(entity, id).await?
             {
-                scope_id =
-                    Self::scope_from_row(&p_existing, entity, root_entity, is_top_level, scope_field);
+                scope_id = Self::scope_from_row(
+                    &p_existing,
+                    entity,
+                    root_entity,
+                    is_top_level,
+                    scope_field,
+                );
                 if scope_id.is_some() && existing.is_none() {
                     inner.memory.delete(entity, id, origin).await.ok();
                 }
@@ -677,7 +687,9 @@ impl Store {
     ) -> Result<u64> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
-            return Err(Error::Config("update_if requires a configured remote".into()));
+            return Err(Error::Config(
+                "update_if requires a configured remote".into(),
+            ));
         };
         if inner.state.lock_guard().last_connection_status != ConnectionStatus::Connected {
             return Err(Error::ConnectionClosed);
@@ -688,7 +700,11 @@ impl Store {
             .await?;
         let mut local = fields;
         local.insert("_version".to_string(), Value::from(new_version));
-        if let Err(e) = inner.memory.update(entity, id, local.clone(), Origin::Local).await {
+        if let Err(e) = inner
+            .memory
+            .update(entity, id, local.clone(), Origin::Local)
+            .await
+        {
             tracing::warn!(
                 entity,
                 id,
@@ -716,7 +732,9 @@ impl Store {
     pub async fn delete_if(&self, entity: &str, id: &str, expected_version: u64) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
-            return Err(Error::Config("delete_if requires a configured remote".into()));
+            return Err(Error::Config(
+                "delete_if requires a configured remote".into(),
+            ));
         };
         if inner.state.lock_guard().last_connection_status != ConnectionStatus::Connected {
             return Err(Error::ConnectionClosed);
