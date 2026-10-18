@@ -372,3 +372,135 @@ async fn update_if_and_delete_if_fence_on_server_version() {
     store.shutdown().await.expect("shutdown store");
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn flush_of_a_queued_update_does_not_resurrect_a_remotely_deleted_record() {
+    init_tracing();
+    let broker = BrokerHarness::new()
+        .scope("project", "projectId")
+        .start()
+        .await
+        .expect("start broker");
+
+    let remote = || Some(RemoteConfig::new(broker.tcp_url()));
+    let editor = Store::with_client_id(
+        fixture_config(),
+        StoreOptions {
+            persistence: None,
+            remote: remote(),
+        },
+        "editor".into(),
+    );
+    let deleter = Store::with_client_id(
+        fixture_config(),
+        StoreOptions {
+            persistence: None,
+            remote: remote(),
+        },
+        "deleter".into(),
+    );
+    editor.initialize().await.expect("initialize editor");
+    deleter.initialize().await.expect("initialize deleter");
+    assert!(reaches_connected(&editor).await, "editor must connect");
+    assert!(reaches_connected(&deleter).await, "deleter must connect");
+    deleter
+        .replace_scope("p1")
+        .await
+        .expect("deleter opens scope");
+
+    editor
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .expect("create project");
+    editor
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hello")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .expect("create task");
+
+    let mut saw = false;
+    for _ in 0..100 {
+        if deleter.read("task", "t1").await.expect("read").is_some() {
+            saw = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(saw, "deleter must observe t1 synced from the broker");
+
+    editor.disconnect().await.expect("disconnect editor");
+    sleep(Duration::from_millis(100)).await;
+    editor
+        .update(
+            "task",
+            "t1",
+            make_record(&[("title", json!("edited-offline"))]),
+            Origin::Local,
+        )
+        .await
+        .expect("queue offline update");
+    assert!(
+        editor.pending_count("p1").await.expect("pending") > 0,
+        "the offline update must be queued"
+    );
+
+    deleter
+        .delete("task", "t1", Origin::Local)
+        .await
+        .expect("delete t1 on the broker");
+    let mut gone = false;
+    for _ in 0..100 {
+        if deleter.read("task", "t1").await.expect("read").is_none() {
+            gone = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "t1 must be gone from the broker before the flush");
+
+    editor
+        .reconnect(&broker.tcp_url(), None, None, None)
+        .await
+        .expect("reconnect editor");
+    assert!(reaches_connected(&editor).await, "editor must reconnect");
+    let mut drained = false;
+    for _ in 0..100 {
+        if editor.pending_count("p1").await.expect("pending") == 0 {
+            drained = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(drained, "the flush must drain the queued update");
+
+    sleep(Duration::from_millis(500)).await;
+
+    let on_broker = deleter.read("task", "t1").await.expect("deleter read");
+    assert!(
+        on_broker.is_none(),
+        "a queued update flushed after a remote delete must not resurrect the record on the broker, but it reappeared as {on_broker:?}"
+    );
+
+    let on_editor = editor.read("task", "t1").await.expect("editor read");
+    assert!(
+        on_editor.is_none(),
+        "the flushing store must not keep a local copy of a record the broker reports as deleted, but it still holds {on_editor:?}"
+    );
+
+    editor.shutdown().await.expect("shutdown editor");
+    deleter.shutdown().await.expect("shutdown deleter");
+    broker.shutdown().await;
+}

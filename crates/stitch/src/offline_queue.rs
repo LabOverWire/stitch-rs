@@ -900,6 +900,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flush_update_not_found_drops_when_record_gone_from_broker() -> crate::error::Result<()>
+    {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        queue
+            .queue(pending(
+                Operation::Update,
+                "t1",
+                Some(record(&[("status", "running")])),
+                1,
+            ))
+            .await?;
+
+        let sender = FakeSender {
+            fail_update_not_found: true,
+            read_result: Mutex::new(None),
+            ..Default::default()
+        };
+        assert_eq!(queue.flush(&sender).await?.retained, 0);
+        assert_eq!(sender.updates.load(Ordering::SeqCst), 1);
+        assert!(
+            sender.creates.lock_guard().is_empty(),
+            "a record the broker no longer holds must not be re-created by the flush"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn flush_consolidates_insert_and_update_into_single_create() -> crate::error::Result<()> {
         let queue = InMemoryOfflineQueue::new("workspace".into());
         queue
