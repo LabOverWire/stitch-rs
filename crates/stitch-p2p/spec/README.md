@@ -14,6 +14,7 @@ particularly the tombstone GC design.
 | `StitchP2PTransitive.tla` | Fixed sync topology; a peer learns an origin's writes only through an intermediary | `InvConvergence`, `InvPrefixBounded` |
 | `StitchP2PAuth.tla` | Membership authorization over eventually-consistent membership; `Causal` toggles reject-at-receipt vs read-time filter | `InvConvergence` |
 | `StitchP2PReclaim.tla` | Tombstone reclamation; `RequireLwm` toggles naive-on-tombstone vs cursor low-water-mark | `InvConvergence` |
+| `SessionPull.tla` | Periodic session pull; `Mode` toggles baseline / initiator (only the lower-id peer ticks, empty deltas suppressed, a pull-back `Hello` keeps both directions) / naive (skip the `Hello` once local cursors stop changing) | `InvCursorBound`, `InvOwnLog`, `Converges` |
 
 ## Results (all full state-space exhaustion, not `limit_reached`)
 
@@ -31,6 +32,12 @@ particularly the tombstone GC design.
 | Membership auth — read-time filter | `StitchP2PAuth_causal.cfg` | 64 | converges |
 | Reclaim — naive (on tombstone) | `StitchP2PReclaim_naive.cfg` | 41 | **convergence violated (late write resurrects)** |
 | Reclaim — cursor low-water-mark | `StitchP2PReclaim_lwm.cfg` | 83 | converges |
+| Session pull — initiator, 2 peers × 2 frames | `SessionPull_initiator_2x2.cfg` | 29,565 | converges |
+| Session pull — initiator, 3 peers, writer 1 | `SessionPull_initiator_3w1.cfg` | 12,911 | converges |
+| Session pull — initiator, 3 peers, writer 2 | `SessionPull_initiator_3w2.cfg` | 8,689 | converges |
+| Session pull — initiator, 3 peers, writer 3 | `SessionPull_initiator_3w3.cfg` | 5,161 | converges |
+| Session pull — naive, 2 peers × 2 frames | `SessionPull_naive_2x2.cfg` | 48,739 explored | **convergence violated (lost push never re-pulled)** |
+| Session pull — naive, 3 peers, writer 3 | `SessionPull_naive_3w3.cfg` | 1,090 explored | **convergence violated (lost push never re-pulled)** |
 
 ## What they establish
 
@@ -77,6 +84,29 @@ particularly the tombstone GC design.
    tombstone's HLC — then no older write is in flight and the record can be
    forgotten. The price: an offline or new member blocks reclamation (no
    resurrection, but no GC) until it catches up or snapshots.
+
+8. **Idle session traffic can be cut without breaking convergence — only if the
+   quiet side stays pullable.** The baseline protocol sends a `Hello` from both
+   peers every interval and answers every `Hello` with a `Delta`, empty or not.
+   Suppressing that naively — skip the periodic `Hello` once a peer's own cursors
+   stop changing — breaks convergence: a dropped push is then never re-pulled and
+   the frame strands on its writer (counterexample at 2 and 3 peers, depth ≤ 16).
+   The safe form (`initiator`) sends the periodic `Hello` from only the lower-id
+   peer and replies only with a non-empty `Delta`, but keeps that `Hello`
+   unconditional and adds a pull-back: a peer whose inbound `Hello` shows the
+   sender holds frames it lacks answers with its own `Hello`, so the pull still
+   runs both ways with one side ticking. It converges at every checked size. The
+   model has no clock, so each session's pull is fair independently — a per-bearer
+   interval (pull a fast link often, HF rarely) does not affect convergence, it
+   only bounds catch-up time after a lost push. The implementation adds one
+   message this model leaves out on purpose: the quiet higher-id peer also
+   answers the periodic `Hello` with its cursors, so the ticking peer's reclaim
+   low-water-mark (`StitchP2PReclaim.tla`) stays current instead of freezing once
+   the session is synced. That reply is convergence-neutral — a synced peer's
+   reply carries no frames — so modelling it only enlarges the state space (the
+   3-peer runs stop exhausting) without changing convergence, which is why the
+   model keeps the minimal pull-back form. `session.rs` implements
+   `initiator`.
 
 ## Reproducing
 
