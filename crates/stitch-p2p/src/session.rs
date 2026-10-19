@@ -1,5 +1,6 @@
+use crate::hlc::PeerId;
 use crate::protocol::{ProtocolError, SyncMessage, read_message, write_message};
-use crate::replog::RecordOutcome;
+use crate::replog::{Cursors, RecordOutcome};
 use crate::sync_state::SyncState;
 use crate::wire::WriteFrame;
 use std::sync::Arc;
@@ -18,9 +19,17 @@ fn now_millis() -> u64 {
 /// outbound channel closes. Symmetric — both peers run this.
 ///
 /// The protocol is periodic pull-based anti-entropy, matching the verified
-/// `Sync` action in `spec/`:
-/// - send a `Hello` carrying our cursors immediately, then every `pull_interval`
-/// - on an inbound `Hello`, reply with the `Delta` of writes that peer is missing
+/// `initiator` mode of `spec/SessionPull.tla`:
+/// - send a `Hello` carrying our cursors immediately on connect; thereafter,
+///   once it has learned the peer's id, only the lower-id peer of the session
+///   sends the periodic `Hello`
+/// - on an inbound `Hello`, reply with a `Delta` only when it is non-empty, and
+///   send a `Hello` back when the peer's cursors show it is ahead of us — the
+///   pull-back that keeps both directions moving with one side ticking
+/// - the higher-id (non-ticking) peer also answers every `Hello` with its
+///   cursors so the ticking peer's reclaim low-water-mark stays current; that
+///   reply carries no frames and is not part of the convergence model (it is a
+///   reclamation aid — see `spec/README.md`)
 /// - on an inbound `Delta`, apply each frame (LWW + GC)
 /// - on a local write (via `outbound`), push it immediately as a one-frame
 ///   `Delta` — a latency optimization; correctness rests on the periodic pull
@@ -41,6 +50,9 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    let self_id = state.lock().await.self_id();
+    let mut remote_id: Option<PeerId> = None;
+
     send_hello(&state, &mut writer).await?;
 
     let mut ticker = tokio::time::interval(pull_interval);
@@ -52,12 +64,21 @@ where
             inbound = read_message(&mut reader) => {
                 match inbound {
                     Ok(SyncMessage::Hello { from, cursors }) => {
-                        let catch_up = {
+                        remote_id = Some(from);
+                        let (catch_up, reply_hello) = {
                             let mut guard = state.lock().await;
                             guard.note_peer_cursors(from, cursors.clone());
-                            guard.delta_since(&cursors)
+                            let catch_up = guard.delta_since(&cursors);
+                            let reply_hello = peer_ahead(&cursors, &guard.cursors())
+                                || !should_initiate(self_id, remote_id);
+                            (catch_up, reply_hello)
                         };
-                        write_message(&mut writer, &SyncMessage::Delta(catch_up)).await?;
+                        if !catch_up.is_empty() {
+                            write_message(&mut writer, &SyncMessage::Delta(catch_up)).await?;
+                        }
+                        if reply_hello {
+                            send_hello(&state, &mut writer).await?;
+                        }
                     }
                     Ok(SyncMessage::Delta(frames)) => apply(&state, frames).await,
                     Err(e) if is_eof(&e) => return Ok(()),
@@ -73,10 +94,25 @@ where
                 }
             }
             _ = ticker.tick() => {
-                send_hello(&state, &mut writer).await?;
+                if should_initiate(self_id, remote_id) {
+                    send_hello(&state, &mut writer).await?;
+                }
             }
         }
     }
+}
+
+fn should_initiate(self_id: PeerId, remote_id: Option<PeerId>) -> bool {
+    match remote_id {
+        Some(remote) => self_id < remote,
+        None => true,
+    }
+}
+
+fn peer_ahead(theirs: &Cursors, ours: &Cursors) -> bool {
+    theirs
+        .iter()
+        .any(|(origin, seq)| *seq > ours.get(origin).copied().unwrap_or(0))
 }
 
 async fn send_hello<W>(state: &Mutex<SyncState>, writer: &mut W) -> Result<(), ProtocolError>
@@ -209,6 +245,90 @@ mod tests {
         b.abort();
 
         assert!(ok, "post-connect write did not propagate");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lower_peer_pull_drains_higher_peer_write() {
+        let a_state = Arc::new(Mutex::new(SyncState::new(peer(1))));
+        let b_state = Arc::new(Mutex::new(SyncState::new(peer(2))));
+
+        let (a_io, b_io) = tokio::io::duplex(16 * 1024);
+        let (a_r, a_w) = split(a_io);
+        let (b_r, b_w) = split(b_io);
+        let (a_tx, a_rx) = mpsc::unbounded_channel();
+        let (b_tx, b_rx) = mpsc::unbounded_channel();
+
+        let a = tokio::spawn(run(a_state.clone(), a_r, a_w, a_rx, FAST_PULL));
+        let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
+
+        b_state
+            .lock()
+            .await
+            .local_write(12, Op::Insert, "task", "b-late", b"from-b".to_vec())
+            .expect("write");
+
+        let ok = wait_until(Duration::from_secs(2), || async {
+            a_state.lock().await.visible("task", "b-late").is_some()
+        })
+        .await;
+
+        drop(a_tx);
+        drop(b_tx);
+        a.abort();
+        b.abort();
+
+        assert!(
+            ok,
+            "lower peer's periodic pull did not drain the higher peer's write"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lower_peer_cursors_refresh_so_reclaim_advances() {
+        let a_state = Arc::new(Mutex::new(SyncState::new(peer(1))));
+        let b_state = Arc::new(Mutex::new(SyncState::new(peer(2))));
+
+        a_state
+            .lock()
+            .await
+            .local_write(10, Op::Insert, "task", "t1", b"from-a".to_vec())
+            .expect("write");
+        b_state
+            .lock()
+            .await
+            .local_write(11, Op::Insert, "task", "t2", b"from-b".to_vec())
+            .expect("write");
+
+        let (a_io, b_io) = tokio::io::duplex(16 * 1024);
+        let (a_r, a_w) = split(a_io);
+        let (b_r, b_w) = split(b_io);
+        let (a_tx, a_rx) = mpsc::unbounded_channel();
+        let (b_tx, b_rx) = mpsc::unbounded_channel();
+
+        let a = tokio::spawn(run(a_state.clone(), a_r, a_w, a_rx, FAST_PULL));
+        let b = tokio::spawn(run(b_state.clone(), b_r, b_w, b_rx, FAST_PULL));
+
+        let fresh = wait_until(Duration::from_secs(2), || async {
+            let a = a_state.lock().await;
+            a.visible("task", "t2").is_some() && a.peer_cursor(&peer(2), &peer(1)) >= 1
+        })
+        .await;
+
+        let dropped = a_state.lock().await.reclaim(&[peer(2)]);
+
+        drop(a_tx);
+        drop(b_tx);
+        a.abort();
+        b.abort();
+
+        assert!(
+            fresh,
+            "lower peer never learned the higher peer caught up on its origin"
+        );
+        assert_eq!(
+            dropped, 2,
+            "lower peer could not reclaim both frames; its view of the higher peer's cursors went stale"
+        );
     }
 
     async fn wait_until<F, Fut>(timeout: Duration, mut cond: F) -> bool

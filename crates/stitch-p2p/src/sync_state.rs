@@ -95,6 +95,15 @@ impl SyncState {
         self.peer_cursors.insert(peer, cursors);
     }
 
+    #[cfg(test)]
+    pub(crate) fn peer_cursor(&self, peer: &PeerId, origin: &PeerId) -> u64 {
+        self.peer_cursors
+            .get(peer)
+            .and_then(|c| c.get(origin))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Reclaim **in-memory** replication-log prefixes that every listed member
     /// has already delivered. For each origin, the low-water-mark is the minimum
     /// cursor across this peer and all `members`; frames at or below it are
