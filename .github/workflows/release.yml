@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build and publish (e.g. v0.5.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,7 +33,8 @@ jobs:
 
       - name: Verify tag matches crate versions
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
+          REF="${{ inputs.ref || github.ref_name }}"
+          TAG="${REF#v}"
           SYNC_VERSION=$(grep '^version' crates/stitch/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           WASM_VERSION=$(grep '^version' crates/stitch-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           if [ "$TAG" != "$SYNC_VERSION" ]; then
@@ -60,6 +69,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -98,6 +109,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [publish]
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
