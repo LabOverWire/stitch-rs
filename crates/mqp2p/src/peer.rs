@@ -26,7 +26,7 @@ pub struct PeerConfig {
     pub keepalive_secs: Option<u64>,
     pub presence: bool,
     pub segmentation_offload: SegmentationOffload,
-    pub transport_config: Option<Arc<quinn::TransportConfig>>,
+    pub transport_config: Option<quinn::TransportConfig>,
 }
 
 impl PeerConfig {
@@ -89,12 +89,12 @@ impl PeerConfig {
         self
     }
 
-    /// Apply a fully custom QUIC transport config (keep-alive, idle timeout,
+    /// Apply a custom QUIC transport config (keep-alive, idle timeout,
     /// concurrent-stream limits, stream and datagram windows, congestion
-    /// controller) to both the client and server endpoints. It supersedes
-    /// [`PeerConfig::without_segmentation_offload`]: set segmentation offload
-    /// on the supplied config directly.
-    pub fn with_transport_config(mut self, transport: Arc<quinn::TransportConfig>) -> Self {
+    /// controller) to both the client and server endpoints. Segmentation
+    /// offload stays governed by [`PeerConfig::without_segmentation_offload`]
+    /// and is applied on top of this config, so the two compose.
+    pub fn with_transport_config(mut self, transport: quinn::TransportConfig) -> Self {
         self.transport_config = Some(transport);
         self
     }
@@ -126,7 +126,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub async fn new(config: PeerConfig) -> Result<Self> {
+    pub async fn new(mut config: PeerConfig) -> Result<Self> {
         let identity = quic::generate_self_signed_cert()?;
 
         let std_socket = std::net::UdpSocket::bind(config.bind_addr)?;
@@ -168,18 +168,12 @@ impl Peer {
             key_der: identity.key_der.clone(),
             fingerprint: identity.fingerprint.clone(),
         };
-        let quic = match &config.transport_config {
-            Some(transport) => QuicEndpoint::bind_with_transport(
-                quic_socket,
-                cert_identity,
-                Arc::clone(transport),
-            )?,
-            None => QuicEndpoint::bind_with_offload(
-                quic_socket,
-                cert_identity,
-                config.segmentation_offload,
-            )?,
-        };
+        let offload = config.segmentation_offload;
+        let mut transport = config.transport_config.take().unwrap_or_default();
+        transport.enable_segmentation_offload(offload == SegmentationOffload::Enabled);
+        debug!(?offload, "QUIC transport configured");
+        let quic =
+            QuicEndpoint::bind_with_transport(quic_socket, cert_identity, Arc::new(transport))?;
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
