@@ -6,6 +6,7 @@ use crate::signaling::{
 };
 use crate::stun;
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
+use bytes::Bytes;
 use mqtt5::ConnectOptions;
 use mqtt5::client::MqttClient;
 use quinn::Connection;
@@ -547,6 +548,47 @@ impl P2pConnection {
             .map_err(|e| Error::Quic(format!("accept bidirectional stream: {e}")))
     }
 
+    /// Open a fresh unidirectional stream as the sender. Fits one message per
+    /// stream (e.g. an encoded video frame that can be dropped with
+    /// [`quinn::SendStream::reset`] once a newer frame supersedes it).
+    pub async fn open_uni(&self) -> Result<quinn::SendStream> {
+        self.connection
+            .open_uni()
+            .await
+            .map_err(|e| Error::Quic(format!("open unidirectional stream: {e}")))
+    }
+
+    /// Accept the next unidirectional stream opened by the peer.
+    pub async fn accept_uni(&self) -> Result<quinn::RecvStream> {
+        self.connection
+            .accept_uni()
+            .await
+            .map_err(|e| Error::Quic(format!("accept unidirectional stream: {e}")))
+    }
+
+    /// Send an unreliable datagram. Fits small latest-value-wins state (e.g.
+    /// cursor position); it is unordered, unacknowledged, and never
+    /// retransmitted, with no flow-control backpressure.
+    pub fn send_datagram(&self, data: Bytes) -> Result<()> {
+        self.connection
+            .send_datagram(data)
+            .map_err(|e| Error::Quic(format!("send datagram: {e}")))
+    }
+
+    /// Receive the next datagram sent by the peer.
+    pub async fn read_datagram(&self) -> Result<Bytes> {
+        self.connection
+            .read_datagram()
+            .await
+            .map_err(|e| Error::Quic(format!("read datagram: {e}")))
+    }
+
+    /// Largest datagram that can currently be sent, or `None` when the peer
+    /// has not enabled datagram support.
+    pub fn max_datagram_size(&self) -> Option<usize> {
+        self.connection.max_datagram_size()
+    }
+
     pub async fn send_file(
         &self,
         path: &Path,
@@ -607,5 +649,65 @@ mod tests {
             .with_lease_secs(15)
             .with_keepalive_secs(60);
         assert_eq!(config.effective_keepalive_secs(), 60);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p2p_connection_exposes_uni_and_datagrams() {
+        use crate::quic::{QuicEndpoint, generate_self_signed_cert};
+
+        let peer_info = |id: &str, fingerprint: &str| PeerInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            status: "online".to_string(),
+            quic_port: 0,
+            cert_fingerprint: fingerprint.to_string(),
+            public_addr: None,
+            expires_at: None,
+            lease_secs: None,
+        };
+
+        let id_a = generate_self_signed_cert().expect("cert a");
+        let id_b = generate_self_signed_cert().expect("cert b");
+        let fp_a = id_a.fingerprint.clone();
+        let fp_b = id_b.fingerprint.clone();
+        let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep_a = QuicEndpoint::bind(socket(), id_a).expect("bind a");
+        let ep_b = QuicEndpoint::bind(socket(), id_b).expect("bind b");
+        let addr_b = ep_b.local_addr().expect("addr b");
+
+        let info_a = peer_info("a", &fp_a);
+        let info_b = peer_info("b", &fp_b);
+
+        let accept = tokio::spawn(async move {
+            let raw = ep_b.accept_with_fingerprint(&fp_a).await.expect("accept");
+            P2pConnection {
+                connection: raw,
+                remote_peer: info_a,
+            }
+        });
+
+        let raw_a = ep_a.connect(addr_b, &fp_b).await.expect("connect");
+        let conn_a = P2pConnection {
+            connection: raw_a,
+            remote_peer: info_b,
+        };
+        let conn_b = accept.await.expect("accept task");
+
+        let mut send = conn_a.open_uni().await.expect("open_uni");
+        send.write_all(b"frame-1").await.expect("write");
+        send.finish().expect("finish");
+        let mut recv = conn_b.accept_uni().await.expect("accept_uni");
+        let frame = recv.read_to_end(1024).await.expect("read uni");
+        assert_eq!(frame, b"frame-1");
+
+        assert!(conn_a.max_datagram_size().is_some());
+        conn_a
+            .send_datagram(Bytes::from_static(b"cursor"))
+            .expect("send_datagram");
+        let datagram = conn_b.read_datagram().await.expect("read_datagram");
+        assert_eq!(&datagram[..], b"cursor");
+
+        conn_a.close().expect("close a");
+        conn_b.close().expect("close b");
     }
 }

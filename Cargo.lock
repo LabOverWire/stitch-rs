@@ -1440,6 +1440,7 @@ dependencies = [
 name = "mqp2p"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "clap",
  "flume",
  "mqtt5",
