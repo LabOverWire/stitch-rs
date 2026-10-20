@@ -119,6 +119,36 @@ async fn create_generates_id_when_absent() {
 }
 
 #[tokio::test]
+async fn create_over_existing_local_id_is_rejected_and_preserves_the_row() {
+    let store = Store::new(fixture_config(), StoreOptions::default());
+    store.initialize().await.unwrap();
+
+    store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let err = store
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("Beta"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, stitch::Error::Conflict { .. }));
+
+    let got = store.read("project", "p1").await.unwrap().unwrap();
+    assert_eq!(got.get("name").and_then(Value::as_str), Some("Alpha"));
+}
+
+#[tokio::test]
 async fn update_and_delete_in_memory_only_mode() {
     let store = Store::new(fixture_config(), StoreOptions::default());
     store.initialize().await.unwrap();
