@@ -308,11 +308,12 @@ impl Store {
     /// instead of a phantom local row. Transient failures keep the row queued
     /// for retry and still return the id.
     ///
-    /// `create` upserts by `id`: calling it with an `id` that already exists
-    /// locally overwrites that row, and a subsequent remote rejection rolls the
-    /// `id` back to empty rather than restoring the prior row. Use a fresh `id`
-    /// for an exclusive-key claim, and [`Store::update`] to modify an existing
-    /// row.
+    /// An [`Origin::Local`] `create` is an insert, not an upsert: calling it
+    /// with an `id` that already exists locally returns [`Error::Conflict`] and
+    /// leaves the existing row untouched. Use a fresh `id` for an exclusive-key
+    /// claim, and [`Store::update`] to modify an existing row. Remote-origin
+    /// writes still upsert so an out-of-order mirrored `Insert` overwrites
+    /// cleanly.
     pub async fn create(
         &self,
         entity: &str,
@@ -343,6 +344,13 @@ impl Store {
                 .or_insert_with(|| Value::String(effective_scope.clone()));
         }
         let has_sync_target = !effective_scope.is_empty() || is_top_level;
+
+        if origin == Origin::Local && inner.memory.read(entity, &id).await?.is_some() {
+            return Err(Error::Conflict {
+                entity: entity.to_string(),
+                id,
+            });
+        }
 
         inner
             .memory
