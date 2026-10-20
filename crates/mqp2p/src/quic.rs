@@ -248,6 +248,7 @@ impl QuicEndpoint {
         identity: CertIdentity,
         offload: SegmentationOffload,
     ) -> Result<Self> {
+        debug!(?offload, "QUIC transport: segmentation offload");
         Self::bind_with_transport(socket, identity, transport_config(offload))
     }
 
@@ -376,29 +377,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn bind_with_transport_applies_the_supplied_config() {
-        let mut transport = quinn::TransportConfig::default();
-        transport.datagram_receive_buffer_size(None);
+    async fn bind_with_transport_applies_the_supplied_config_to_both_endpoints() {
+        let no_datagrams = || {
+            let mut transport = quinn::TransportConfig::default();
+            transport.datagram_receive_buffer_size(None);
+            Arc::new(transport)
+        };
 
         let id_a = generate_self_signed_cert().expect("cert a");
         let id_b = generate_self_signed_cert().expect("cert b");
         let fp_a = id_a.fingerprint.clone();
         let fp_b = id_b.fingerprint.clone();
         let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
-        let ep_a = QuicEndpoint::bind(socket(), id_a).expect("bind a");
+        let ep_a =
+            QuicEndpoint::bind_with_transport(socket(), id_a, no_datagrams()).expect("bind a");
         let ep_b =
-            QuicEndpoint::bind_with_transport(socket(), id_b, Arc::new(transport)).expect("bind b");
+            QuicEndpoint::bind_with_transport(socket(), id_b, no_datagrams()).expect("bind b");
         let addr_b = ep_b.local_addr().expect("addr b");
 
         let accept =
             tokio::spawn(async move { ep_b.accept_with_fingerprint(&fp_a).await.expect("accept") });
 
         let conn_a = ep_a.connect(addr_b, &fp_b).await.expect("connect");
-        let _conn_b = accept.await.expect("accept task");
+        let conn_b = accept.await.expect("accept task");
 
         assert!(
             conn_a.max_datagram_size().is_none(),
-            "peer B disabled datagram receive via its transport config",
+            "accept-side (server) transport applied: B disabled datagram receive",
+        );
+        assert!(
+            conn_b.max_datagram_size().is_none(),
+            "connect-side (client) transport applied: A disabled datagram receive",
         );
     }
 }
