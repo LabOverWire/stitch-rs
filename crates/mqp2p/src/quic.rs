@@ -66,7 +66,7 @@ fn transport_config(offload: SegmentationOffload) -> Arc<quinn::TransportConfig>
 
 fn build_server_config(
     identity: &CertIdentity,
-    offload: SegmentationOffload,
+    transport: Arc<quinn::TransportConfig>,
 ) -> Result<ServerConfig> {
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
@@ -82,14 +82,14 @@ fn build_server_config(
         .map_err(|e| Error::Quic(format!("QUIC server config failed: {e}")))?;
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(quic_server_config));
-    server_config.transport_config(transport_config(offload));
+    server_config.transport_config(transport);
     Ok(server_config)
 }
 
 fn build_client_config(
     identity: &CertIdentity,
     expected_fingerprint: &str,
-    offload: SegmentationOffload,
+    transport: Arc<quinn::TransportConfig>,
 ) -> Result<quinn::ClientConfig> {
     let cert = CertificateDer::from(identity.cert_der.clone());
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(identity.key_der.clone()));
@@ -108,7 +108,7 @@ fn build_client_config(
         .map_err(|e| Error::Quic(format!("QUIC client config failed: {e}")))?;
 
     let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client_config));
-    client_config.transport_config(transport_config(offload));
+    client_config.transport_config(transport);
     Ok(client_config)
 }
 
@@ -235,7 +235,7 @@ impl rustls::server::danger::ClientCertVerifier for CollectClientCert {
 pub struct QuicEndpoint {
     endpoint: Endpoint,
     identity: CertIdentity,
-    offload: SegmentationOffload,
+    transport: Arc<quinn::TransportConfig>,
 }
 
 impl QuicEndpoint {
@@ -248,7 +248,15 @@ impl QuicEndpoint {
         identity: CertIdentity,
         offload: SegmentationOffload,
     ) -> Result<Self> {
-        let server_config = build_server_config(&identity, offload)?;
+        Self::bind_with_transport(socket, identity, transport_config(offload))
+    }
+
+    pub fn bind_with_transport(
+        socket: std::net::UdpSocket,
+        identity: CertIdentity,
+        transport: Arc<quinn::TransportConfig>,
+    ) -> Result<Self> {
+        let server_config = build_server_config(&identity, Arc::clone(&transport))?;
         let runtime = quinn::default_runtime()
             .ok_or_else(|| Error::Quic("no async runtime available".into()))?;
 
@@ -263,12 +271,12 @@ impl QuicEndpoint {
         let local = endpoint
             .local_addr()
             .map_err(|e| Error::Quic(format!("{e}")))?;
-        info!(addr = %local, ?offload, "QUIC endpoint bound");
+        info!(addr = %local, "QUIC endpoint bound");
 
         Ok(Self {
             endpoint,
             identity,
-            offload,
+            transport,
         })
     }
 
@@ -283,7 +291,11 @@ impl QuicEndpoint {
     }
 
     pub async fn connect(&self, addr: SocketAddr, remote_fingerprint: &str) -> Result<Connection> {
-        let client_config = build_client_config(&self.identity, remote_fingerprint, self.offload)?;
+        let client_config = build_client_config(
+            &self.identity,
+            remote_fingerprint,
+            Arc::clone(&self.transport),
+        )?;
 
         let connection = self
             .endpoint
@@ -361,5 +373,32 @@ mod tests {
         let id1 = generate_self_signed_cert().unwrap();
         let id2 = generate_self_signed_cert().unwrap();
         assert_ne!(id1.fingerprint, id2.fingerprint);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bind_with_transport_applies_the_supplied_config() {
+        let mut transport = quinn::TransportConfig::default();
+        transport.datagram_receive_buffer_size(None);
+
+        let id_a = generate_self_signed_cert().expect("cert a");
+        let id_b = generate_self_signed_cert().expect("cert b");
+        let fp_a = id_a.fingerprint.clone();
+        let fp_b = id_b.fingerprint.clone();
+        let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep_a = QuicEndpoint::bind(socket(), id_a).expect("bind a");
+        let ep_b =
+            QuicEndpoint::bind_with_transport(socket(), id_b, Arc::new(transport)).expect("bind b");
+        let addr_b = ep_b.local_addr().expect("addr b");
+
+        let accept =
+            tokio::spawn(async move { ep_b.accept_with_fingerprint(&fp_a).await.expect("accept") });
+
+        let conn_a = ep_a.connect(addr_b, &fp_b).await.expect("connect");
+        let _conn_b = accept.await.expect("accept task");
+
+        assert!(
+            conn_a.max_datagram_size().is_none(),
+            "peer B disabled datagram receive via its transport config",
+        );
     }
 }
