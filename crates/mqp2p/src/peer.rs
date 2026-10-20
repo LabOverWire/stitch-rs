@@ -12,6 +12,7 @@ use mqtt5::client::MqttClient;
 use quinn::Connection;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -25,6 +26,7 @@ pub struct PeerConfig {
     pub keepalive_secs: Option<u64>,
     pub presence: bool,
     pub segmentation_offload: SegmentationOffload,
+    pub transport_config: Option<Arc<quinn::TransportConfig>>,
 }
 
 impl PeerConfig {
@@ -39,6 +41,7 @@ impl PeerConfig {
             keepalive_secs: None,
             presence: false,
             segmentation_offload: SegmentationOffload::Enabled,
+            transport_config: None,
         }
     }
 
@@ -83,6 +86,16 @@ impl PeerConfig {
 
     pub fn without_segmentation_offload(mut self) -> Self {
         self.segmentation_offload = SegmentationOffload::Disabled;
+        self
+    }
+
+    /// Apply a fully custom QUIC transport config (keep-alive, idle timeout,
+    /// concurrent-stream limits, stream and datagram windows, congestion
+    /// controller) to both the client and server endpoints. It supersedes
+    /// [`PeerConfig::without_segmentation_offload`]: set segmentation offload
+    /// on the supplied config directly.
+    pub fn with_transport_config(mut self, transport: Arc<quinn::TransportConfig>) -> Self {
+        self.transport_config = Some(transport);
         self
     }
 
@@ -150,15 +163,23 @@ impl Peer {
         };
 
         let quic_socket = std_socket.try_clone()?;
-        let quic = QuicEndpoint::bind_with_offload(
-            quic_socket,
-            CertIdentity {
-                cert_der: identity.cert_der.clone(),
-                key_der: identity.key_der.clone(),
-                fingerprint: identity.fingerprint.clone(),
-            },
-            config.segmentation_offload,
-        )?;
+        let cert_identity = CertIdentity {
+            cert_der: identity.cert_der.clone(),
+            key_der: identity.key_der.clone(),
+            fingerprint: identity.fingerprint.clone(),
+        };
+        let quic = match &config.transport_config {
+            Some(transport) => QuicEndpoint::bind_with_transport(
+                quic_socket,
+                cert_identity,
+                Arc::clone(transport),
+            )?,
+            None => QuicEndpoint::bind_with_offload(
+                quic_socket,
+                cert_identity,
+                config.segmentation_offload,
+            )?,
+        };
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
