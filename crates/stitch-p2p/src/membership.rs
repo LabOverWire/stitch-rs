@@ -124,6 +124,94 @@ impl Identity {
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
     }
+
+    /// The 32-byte Ed25519 seed behind this identity. Feed it to
+    /// `mqp2p::PeerConfig::with_ed25519_identity` so the device's transport
+    /// certificate carries the same key as its membership peer id.
+    #[must_use]
+    pub fn seed(&self) -> [u8; 32] {
+        self.key.to_bytes()
+    }
+}
+
+/// A read-only view of a scope's authorized membership over converged state,
+/// for gating peers by their transport key (which equals their membership peer
+/// id once both are built from one [`Identity`]). Clone-cheap; every clone
+/// shares the node's state.
+#[derive(Clone)]
+pub struct Membership {
+    node: crate::node::SyncNode,
+    owner: PeerId,
+}
+
+impl Membership {
+    #[must_use]
+    pub fn new(node: crate::node::SyncNode, owner: PeerId) -> Self {
+        Self { node, owner }
+    }
+
+    /// The authorized member set derived from converged `_members` records.
+    pub async fn authorized(&self) -> HashMap<PeerId, Role> {
+        let records: Vec<(PeerId, PeerId, Role)> = self
+            .node
+            .entries_with_authors(MEMBERS_ENTITY)
+            .await
+            .into_iter()
+            .filter_map(|(id, data, granter)| {
+                let target = peer_from_record_id(&id)?;
+                let role = Role::from_byte(*data.first()?)?;
+                Some((target, granter, role))
+            })
+            .collect();
+        authorized_members(self.owner, &records)
+    }
+
+    /// Whether `peer` is an authorized member of the scope right now.
+    pub async fn is_member(&self, peer: &PeerId) -> bool {
+        self.authorized().await.contains_key(peer)
+    }
+
+    /// A stream that fires whenever the `_members` set changes (an invite or a
+    /// revoke, local or synced in), so a host can re-check live peers and close
+    /// a session whose device was revoked.
+    pub async fn subscribe(&self) -> MembershipChanges {
+        MembershipChanges {
+            inner: self.node.subscribe().await,
+        }
+    }
+}
+
+/// Receiver of membership-change notifications from [`Membership::subscribe`].
+pub struct MembershipChanges {
+    inner: tokio::sync::broadcast::Receiver<crate::sync_state::MutationEvent>,
+}
+
+impl MembershipChanges {
+    /// Wait for the next change to the `_members` set. Mutations to other
+    /// entities are skipped.
+    ///
+    /// # Errors
+    ///
+    /// When the underlying broadcast channel is closed or the receiver lagged
+    /// past the buffered backlog.
+    pub async fn changed(&mut self) -> Result<(), tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.inner.recv().await?;
+            if event.entity == MEMBERS_ENTITY {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "discovery")]
+impl crate::discovery::MemberGate for Membership {
+    fn admits(
+        &self,
+        key: [u8; 32],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move { self.is_member(&key).await })
+    }
 }
 
 /// Verify a signed frame against its author's public key (`stamp.peer`).

@@ -46,9 +46,9 @@ pub use wire::{HEADER_LEN, WIRE_VERSION, WireError, WriteFrame, check_lengths};
 pub use sync_state::{FrameAuth, FramePersister};
 
 #[cfg(feature = "discovery")]
-pub use discovery::{Swarm, peer_id_from_fingerprint};
+pub use discovery::{MemberGate, Swarm, peer_id_from_fingerprint};
 #[cfg(feature = "membership")]
-pub use membership::{Identity, verify_frame};
+pub use membership::{Identity, Membership, MembershipChanges, verify_frame};
 #[cfg(feature = "persistence")]
 pub use persistence::{FjallLog, PersistError};
 #[cfg(feature = "store")]

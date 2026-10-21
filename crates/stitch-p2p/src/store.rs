@@ -125,6 +125,16 @@ impl Store {
         &self.node
     }
 
+    /// A membership view of this scope, or `None` for an open store (no owner).
+    /// Use it to gate a `Swarm` ([`crate::Swarm::spawn_gated`]) or to check and
+    /// watch membership for peers connected outside the swarm.
+    #[cfg(feature = "membership")]
+    #[must_use]
+    pub fn membership(&self) -> Option<crate::membership::Membership> {
+        self.owner
+            .map(|owner| crate::membership::Membership::new(self.node.clone(), owner))
+    }
+
     /// Insert or replace a record.
     pub async fn create(&self, entity: &str, id: &str, record: Value) -> Result<(), StoreError> {
         let data = serde_json::to_vec(&record)?;
@@ -247,19 +257,7 @@ impl Store {
     async fn authorized_authors(
         &self,
     ) -> Option<std::collections::HashMap<PeerId, crate::membership::Role>> {
-        let owner = self.owner?;
-        let records: Vec<(PeerId, PeerId, crate::membership::Role)> = self
-            .node
-            .entries_with_authors(crate::membership::MEMBERS_ENTITY)
-            .await
-            .into_iter()
-            .filter_map(|(id, data, granter)| {
-                let target = crate::membership::peer_from_record_id(&id)?;
-                let role = crate::membership::Role::from_byte(*data.first()?)?;
-                Some((target, granter, role))
-            })
-            .collect();
-        Some(crate::membership::authorized_members(owner, &records))
+        Some(self.membership()?.authorized().await)
     }
 
     #[cfg(not(feature = "membership"))]
