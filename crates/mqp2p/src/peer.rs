@@ -25,7 +25,7 @@ pub struct PeerConfig {
     pub lease_secs: u64,
     pub keepalive_secs: Option<u64>,
     pub presence: bool,
-    pub segmentation_offload: SegmentationOffload,
+    pub segmentation_offload: Option<SegmentationOffload>,
     pub transport_config: Option<quinn::TransportConfig>,
 }
 
@@ -40,7 +40,7 @@ impl PeerConfig {
             lease_secs: PEER_LEASE_SECS,
             keepalive_secs: None,
             presence: false,
-            segmentation_offload: SegmentationOffload::Enabled,
+            segmentation_offload: None,
             transport_config: None,
         }
     }
@@ -84,16 +84,23 @@ impl PeerConfig {
         self
     }
 
+    pub fn with_segmentation_offload(mut self) -> Self {
+        self.segmentation_offload = Some(SegmentationOffload::Enabled);
+        self
+    }
+
     pub fn without_segmentation_offload(mut self) -> Self {
-        self.segmentation_offload = SegmentationOffload::Disabled;
+        self.segmentation_offload = Some(SegmentationOffload::Disabled);
         self
     }
 
     /// Apply a custom QUIC transport config (keep-alive, idle timeout,
     /// concurrent-stream limits, stream and datagram windows, congestion
-    /// controller) to both the client and server endpoints. Segmentation
-    /// offload stays governed by [`PeerConfig::without_segmentation_offload`]
-    /// and is applied on top of this config, so the two compose.
+    /// controller) to both the client and server endpoints. The config's own
+    /// segmentation-offload setting is left untouched unless
+    /// [`PeerConfig::with_segmentation_offload`] or
+    /// [`PeerConfig::without_segmentation_offload`] is also called, in which
+    /// case that choice overrides it.
     pub fn with_transport_config(mut self, transport: quinn::TransportConfig) -> Self {
         self.transport_config = Some(transport);
         self
@@ -107,6 +114,10 @@ impl PeerConfig {
         self.credentials = Some((username.into(), password.into()));
         self
     }
+}
+
+fn offload_override(offload: Option<SegmentationOffload>) -> Option<bool> {
+    offload.map(|o| o == SegmentationOffload::Enabled)
 }
 
 pub type PeerId = String;
@@ -170,7 +181,9 @@ impl Peer {
         };
         let offload = config.segmentation_offload;
         let mut transport = config.transport_config.take().unwrap_or_default();
-        transport.enable_segmentation_offload(offload == SegmentationOffload::Enabled);
+        if let Some(enabled) = offload_override(offload) {
+            transport.enable_segmentation_offload(enabled);
+        }
         debug!(?offload, "QUIC transport configured");
         let quic =
             QuicEndpoint::bind_with_transport(quic_socket, cert_identity, Arc::new(transport))?;
@@ -664,6 +677,34 @@ mod tests {
             .with_lease_secs(15)
             .with_keepalive_secs(60);
         assert_eq!(config.effective_keepalive_secs(), 60);
+    }
+
+    #[test]
+    fn offload_override_only_sets_when_explicit() {
+        assert_eq!(offload_override(None), None);
+        assert_eq!(
+            offload_override(Some(SegmentationOffload::Enabled)),
+            Some(true)
+        );
+        assert_eq!(
+            offload_override(Some(SegmentationOffload::Disabled)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn offload_defaults_to_unset_and_builders_override_it() {
+        let config = PeerConfig::new("edge", "127.0.0.1:1883");
+        assert_eq!(config.segmentation_offload, None);
+        assert_eq!(
+            config.with_segmentation_offload().segmentation_offload,
+            Some(SegmentationOffload::Enabled)
+        );
+        let config = PeerConfig::new("edge", "127.0.0.1:1883");
+        assert_eq!(
+            config.without_segmentation_offload().segmentation_offload,
+            Some(SegmentationOffload::Disabled)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
