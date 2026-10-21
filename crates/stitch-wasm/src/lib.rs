@@ -935,6 +935,9 @@ impl Store {
         else {
             return Ok(Closure::once_into_js(|| {}));
         };
+        if let Ok(status) = self.inner.connection_status() {
+            let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&format!("{status:?}")));
+        }
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         wasm_bindgen_futures::spawn_local(async move {
             futures::pin_mut!(cancel_rx);
