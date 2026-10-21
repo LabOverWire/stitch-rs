@@ -188,17 +188,21 @@ pub struct MembershipChanges {
 
 impl MembershipChanges {
     /// Wait for the next change to the `_members` set. Mutations to other
-    /// entities are skipped.
+    /// entities are skipped. A receiver that lagged past the buffered backlog
+    /// returns `Ok(())` so the caller re-checks membership rather than losing
+    /// the watch, which may have dropped the revoke it exists to catch.
     ///
     /// # Errors
     ///
-    /// When the underlying broadcast channel is closed or the receiver lagged
-    /// past the buffered backlog.
+    /// When the underlying broadcast channel is closed.
     pub async fn changed(&mut self) -> Result<(), tokio::sync::broadcast::error::RecvError> {
+        use tokio::sync::broadcast::error::RecvError;
         loop {
-            let event = self.inner.recv().await?;
-            if event.entity == MEMBERS_ENTITY {
-                return Ok(());
+            match self.inner.recv().await {
+                Ok(event) if event.entity == MEMBERS_ENTITY => return Ok(()),
+                Ok(_) => continue,
+                Err(RecvError::Lagged(_)) => return Ok(()),
+                Err(RecvError::Closed) => return Err(RecvError::Closed),
             }
         }
     }
