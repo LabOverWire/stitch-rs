@@ -172,8 +172,9 @@ impl Membership {
     }
 
     /// A stream that fires whenever the `_members` set changes (an invite or a
-    /// revoke, local or synced in), so a host can re-check live peers and close
-    /// a session whose device was revoked.
+    /// revoke, local or synced in), so a host can re-check live peers and drop
+    /// those a revoke removed. Subscribe before the first [`Membership::is_member`]
+    /// check so a change landing between the two is not missed.
     pub async fn subscribe(&self) -> MembershipChanges {
         MembershipChanges {
             inner: self.node.subscribe().await,
