@@ -790,6 +790,7 @@ mod tests {
         updates: AtomicUsize,
         fail_update_not_found: bool,
         fail_create_transient: bool,
+        fail_create_rejected: bool,
         read_result: Mutex<Option<Record>>,
     }
 
@@ -798,6 +799,9 @@ mod tests {
         async fn sync_create(&self, entity: &str, _scope_id: &str, data: Record) -> Result<()> {
             if self.fail_create_transient {
                 return Err(Error::Timeout(10));
+            }
+            if self.fail_create_rejected {
+                return Err(Error::Rejected("schema violation".into()));
             }
             self.creates.lock_guard().push((entity.to_string(), data));
             Ok(())
@@ -873,6 +877,33 @@ mod tests {
         let recovered = FakeSender::default();
         assert_eq!(queue.flush(&recovered).await?.retained, 0);
         assert_eq!(recovered.creates.lock_guard().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_drops_a_permanently_rejected_insert() -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        queue
+            .queue(pending(
+                Operation::Insert,
+                "t1",
+                Some(record(&[("id", "t1"), ("status", "pending")])),
+                1,
+            ))
+            .await?;
+
+        let rejecting = FakeSender {
+            fail_create_rejected: true,
+            ..Default::default()
+        };
+        assert_eq!(queue.flush(&rejecting).await?.retained, 0);
+
+        let recovered = FakeSender::default();
+        assert_eq!(queue.flush(&recovered).await?.retained, 0);
+        assert!(
+            recovered.creates.lock_guard().is_empty(),
+            "a permanently rejected mutation must be dropped, not retried"
+        );
         Ok(())
     }
 
