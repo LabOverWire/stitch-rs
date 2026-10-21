@@ -225,19 +225,11 @@ impl Store {
     pub fn subscribe_connection_status(
         &self,
     ) -> Result<Option<broadcast::Receiver<ConnectionStatus>>> {
-        let inner = self.inner()?;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Ok(inner
-                .remote
-                .as_ref()
-                .map(|r| r.subscribe_connection_status()))
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = inner;
-            Ok(None)
-        }
+        Ok(self
+            .inner()?
+            .remote
+            .as_ref()
+            .map(|r| r.subscribe_connection_status()))
     }
 
     /// Set or clear the authenticated user. Passes through to the offline

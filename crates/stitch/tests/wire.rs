@@ -40,6 +40,33 @@ async fn wait_for_connected(store: &Store) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connection_status_subscribers_receive_transitions() {
+    init_tracing();
+    let broker = BrokerHarness::new().start().await.expect("start broker");
+    let dir = TempDir::new().unwrap();
+    let store = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir),
+        "status-sub".into(),
+    );
+    store.initialize().await.unwrap();
+    wait_for_connected(&store).await;
+
+    let mut rx = store
+        .subscribe_connection_status()
+        .unwrap()
+        .expect("a remote-configured store yields a connection-status receiver");
+
+    store.disconnect().await.unwrap();
+
+    let status = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("a connection-status transition should reach subscribers")
+        .expect("the connection-status channel stayed open");
+    assert_ne!(status, stitch::ConnectionStatus::Connected);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_stores_sync_creates_via_broker() {
     init_tracing();
     let broker = BrokerHarness::new().start().await.expect("start broker");
