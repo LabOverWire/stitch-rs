@@ -27,6 +27,7 @@ pub struct PeerConfig {
     pub presence: bool,
     pub segmentation_offload: Option<SegmentationOffload>,
     pub transport_config: Option<quinn::TransportConfig>,
+    pub ed25519_seed: Option<[u8; 32]>,
 }
 
 impl PeerConfig {
@@ -42,6 +43,7 @@ impl PeerConfig {
             presence: false,
             segmentation_offload: None,
             transport_config: None,
+            ed25519_seed: None,
         }
     }
 
@@ -114,6 +116,17 @@ impl PeerConfig {
         self.credentials = Some((username.into(), password.into()));
         self
     }
+
+    /// Derive the peer's self-signed certificate from a persisted 32-byte
+    /// Ed25519 seed, so its certificate, fingerprint, and verified public key
+    /// stay the same across restarts. Without a seed an ephemeral identity is
+    /// generated on each start. The same seed is the one behind a
+    /// `stitch_p2p::membership::Identity`, so a device presents one key for
+    /// both the transport and its signed writes.
+    pub fn with_ed25519_identity(mut self, seed: [u8; 32]) -> Self {
+        self.ed25519_seed = Some(seed);
+        self
+    }
 }
 
 fn offload_override(offload: Option<SegmentationOffload>) -> Option<bool> {
@@ -150,7 +163,10 @@ pub struct Peer {
 
 impl Peer {
     pub async fn new(mut config: PeerConfig) -> Result<Self> {
-        let identity = quic::generate_self_signed_cert()?;
+        let identity = match config.ed25519_seed {
+            Some(seed) => quic::cert_from_ed25519_seed(&seed)?,
+            None => quic::generate_self_signed_cert()?,
+        };
 
         let std_socket = std::net::UdpSocket::bind(config.bind_addr)?;
         std_socket.set_nonblocking(true)?;
@@ -424,9 +440,12 @@ impl Peer {
         let connection =
             connection.ok_or_else(|| Error::Quic("all candidates exhausted".into()))?;
 
+        let remote_public_key = quic::peer_public_key(&connection);
+
         Ok(P2pConnection {
             connection,
             remote_peer: target.clone(),
+            remote_public_key,
         })
     }
 
@@ -512,6 +531,8 @@ impl Peer {
             lease_secs: None,
         };
 
+        let remote_public_key = quic::peer_public_key(&connection);
+
         info!(
             remote = %remote_addr,
             peer_id = remote_peer.id,
@@ -521,6 +542,7 @@ impl Peer {
         Ok(P2pConnection {
             connection,
             remote_peer,
+            remote_public_key,
         })
     }
 
@@ -567,11 +589,21 @@ impl Drop for Peer {
 pub struct P2pConnection {
     connection: Connection,
     remote_peer: PeerInfo,
+    remote_public_key: Option<[u8; 32]>,
 }
 
 impl P2pConnection {
     pub fn remote_peer(&self) -> &PeerInfo {
         &self.remote_peer
+    }
+
+    /// The remote peer's verified Ed25519 public key, taken from the
+    /// certificate it presented during the QUIC handshake. When the remote used
+    /// a persisted identity ([`PeerConfig::with_ed25519_identity`]) this is its
+    /// `stitch_p2p::membership` peer id, so a host can decide whether a
+    /// connecting device is paired. `None` if no key could be read.
+    pub fn remote_public_key(&self) -> Option<[u8; 32]> {
+        self.remote_public_key
     }
 
     /// Open a fresh bidirectional stream as the initiator. Use for carrying an
@@ -737,8 +769,10 @@ mod tests {
             lease_secs: None,
         };
 
+        let seed_b = [23u8; 32];
         let id_a = generate_self_signed_cert().expect("cert a");
-        let id_b = generate_self_signed_cert().expect("cert b");
+        let id_b = quic::cert_from_ed25519_seed(&seed_b).expect("cert b");
+        let expected_b = quic::public_key_from_cert(&id_b.cert_der).expect("b public key");
         let fp_a = id_a.fingerprint.clone();
         let fp_b = id_b.fingerprint.clone();
         let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
@@ -751,18 +785,24 @@ mod tests {
 
         let accept = tokio::spawn(async move {
             let raw = ep_b.accept_with_fingerprint(&fp_a).await.expect("accept");
+            let remote_public_key = quic::peer_public_key(&raw);
             P2pConnection {
                 connection: raw,
                 remote_peer: info_a,
+                remote_public_key,
             }
         });
 
         let raw_a = ep_a.connect(addr_b, &fp_b).await.expect("connect");
+        let remote_public_key = quic::peer_public_key(&raw_a);
         let conn_a = P2pConnection {
             connection: raw_a,
             remote_peer: info_b,
+            remote_public_key,
         };
         let conn_b = accept.await.expect("accept task");
+
+        assert_eq!(conn_a.remote_public_key(), Some(expected_b));
 
         let mut send = conn_a.open_uni().await.expect("open_uni");
         send.write_all(b"frame-1").await.expect("write");

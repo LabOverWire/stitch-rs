@@ -13,10 +13,29 @@ pub struct CertIdentity {
     pub fingerprint: String,
 }
 
+const ED25519_PKCS8_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
 pub fn generate_self_signed_cert() -> Result<CertIdentity> {
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519)
         .map_err(|e| Error::Quic(format!("key generation failed: {e}")))?;
+    self_signed_identity(&key_pair)
+}
 
+pub fn cert_from_ed25519_seed(seed: &[u8; 32]) -> Result<CertIdentity> {
+    let mut pkcs8 = Vec::with_capacity(ED25519_PKCS8_PREFIX.len() + seed.len());
+    pkcs8.extend_from_slice(&ED25519_PKCS8_PREFIX);
+    pkcs8.extend_from_slice(seed);
+    let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(
+        &PrivatePkcs8KeyDer::from(pkcs8),
+        &rcgen::PKCS_ED25519,
+    )
+    .map_err(|e| Error::Quic(format!("key load failed: {e}")))?;
+    self_signed_identity(&key_pair)
+}
+
+fn self_signed_identity(key_pair: &KeyPair) -> Result<CertIdentity> {
     let mut params = CertificateParams::new(vec!["mqp2p-peer".into()])
         .map_err(|e| Error::Quic(format!("cert params failed: {e}")))?;
     params.distinguished_name = rcgen::DistinguishedName::new();
@@ -25,20 +44,32 @@ pub fn generate_self_signed_cert() -> Result<CertIdentity> {
         .push(rcgen::DnType::CommonName, "mqp2p-peer");
 
     let cert = params
-        .self_signed(&key_pair)
+        .self_signed(key_pair)
         .map_err(|e| Error::Quic(format!("self-sign failed: {e}")))?;
 
     let cert_der = cert.der().to_vec();
     let key_der = key_pair.serialize_der();
     let fingerprint = compute_fingerprint(&cert_der);
 
-    debug!(fingerprint, "generated self-signed certificate");
+    debug!(fingerprint, "built self-signed certificate");
 
     Ok(CertIdentity {
         cert_der,
         key_der,
         fingerprint,
     })
+}
+
+pub fn public_key_from_cert(cert_der: &[u8]) -> Option<[u8; 32]> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der).ok()?;
+    <[u8; 32]>::try_from(cert.public_key().subject_public_key.data.as_ref()).ok()
+}
+
+pub fn peer_public_key(connection: &Connection) -> Option<[u8; 32]> {
+    let certs = connection
+        .peer_identity()
+        .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())?;
+    public_key_from_cert(certs.first()?.as_ref())
 }
 
 pub fn compute_fingerprint(cert_der: &[u8]) -> String {
@@ -376,6 +407,32 @@ mod tests {
         assert_ne!(id1.fingerprint, id2.fingerprint);
     }
 
+    #[test]
+    fn a_persisted_seed_yields_a_stable_certificate() {
+        let seed = [9u8; 32];
+        let a = cert_from_ed25519_seed(&seed).unwrap();
+        let b = cert_from_ed25519_seed(&seed).unwrap();
+        assert_eq!(a.cert_der, b.cert_der);
+        assert_eq!(a.key_der, b.key_der);
+        assert_eq!(a.fingerprint, b.fingerprint);
+    }
+
+    #[test]
+    fn different_seeds_yield_different_identities() {
+        let a = cert_from_ed25519_seed(&[1u8; 32]).unwrap();
+        let b = cert_from_ed25519_seed(&[2u8; 32]).unwrap();
+        assert_ne!(a.fingerprint, b.fingerprint);
+    }
+
+    #[test]
+    fn a_certificate_carries_a_stable_ed25519_public_key() {
+        let seed = [3u8; 32];
+        let first = cert_from_ed25519_seed(&seed).unwrap();
+        let second = cert_from_ed25519_seed(&seed).unwrap();
+        let key = public_key_from_cert(&first.cert_der).expect("ed25519 public key");
+        assert_eq!(public_key_from_cert(&second.cert_der), Some(key));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bind_with_transport_applies_the_supplied_config_to_both_endpoints() {
         let no_datagrams = || {
@@ -409,5 +466,32 @@ mod tests {
             conn_b.max_datagram_size().is_none(),
             "connect-side (client) transport applied: A disabled datagram receive",
         );
+    }
+
+    async fn remote_key_seen_by_initiator(seed: [u8; 32], fp_b: &str) -> [u8; 32] {
+        let id_a = generate_self_signed_cert().expect("cert a");
+        let fp_a = id_a.fingerprint.clone();
+        let id_b = cert_from_ed25519_seed(&seed).expect("cert b");
+        let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep_a = QuicEndpoint::bind(socket(), id_a).expect("bind a");
+        let ep_b = QuicEndpoint::bind(socket(), id_b).expect("bind b");
+        let addr_b = ep_b.local_addr().expect("addr b");
+        let accept =
+            tokio::spawn(async move { ep_b.accept_with_fingerprint(&fp_a).await.expect("accept") });
+        let conn_a = ep_a.connect(addr_b, fp_b).await.expect("connect");
+        let _conn_b = accept.await.expect("accept task");
+        peer_public_key(&conn_a).expect("remote public key")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_persisted_identity_presents_the_same_key_across_restarts() {
+        let seed = [11u8; 32];
+        let identity = cert_from_ed25519_seed(&seed).unwrap();
+        let expected = public_key_from_cert(&identity.cert_der).unwrap();
+
+        let first = remote_key_seen_by_initiator(seed, &identity.fingerprint).await;
+        let second = remote_key_seen_by_initiator(seed, &identity.fingerprint).await;
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
     }
 }
