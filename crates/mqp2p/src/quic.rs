@@ -66,10 +66,14 @@ pub fn public_key_from_cert(cert_der: &[u8]) -> Option<[u8; 32]> {
 }
 
 pub fn peer_public_key(connection: &Connection) -> Option<[u8; 32]> {
-    let certs = connection
+    let key = connection
         .peer_identity()
-        .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())?;
-    public_key_from_cert(certs.first()?.as_ref())
+        .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
+        .and_then(|certs| certs.first().and_then(|c| public_key_from_cert(c.as_ref())));
+    if key.is_none() {
+        debug!("could not read a peer ed25519 public key from the connection");
+    }
+    key
 }
 
 pub fn compute_fingerprint(cert_der: &[u8]) -> String {
