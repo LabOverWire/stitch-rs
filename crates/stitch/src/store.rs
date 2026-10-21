@@ -1578,14 +1578,25 @@ async fn status_loop(inner: Shared<StoreInner>, mut rx: broadcast::Receiver<Conn
     loop {
         match rx.recv().await {
             Ok(status) => {
-                {
+                let applied = {
                     let mut state = inner.state.lock_guard();
-                    state.last_connection_status = status;
-                    if status == ConnectionStatus::Connected {
-                        state.has_been_connected = true;
+                    let deliberately_offline =
+                        state.last_connection_status == ConnectionStatus::Offline;
+                    let connection_loss = matches!(
+                        status,
+                        ConnectionStatus::Disconnected | ConnectionStatus::Error
+                    );
+                    if deliberately_offline && connection_loss {
+                        false
+                    } else {
+                        state.last_connection_status = status;
+                        if status == ConnectionStatus::Connected {
+                            state.has_been_connected = true;
+                        }
+                        true
                     }
-                }
-                if status == ConnectionStatus::Connected {
+                };
+                if applied && status == ConnectionStatus::Connected {
                     on_connected(Shared::clone(&inner)).await;
                 }
             }

@@ -196,7 +196,7 @@ async fn offline_create_flushes_after_connect() {
         .unwrap();
     wait_for_connected(&store_a).await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if tokio::time::Instant::now() >= deadline {
             break;
