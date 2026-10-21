@@ -813,6 +813,7 @@ fn check_response(response: &Map<String, Value>) -> Result<()> {
         .unwrap_or("")
         .to_string();
     Err(match code {
+        400 => Error::Rejected(message),
         401 => Error::SessionInvalid,
         403 => Error::Ownership { entity, id },
         404 => Error::NotFound { entity, id },
@@ -840,4 +841,45 @@ fn extract_version(response: &Map<String, Value>) -> Result<u64> {
         .and_then(|obj| obj.get("_version"))
         .and_then(Value::as_u64)
         .ok_or_else(|| Error::Mqtt("response missing data._version".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_response(code: i64) -> Map<String, Value> {
+        let mut map = Map::new();
+        map.insert("status".into(), Value::String("error".into()));
+        map.insert("code".into(), Value::Number(code.into()));
+        map.insert("message".into(), Value::String("rejected".into()));
+        map
+    }
+
+    #[test]
+    fn check_response_passes_a_non_error_status() {
+        let mut map = Map::new();
+        map.insert("status".into(), Value::String("ok".into()));
+        assert!(check_response(&map).is_ok());
+    }
+
+    #[test]
+    fn check_response_maps_a_bad_request_to_a_permanent_rejection() {
+        let err = check_response(&error_response(400)).unwrap_err();
+        assert!(matches!(err, Error::Rejected(_)));
+        assert!(err.is_permanent_mutation());
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn check_response_maps_a_server_error_to_a_transient_error() {
+        let err = check_response(&error_response(500)).unwrap_err();
+        assert!(matches!(err, Error::Mqtt(_)));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn check_response_maps_a_conflict() {
+        let err = check_response(&error_response(409)).unwrap_err();
+        assert!(err.is_conflict());
+    }
 }

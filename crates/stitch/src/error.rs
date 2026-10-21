@@ -44,6 +44,9 @@ pub enum Error {
     #[error("mqtt error: {0}")]
     Mqtt(String),
 
+    #[error("rejected: {0}")]
+    Rejected(String),
+
     #[error("connection closed")]
     ConnectionClosed,
 
@@ -112,11 +115,13 @@ impl Error {
     }
 
     /// `true` for schema-level rejections that won't be fixed by retrying:
-    /// unique / foreign-key / not-null violations. The offline queue drops
-    /// rows on these.
+    /// unique / foreign-key / not-null violations from the local backend, and
+    /// remote validation rejections surfaced as [`Error::Rejected`] (a broker
+    /// `400`). The offline queue drops rows on these.
     #[must_use]
     pub fn is_permanent_mutation(&self) -> bool {
         match self {
+            Self::Rejected(_) => true,
             Self::Mqdb { source, .. } => matches!(
                 source.as_ref(),
                 mqdb_core::error::Error::Validation(_)
