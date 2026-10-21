@@ -298,6 +298,14 @@ async fn flush_consolidated(
                     Err(_) => FlushOutcome::Drop,
                 }
             }
+            Err(err) if err.is_not_found() && mutation.op == Operation::Insert => {
+                tracing::debug!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    "queued insert's scope is not ready yet; retaining for retry"
+                );
+                FlushOutcome::Keep
+            }
             Err(err) if err.is_permanent_mutation() => {
                 tracing::error!(
                     entity = %mutation.entity,

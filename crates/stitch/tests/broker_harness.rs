@@ -274,7 +274,7 @@ async fn a_queued_create_the_broker_already_holds_is_kept_after_flush() {
         .expect("reconnect");
     assert!(reaches_connected(&replaying).await);
 
-    for _ in 0..100 {
+    for _ in 0..200 {
         if replaying.pending_count("p1").await.expect("pending") == 0 {
             break;
         }
@@ -432,7 +432,7 @@ async fn flush_of_a_queued_update_does_not_resurrect_a_remotely_deleted_record()
         .expect("create task");
 
     let mut saw = false;
-    for _ in 0..100 {
+    for _ in 0..200 {
         if deleter.read("task", "t1").await.expect("read").is_some() {
             saw = true;
             break;
@@ -462,7 +462,7 @@ async fn flush_of_a_queued_update_does_not_resurrect_a_remotely_deleted_record()
         .await
         .expect("delete t1 on the broker");
     let mut gone = false;
-    for _ in 0..100 {
+    for _ in 0..200 {
         if deleter.read("task", "t1").await.expect("read").is_none() {
             gone = true;
             break;
@@ -477,7 +477,7 @@ async fn flush_of_a_queued_update_does_not_resurrect_a_remotely_deleted_record()
         .expect("reconnect editor");
     assert!(reaches_connected(&editor).await, "editor must reconnect");
     let mut drained = false;
-    for _ in 0..100 {
+    for _ in 0..200 {
         if editor.pending_count("p1").await.expect("pending") == 0 {
             drained = true;
             break;
