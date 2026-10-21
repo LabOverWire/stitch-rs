@@ -84,11 +84,14 @@ fn wait_for_port(port: u16) {
     panic!("broker did not start on {port} within 10s");
 }
 
-async fn make_peer(name: &str, broker: &str) -> (Arc<Peer>, SyncNode) {
-    let config = PeerConfig::new(name, broker)
+async fn make_peer(name: &str, broker: &str, seed: Option<[u8; 32]>) -> (Arc<Peer>, SyncNode) {
+    let mut config = PeerConfig::new(name, broker)
         .with_bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .without_stun()
         .with_credentials("testuser", "testpass");
+    if let Some(seed) = seed {
+        config = config.with_ed25519_identity(seed);
+    }
     let mut peer = Peer::new(config).await.expect("peer creation");
     peer.register().await.expect("peer registration");
     let node = SyncNode::new(
@@ -129,8 +132,8 @@ async fn discover_and_sync(spawn: impl Fn(Arc<Peer>, SyncNode) -> Swarm) {
     tokio::time::sleep(Duration::from_secs(1)).await;
     let broker_addr = format!("127.0.0.1:{port}");
 
-    let (peer_a, node_a) = make_peer("alice", &broker_addr).await;
-    let (peer_b, node_b) = make_peer("bob", &broker_addr).await;
+    let (peer_a, node_a) = make_peer("alice", &broker_addr, None).await;
+    let (peer_b, node_b) = make_peer("bob", &broker_addr, None).await;
 
     let swarm_a = spawn(peer_a, node_a.clone());
     let swarm_b = spawn(peer_b, node_b.clone());
@@ -192,18 +195,6 @@ async fn start_test_broker() -> (BrokerGuard, String, tempfile::TempDir) {
 }
 
 #[cfg(all(feature = "membership", feature = "store"))]
-async fn make_identity_peer(name: &str, broker: &str, seed: [u8; 32]) -> Arc<Peer> {
-    let config = PeerConfig::new(name, broker)
-        .with_bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
-        .without_stun()
-        .with_credentials("testuser", "testpass")
-        .with_ed25519_identity(seed);
-    let mut peer = Peer::new(config).await.expect("peer creation");
-    peer.register().await.expect("peer registration");
-    Arc::new(peer)
-}
-
-#[cfg(all(feature = "membership", feature = "store"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gated_swarm_admits_an_invited_member() {
     if !mqdb_available() {
@@ -226,8 +217,8 @@ async fn a_gated_swarm_admits_an_invited_member() {
         .await
         .expect("invite");
 
-    let owner_peer = make_identity_peer("gated-owner", &broker_addr, owner_seed).await;
-    let member_peer = make_identity_peer("gated-member", &broker_addr, member_seed).await;
+    let (owner_peer, _) = make_peer("gated-owner", &broker_addr, Some(owner_seed)).await;
+    let (member_peer, _) = make_peer("gated-member", &broker_addr, Some(member_seed)).await;
 
     let pull = Duration::from_millis(300);
     let gate: Arc<dyn MemberGate> = Arc::new(owner.membership().expect("owner membership"));
@@ -275,8 +266,8 @@ async fn a_gated_swarm_rejects_an_uninvited_outsider() {
     let owner = Store::with_owner(owner_id);
     let outsider = Store::join(outsider_id, owner_pid);
 
-    let owner_peer = make_identity_peer("gated-owner", &broker_addr, owner_seed).await;
-    let outsider_peer = make_identity_peer("gated-outsider", &broker_addr, outsider_seed).await;
+    let (owner_peer, _) = make_peer("gated-owner", &broker_addr, Some(owner_seed)).await;
+    let (outsider_peer, _) = make_peer("gated-outsider", &broker_addr, Some(outsider_seed)).await;
 
     let pull = Duration::from_millis(300);
     let gate: Arc<dyn MemberGate> = Arc::new(owner.membership().expect("owner membership"));
