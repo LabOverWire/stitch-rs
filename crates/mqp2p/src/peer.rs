@@ -120,6 +120,18 @@ fn offload_override(offload: Option<SegmentationOffload>) -> Option<bool> {
     offload.map(|o| o == SegmentationOffload::Enabled)
 }
 
+async fn establish_signaling(
+    signaling: &SignalingClient,
+    broker_addr: &str,
+    presence: bool,
+) -> Result<()> {
+    signaling.connect(broker_addr).await?;
+    if presence {
+        signaling.track_presence().await?;
+    }
+    Ok(())
+}
+
 pub type PeerId = String;
 
 pub struct Peer {
@@ -197,9 +209,12 @@ impl Peer {
             None => options,
         };
         let signaling = SignalingClient::new(MqttClient::with_options(options));
-        signaling.connect(&config.broker_addr).await?;
-        if config.presence {
-            signaling.track_presence().await?;
+        if let Err(e) = establish_signaling(&signaling, &config.broker_addr, config.presence).await
+        {
+            if let Err(disc) = signaling.disconnect().await {
+                debug!(error = %disc, "signaling disconnect failed after a failed connect");
+            }
+            return Err(e);
         }
         debug!(
             keepalive_secs,
