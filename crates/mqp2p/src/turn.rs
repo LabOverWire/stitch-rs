@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use md5::{Digest, Md5};
 use ring::hmac;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -268,16 +267,6 @@ impl ChannelData {
 
 pub fn is_channel_data(buf: &[u8]) -> bool {
     buf.first().is_some_and(|b| b & 0xC0 == 0x40)
-}
-
-pub fn long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
-    let mut hasher = Md5::new();
-    hasher.update(username.as_bytes());
-    hasher.update(b":");
-    hasher.update(realm.as_bytes());
-    hasher.update(b":");
-    hasher.update(password.as_bytes());
-    hasher.finalize().into()
 }
 
 fn message_type(method: u16, class: Class) -> u16 {
@@ -625,7 +614,7 @@ mod tests {
             .push(Attribute::Nonce("abc123".into()))
             .push(Attribute::Lifetime(600));
 
-        let key = long_term_key("device-a", "laboverwire", "secret");
+        let key = [0xABu8; 16];
         let bytes = msg.encode(Some(&key), true);
         let decoded = Message::decode(&bytes).unwrap();
 
@@ -648,7 +637,7 @@ mod tests {
     fn our_own_message_integrity_verifies_over_the_encoded_bytes() {
         let mut msg = Message::new(METHOD_REFRESH, Class::Request, [3u8; 12]);
         msg.push(Attribute::Lifetime(0));
-        let key = long_term_key("u", "r", "p");
+        let key = [0x5Au8; 16];
         let bytes = msg.encode(Some(&key), false);
 
         let mi_start = bytes.len() - 24;
