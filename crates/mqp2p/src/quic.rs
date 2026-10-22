@@ -3,8 +3,12 @@ use quinn::{Connection, Endpoint, ServerConfig};
 use rcgen::{CertificateParams, KeyPair};
 use ring::digest;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
 pub struct CertIdentity {
@@ -267,10 +271,183 @@ impl rustls::server::danger::ClientCertVerifier for CollectClientCert {
     }
 }
 
+const MAX_BUFFERED_CONNECTIONS: usize = 256;
+const BUFFERED_CONNECTION_TTL: Duration = Duration::from_secs(30);
+
+struct Buffered {
+    conn: Connection,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct AcceptState {
+    waiters: HashMap<String, VecDeque<(u64, oneshot::Sender<Connection>)>>,
+    arrived: HashMap<String, VecDeque<Buffered>>,
+    next_waiter_id: u64,
+    closed: bool,
+}
+
+impl AcceptState {
+    fn buffered_total(&self) -> usize {
+        self.arrived.values().map(VecDeque::len).sum()
+    }
+
+    fn remove_waiter(&mut self, fingerprint: &str, id: u64) {
+        if let Some(queue) = self.waiters.get_mut(fingerprint) {
+            queue.retain(|(waiter_id, _)| *waiter_id != id);
+            if queue.is_empty() {
+                self.waiters.remove(fingerprint);
+            }
+        }
+    }
+}
+
+/// Removes a waiter on cancellation. If `accept_with_fingerprint` is dropped
+/// before a matching connection arrives, its sender would otherwise linger in
+/// `waiters` until a connection with that fingerprint happened to appear.
+struct WaiterGuard<'a> {
+    state: &'a Mutex<AcceptState>,
+    fingerprint: &'a str,
+    id: u64,
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .expect("accept state")
+            .remove_waiter(self.fingerprint, self.id);
+    }
+}
+
+fn connection_fingerprint(connection: &Connection) -> Option<String> {
+    let peer_certs = connection
+        .peer_identity()?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .ok()?;
+    let cert = peer_certs.first()?;
+    Some(compute_fingerprint(cert.as_ref()))
+}
+
+fn evict_overflow(state: &mut AcceptState) {
+    while state.buffered_total() >= MAX_BUFFERED_CONNECTIONS {
+        let Some(oldest) = state
+            .arrived
+            .iter()
+            .filter_map(|(fp, queue)| queue.front().map(|b| (fp.clone(), b.at)))
+            .min_by_key(|(_, at)| *at)
+            .map(|(fp, _)| fp)
+        else {
+            break;
+        };
+        let queue = state.arrived.get_mut(&oldest).expect("oldest present");
+        let dropped = queue.pop_front().expect("front present");
+        dropped.conn.close(0u32.into(), b"accept buffer full");
+        if queue.is_empty() {
+            state.arrived.remove(&oldest);
+        }
+    }
+}
+
+fn expire_buffered(state: &mut AcceptState) {
+    let now = Instant::now();
+    for queue in state.arrived.values_mut() {
+        while queue
+            .front()
+            .is_some_and(|b| now.duration_since(b.at) >= BUFFERED_CONNECTION_TTL)
+        {
+            let expired = queue.pop_front().expect("front present");
+            expired.conn.close(0u32.into(), b"unclaimed");
+        }
+    }
+    state.arrived.retain(|_, queue| !queue.is_empty());
+}
+
+fn spawn_sweep_loop(state: Arc<Mutex<AcceptState>>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(BUFFERED_CONNECTION_TTL).await;
+            let mut guard = state.lock().expect("accept state");
+            if guard.closed {
+                break;
+            }
+            expire_buffered(&mut guard);
+        }
+    })
+}
+
+fn deliver(state: &Mutex<AcceptState>, fingerprint: String, mut conn: Connection) {
+    let mut guard = state.lock().expect("accept state");
+    if guard.closed {
+        conn.close(0u32.into(), b"endpoint closed");
+        return;
+    }
+    if let Some(queue) = guard.waiters.get_mut(&fingerprint) {
+        while let Some((_, waiter)) = queue.pop_front() {
+            match waiter.send(conn) {
+                Ok(()) => {
+                    if queue.is_empty() {
+                        guard.waiters.remove(&fingerprint);
+                    }
+                    return;
+                }
+                Err(returned) => conn = returned,
+            }
+        }
+        guard.waiters.remove(&fingerprint);
+    }
+    evict_overflow(&mut guard);
+    guard
+        .arrived
+        .entry(fingerprint)
+        .or_default()
+        .push_back(Buffered {
+            conn,
+            at: Instant::now(),
+        });
+}
+
+fn spawn_accept_loop(endpoint: Endpoint, state: Arc<Mutex<AcceptState>>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let connection = match incoming.await {
+                    Ok(connection) => connection,
+                    Err(e) => {
+                        debug!(error = %e, "inbound QUIC handshake failed");
+                        return;
+                    }
+                };
+                let Some(fingerprint) = connection_fingerprint(&connection) else {
+                    connection.close(1u32.into(), b"no verifiable certificate");
+                    return;
+                };
+                debug!(
+                    remote = %connection.remote_address(),
+                    "routing inbound connection by fingerprint"
+                );
+                deliver(&state, fingerprint, connection);
+            });
+        }
+        let mut state = state.lock().expect("accept state");
+        state.closed = true;
+        state.waiters.clear();
+        for (_, queue) in state.arrived.drain() {
+            for buffered in queue {
+                buffered.conn.close(0u32.into(), b"endpoint closed");
+            }
+        }
+    })
+}
+
 pub struct QuicEndpoint {
     endpoint: Endpoint,
     identity: CertIdentity,
     transport: Arc<quinn::TransportConfig>,
+    accept_state: Arc<Mutex<AcceptState>>,
+    accept_task: JoinHandle<()>,
+    sweep_task: JoinHandle<()>,
 }
 
 impl QuicEndpoint {
@@ -309,10 +486,17 @@ impl QuicEndpoint {
             .map_err(|e| Error::Quic(format!("{e}")))?;
         info!(addr = %local, "QUIC endpoint bound");
 
+        let accept_state = Arc::new(Mutex::new(AcceptState::default()));
+        let accept_task = spawn_accept_loop(endpoint.clone(), Arc::clone(&accept_state));
+        let sweep_task = spawn_sweep_loop(Arc::clone(&accept_state));
+
         Ok(Self {
             endpoint,
             identity,
             transport,
+            accept_state,
+            accept_task,
+            sweep_task,
         })
     }
 
@@ -345,41 +529,77 @@ impl QuicEndpoint {
     }
 
     pub async fn accept_with_fingerprint(&self, expected_fingerprint: &str) -> Result<Connection> {
-        let incoming = self
-            .endpoint
-            .accept()
+        let (id, receiver) = {
+            let mut state = self.accept_state.lock().expect("accept state");
+            if state.closed {
+                return Err(Error::Quic("endpoint closed".into()));
+            }
+            loop {
+                let buffered = match state.arrived.get_mut(expected_fingerprint) {
+                    Some(queue) => {
+                        let front = queue.pop_front();
+                        if queue.is_empty() {
+                            state.arrived.remove(expected_fingerprint);
+                        }
+                        front
+                    }
+                    None => None,
+                };
+                match buffered {
+                    Some(buffered) if buffered.conn.close_reason().is_none() => {
+                        debug!(
+                            remote = %buffered.conn.remote_address(),
+                            "QUIC connection accepted with verified fingerprint"
+                        );
+                        return Ok(buffered.conn);
+                    }
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
+            let (sender, receiver) = oneshot::channel();
+            state
+                .waiters
+                .entry(expected_fingerprint.to_string())
+                .or_default()
+                .push_back((id, sender));
+            (id, receiver)
+        };
+
+        let _guard = WaiterGuard {
+            state: &self.accept_state,
+            fingerprint: expected_fingerprint,
+            id,
+        };
+        let connection = receiver
             .await
-            .ok_or_else(|| Error::Quic("endpoint closed".into()))?;
-
-        let connection = incoming
-            .await
-            .map_err(|e| Error::Quic(format!("accept failed: {e}")))?;
-
-        let peer_certs = connection
-            .peer_identity()
-            .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
-            .ok_or_else(|| Error::Quic("no peer certificate presented".into()))?;
-
-        let cert = peer_certs
-            .first()
-            .ok_or_else(|| Error::Quic("empty peer certificate chain".into()))?;
-
-        let actual = compute_fingerprint(cert.as_ref());
-        if actual != expected_fingerprint {
-            connection.close(1u32.into(), b"fingerprint mismatch");
-            return Err(Error::FingerprintMismatch {
-                expected: expected_fingerprint.to_string(),
-                actual,
-            });
-        }
-
-        let remote = connection.remote_address();
-        debug!(remote = %remote, "QUIC connection accepted with verified fingerprint");
+            .map_err(|_| Error::Quic("endpoint closed".into()))?;
+        debug!(
+            remote = %connection.remote_address(),
+            "QUIC connection accepted with verified fingerprint"
+        );
         Ok(connection)
     }
 
     pub fn close(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
+    }
+}
+
+impl Drop for QuicEndpoint {
+    fn drop(&mut self) {
+        self.accept_task.abort();
+        self.sweep_task.abort();
+        let mut state = self.accept_state.lock().expect("accept state");
+        state.closed = true;
+        state.waiters.clear();
+        for (_, queue) in state.arrived.drain() {
+            for buffered in queue {
+                buffered.conn.close(0u32.into(), b"endpoint closed");
+            }
+        }
     }
 }
 
@@ -497,5 +717,70 @@ mod tests {
         let second = remote_key_seen_by_initiator(seed, &identity.fingerprint).await;
         assert_eq!(first, expected);
         assert_eq!(second, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_dials_route_to_their_matching_offers() {
+        let id_r = generate_self_signed_cert().expect("cert r");
+        let id_a = generate_self_signed_cert().expect("cert a");
+        let id_b = generate_self_signed_cert().expect("cert b");
+        let fp_r = id_r.fingerprint.clone();
+        let fp_a = id_a.fingerprint.clone();
+        let fp_b = id_b.fingerprint.clone();
+        let socket = || std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep_r = Arc::new(QuicEndpoint::bind(socket(), id_r).expect("bind r"));
+        let ep_a = QuicEndpoint::bind(socket(), id_a).expect("bind a");
+        let ep_b = QuicEndpoint::bind(socket(), id_b).expect("bind b");
+        let addr_r = ep_r.local_addr().expect("addr r");
+
+        let accept_a = {
+            let ep = Arc::clone(&ep_r);
+            let fp = fp_a.clone();
+            tokio::spawn(async move { ep.accept_with_fingerprint(&fp).await })
+        };
+        let accept_b = {
+            let ep = Arc::clone(&ep_r);
+            let fp = fp_b.clone();
+            tokio::spawn(async move { ep.accept_with_fingerprint(&fp).await })
+        };
+
+        let (conn_a, conn_b) =
+            tokio::join!(ep_a.connect(addr_r, &fp_r), ep_b.connect(addr_r, &fp_r));
+        conn_a.expect("peer a dials the responder");
+        conn_b.expect("peer b dials the responder");
+
+        let accepted_a = accept_a.await.expect("accept task a").expect("accept a");
+        let accepted_b = accept_b.await.expect("accept task b").expect("accept b");
+
+        assert_eq!(
+            connection_fingerprint(&accepted_a).as_deref(),
+            Some(fp_a.as_str()),
+            "the waiter for peer a received peer a's connection"
+        );
+        assert_eq!(
+            connection_fingerprint(&accepted_b).as_deref(),
+            Some(fp_b.as_str()),
+            "the waiter for peer b received peer b's connection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_accept_does_not_leak_a_waiter() {
+        let id = generate_self_signed_cert().expect("cert");
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep = QuicEndpoint::bind(socket, id).expect("bind");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(50),
+            ep.accept_with_fingerprint("sha256:never-arrives"),
+        )
+        .await;
+        assert!(outcome.is_err(), "no connection should arrive");
+
+        let state = ep.accept_state.lock().expect("accept state");
+        assert!(
+            state.waiters.is_empty(),
+            "a cancelled accept must remove its waiter"
+        );
     }
 }
