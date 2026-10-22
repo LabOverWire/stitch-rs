@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 pub struct PeerConfig {
     pub name: String,
@@ -27,7 +28,7 @@ pub struct PeerConfig {
     pub presence: bool,
     pub segmentation_offload: Option<SegmentationOffload>,
     pub transport_config: Option<quinn::TransportConfig>,
-    pub ed25519_seed: Option<[u8; 32]>,
+    pub ed25519_seed: Option<Zeroizing<[u8; 32]>>,
 }
 
 impl PeerConfig {
@@ -124,7 +125,7 @@ impl PeerConfig {
     /// `stitch_p2p::membership::Identity`, so a device presents one key for
     /// both the transport and its signed writes.
     pub fn with_ed25519_identity(mut self, seed: [u8; 32]) -> Self {
-        self.ed25519_seed = Some(seed);
+        self.ed25519_seed = Some(Zeroizing::new(seed));
         self
     }
 }
@@ -163,7 +164,7 @@ pub struct Peer {
 
 impl Peer {
     pub async fn new(mut config: PeerConfig) -> Result<Self> {
-        let identity = match config.ed25519_seed {
+        let identity = match config.ed25519_seed.take() {
             Some(seed) => quic::cert_from_ed25519_seed(&seed)?,
             None => quic::generate_self_signed_cert()?,
         };
