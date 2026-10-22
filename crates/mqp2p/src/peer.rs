@@ -150,7 +150,7 @@ pub type PeerId = String;
 
 pub struct Peer {
     name: String,
-    identity: CertIdentity,
+    fingerprint: String,
     signaling: SignalingClient,
     quic: QuicEndpoint,
     record_id: String,
@@ -241,7 +241,7 @@ impl Peer {
 
         Ok(Self {
             name: config.name,
-            identity,
+            fingerprint: identity.fingerprint.clone(),
             signaling,
             quic,
             record_id: uuid::Uuid::new_v4().to_string(),
@@ -264,7 +264,7 @@ impl Peer {
                 &peer_id,
                 &self.name,
                 quic_port,
-                &self.identity.fingerprint,
+                &self.fingerprint,
                 public_addr.as_deref(),
                 self.lease_secs,
             )
@@ -279,7 +279,7 @@ impl Peer {
         let signaling = self.signaling.clone();
         let renew_id = peer_id.clone();
         let renew_name = self.name.clone();
-        let renew_fingerprint = self.identity.fingerprint.clone();
+        let renew_fingerprint = self.fingerprint.clone();
         let renew_public_addr = public_addr;
         let lease_secs = self.lease_secs;
         self.heartbeat = Some(tokio::spawn(async move {
@@ -318,7 +318,7 @@ impl Peer {
     }
 
     pub fn fingerprint(&self) -> &str {
-        &self.identity.fingerprint
+        &self.fingerprint
     }
 
     pub async fn connect_to(&self, target: &PeerInfo) -> Result<P2pConnection> {
@@ -345,7 +345,7 @@ impl Peer {
         let offer = ConnectionOffer {
             from: my_peer_id.to_string(),
             session_id: session_id.clone(),
-            cert_fingerprint: self.identity.fingerprint.clone(),
+            cert_fingerprint: self.fingerprint.clone(),
             candidates,
         };
 
@@ -484,7 +484,7 @@ impl Peer {
         let answer = ConnectionOffer {
             from: my_peer_id.to_string(),
             session_id: offer.session_id.clone(),
-            cert_fingerprint: self.identity.fingerprint.clone(),
+            cert_fingerprint: self.fingerprint.clone(),
             candidates,
         };
 
