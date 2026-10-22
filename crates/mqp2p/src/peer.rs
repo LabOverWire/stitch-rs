@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
+use crate::quic::{self, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
     PeerInfo, SignalingClient, client_id_for, heartbeat_interval_secs,
@@ -28,7 +28,7 @@ pub struct PeerConfig {
     pub presence: bool,
     pub segmentation_offload: Option<SegmentationOffload>,
     pub transport_config: Option<quinn::TransportConfig>,
-    pub ed25519_seed: Option<Zeroizing<[u8; 32]>>,
+    pub ed25519_seed: Option<[u8; 32]>,
 }
 
 impl PeerConfig {
@@ -125,7 +125,7 @@ impl PeerConfig {
     /// `stitch_p2p::membership::Identity`, so a device presents one key for
     /// both the transport and its signed writes.
     pub fn with_ed25519_identity(mut self, seed: [u8; 32]) -> Self {
-        self.ed25519_seed = Some(Zeroizing::new(seed));
+        self.ed25519_seed = Some(seed);
         self
     }
 }
@@ -165,7 +165,7 @@ pub struct Peer {
 impl Peer {
     pub async fn new(mut config: PeerConfig) -> Result<Self> {
         let identity = match config.ed25519_seed.take() {
-            Some(seed) => quic::cert_from_ed25519_seed(&seed)?,
+            Some(seed) => quic::cert_from_ed25519_seed(&Zeroizing::new(seed))?,
             None => quic::generate_self_signed_cert()?,
         };
 
@@ -203,19 +203,14 @@ impl Peer {
         };
 
         let quic_socket = std_socket.try_clone()?;
-        let cert_identity = CertIdentity {
-            cert_der: identity.cert_der.clone(),
-            key_der: identity.key_der.clone(),
-            fingerprint: identity.fingerprint.clone(),
-        };
+        let fingerprint = identity.fingerprint.clone();
         let offload = config.segmentation_offload;
         let mut transport = config.transport_config.take().unwrap_or_default();
         if let Some(enabled) = offload_override(offload) {
             transport.enable_segmentation_offload(enabled);
         }
         debug!(?offload, "QUIC transport configured");
-        let quic =
-            QuicEndpoint::bind_with_transport(quic_socket, cert_identity, Arc::new(transport))?;
+        let quic = QuicEndpoint::bind_with_transport(quic_socket, identity, Arc::new(transport))?;
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
@@ -241,7 +236,7 @@ impl Peer {
 
         Ok(Self {
             name: config.name,
-            fingerprint: identity.fingerprint.clone(),
+            fingerprint,
             signaling,
             quic,
             record_id: uuid::Uuid::new_v4().to_string(),
