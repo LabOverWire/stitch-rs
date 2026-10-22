@@ -8,6 +8,9 @@ pub enum Error {
     #[error("STUN response parse error: {0}")]
     StunParse(String),
 
+    #[error("TURN message parse error: {0}")]
+    TurnParse(String),
+
     #[error("QUIC connection error: {0}")]
     Quic(String),
 
