@@ -485,8 +485,19 @@ impl Peer {
 
         self.signaling.send_answer(&offer.from, &answer).await?;
 
-        if offer.candidates.is_empty() {
-            return Err(Error::Signaling("no candidates in offer".into()));
+        let skipped = offer
+            .candidates
+            .iter()
+            .filter(|c| !c.kind.is_connectable())
+            .count();
+        if skipped > 0 {
+            debug!(skipped, "ignoring unrecognized candidate kinds in offer");
+        }
+
+        if !offer.candidates.iter().any(|c| c.kind.is_connectable()) {
+            return Err(Error::Signaling(
+                "no connectable candidates in offer".into(),
+            ));
         }
 
         let sync = tokio::time::timeout(std::time::Duration::from_secs(10), sync_rx.recv_async())
@@ -502,7 +513,7 @@ impl Peer {
 
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
 
-        for candidate in &offer.candidates {
+        for candidate in offer.candidates.iter().filter(|c| c.kind.is_connectable()) {
             let tokio_socket = tokio::net::UdpSocket::from_std(self.std_socket.try_clone()?)?;
             let _ = tokio_socket
                 .send_to(&[0x50, 0x32, 0x50, 0x50], candidate.addr)

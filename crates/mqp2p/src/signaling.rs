@@ -156,6 +156,14 @@ pub enum CandidateKind {
     Host,
     #[default]
     Srflx,
+    #[serde(other)]
+    Unknown,
+}
+
+impl CandidateKind {
+    pub fn is_connectable(&self) -> bool {
+        matches!(self, Self::Host | Self::Srflx)
+    }
 }
 
 #[derive(Clone)]
@@ -549,6 +557,33 @@ mod tests {
         apply_presence(&mut table, event("mqp2p-edge", "expired", 1));
         assert!(table.is_empty());
         assert!(!departed(&table, "edge"));
+    }
+
+    #[test]
+    fn an_unknown_candidate_kind_parses_instead_of_failing() {
+        let candidate: Candidate = serde_json::from_value(serde_json::json!({
+            "addr": "127.0.0.1:9000",
+            "kind": "Relay"
+        }))
+        .expect("an unknown candidate kind must still deserialize");
+        assert!(matches!(candidate.kind, CandidateKind::Unknown));
+    }
+
+    #[test]
+    fn an_offer_with_an_unknown_candidate_kind_still_deserializes() {
+        let offer: ConnectionOffer = serde_json::from_value(serde_json::json!({
+            "from": "peer-a",
+            "session_id": "s1",
+            "cert_fingerprint": "sha256:aa",
+            "candidates": [
+                { "addr": "127.0.0.1:1", "kind": "Host" },
+                { "addr": "127.0.0.1:2", "kind": "FutureKind" }
+            ]
+        }))
+        .expect("an offer carrying an unknown candidate kind must still parse");
+        assert_eq!(offer.candidates.len(), 2);
+        assert!(matches!(offer.candidates[0].kind, CandidateKind::Host));
+        assert!(matches!(offer.candidates[1].kind, CandidateKind::Unknown));
     }
 
     #[test]
