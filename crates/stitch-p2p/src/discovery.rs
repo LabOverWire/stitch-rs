@@ -3,9 +3,41 @@ use crate::node::SyncNode;
 use crate::session;
 use mqp2p::{P2pConnection, Peer};
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
+
+/// Decides whether a connected peer, identified by its verified transport
+/// public key, may join the swarm. Implemented by
+/// `stitch_p2p::membership::Membership` so a swarm accepts and dials only
+/// authorized members; without a gate every peer is admitted.
+pub trait MemberGate: Send + Sync + 'static {
+    fn admits(&self, key: [u8; 32]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+}
+
+async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) -> bool {
+    match gate {
+        None => true,
+        Some(gate) => match key {
+            Some(key) => gate.admits(key).await,
+            None => false,
+        },
+    }
+}
+
+async fn admitted(
+    conn: P2pConnection,
+    gate: &Option<Arc<dyn MemberGate>>,
+) -> Option<P2pConnection> {
+    if gate_admits(gate, conn.remote_public_key()).await {
+        Some(conn)
+    } else {
+        let _ = conn.close();
+        None
+    }
+}
 
 /// Derive a sync [`PeerId`] (the 32-byte writer identity used in HLC stamps)
 /// from an mqp2p certificate fingerprint of the form `sha256:aa:bb:...`. Ties
@@ -71,6 +103,29 @@ impl Swarm {
         pull_interval: Duration,
         discovery_interval: Duration,
     ) -> Self {
+        Self::spawn_inner(peer, node, pull_interval, discovery_interval, None)
+    }
+
+    /// Like [`Swarm::spawn`], but only peers whose verified transport key the
+    /// `gate` admits are connected; others are closed immediately. Used for
+    /// membership-gated pairing (see `stitch_p2p::membership::Membership`).
+    #[must_use]
+    pub fn spawn_gated(
+        peer: Arc<Peer>,
+        node: SyncNode,
+        pull_interval: Duration,
+        gate: Arc<dyn MemberGate>,
+    ) -> Self {
+        Self::spawn_inner(peer, node, pull_interval, pull_interval, Some(gate))
+    }
+
+    fn spawn_inner(
+        peer: Arc<Peer>,
+        node: SyncNode,
+        pull_interval: Duration,
+        discovery_interval: Duration,
+        gate: Option<Arc<dyn MemberGate>>,
+    ) -> Self {
         let connected: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let bridges: Bridges = Arc::new(Mutex::new(Vec::new()));
         let accept = tokio::spawn(accept_loop(
@@ -79,6 +134,7 @@ impl Swarm {
             Arc::clone(&connected),
             Arc::clone(&bridges),
             pull_interval,
+            gate.clone(),
         ));
         let connect = tokio::spawn(connect_loop(
             peer,
@@ -87,6 +143,7 @@ impl Swarm {
             Arc::clone(&bridges),
             pull_interval,
             discovery_interval,
+            gate,
         ));
         Self {
             handles: vec![accept, connect],
@@ -119,10 +176,14 @@ async fn accept_loop(
     connected: Arc<Mutex<HashSet<String>>>,
     bridges: Bridges,
     pull_interval: Duration,
+    gate: Option<Arc<dyn MemberGate>>,
 ) {
     loop {
         match peer.accept_connection().await {
             Ok(conn) => {
+                let Some(conn) = admitted(conn, &gate).await else {
+                    continue;
+                };
                 let id = conn.remote_peer().id.clone();
                 connected.lock().expect("connected lock").insert(id.clone());
                 let handle = tokio::spawn(bridge(
@@ -147,6 +208,7 @@ async fn connect_loop(
     bridges: Bridges,
     pull_interval: Duration,
     discovery_interval: Duration,
+    gate: Option<Arc<dyn MemberGate>>,
 ) {
     let my_id = match peer.peer_id() {
         Some(id) => id.to_string(),
@@ -166,17 +228,22 @@ async fn connect_loop(
                     guard.insert(target.id.clone());
                 }
                 match peer.connect_to(&target).await {
-                    Ok(conn) => {
-                        let handle = tokio::spawn(bridge(
-                            conn,
-                            node.clone(),
-                            Role::Initiator,
-                            pull_interval,
-                            Arc::clone(&connected),
-                            target.id.clone(),
-                        ));
-                        track(&bridges, handle);
-                    }
+                    Ok(conn) => match admitted(conn, &gate).await {
+                        Some(conn) => {
+                            let handle = tokio::spawn(bridge(
+                                conn,
+                                node.clone(),
+                                Role::Initiator,
+                                pull_interval,
+                                Arc::clone(&connected),
+                                target.id.clone(),
+                            ));
+                            track(&bridges, handle);
+                        }
+                        None => {
+                            connected.lock().expect("connected lock").remove(&target.id);
+                        }
+                    },
                     Err(_) => {
                         connected.lock().expect("connected lock").remove(&target.id);
                     }
@@ -234,5 +301,33 @@ mod tests {
         let parts: Vec<&str> = std::iter::repeat_n("zz", 32).collect();
         let fp = format!("sha256:{}", parts.join(":"));
         assert!(peer_id_from_fingerprint(&fp).is_none());
+    }
+
+    struct FixedGate(HashSet<[u8; 32]>);
+
+    impl MemberGate for FixedGate {
+        fn admits(&self, key: [u8; 32]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+            let admitted = self.0.contains(&key);
+            Box::pin(async move { admitted })
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_gate_every_peer_is_admitted() {
+        assert!(gate_admits(&None, Some([1u8; 32])).await);
+        assert!(gate_admits(&None, None).await);
+    }
+
+    #[tokio::test]
+    async fn a_gate_admits_members_and_rejects_the_rest() {
+        let member = [7u8; 32];
+        let outsider = [8u8; 32];
+        let gate: Option<Arc<dyn MemberGate>> = Some(Arc::new(FixedGate(HashSet::from([member]))));
+        assert!(gate_admits(&gate, Some(member)).await);
+        assert!(!gate_admits(&gate, Some(outsider)).await);
+        assert!(
+            !gate_admits(&gate, None).await,
+            "a peer with no readable transport key is rejected"
+        );
     }
 }
