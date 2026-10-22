@@ -502,7 +502,11 @@ impl Peer {
 
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
 
-        for candidate in &offer.candidates {
+        for candidate in offer
+            .candidates
+            .iter()
+            .filter(|c| matches!(c.kind, CandidateKind::Host | CandidateKind::Srflx))
+        {
             let tokio_socket = tokio::net::UdpSocket::from_std(self.std_socket.try_clone()?)?;
             let _ = tokio_socket
                 .send_to(&[0x50, 0x32, 0x50, 0x50], candidate.addr)

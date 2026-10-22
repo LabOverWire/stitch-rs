@@ -156,9 +156,6 @@ pub enum CandidateKind {
     Host,
     #[default]
     Srflx,
-    /// A candidate kind this build does not recognize (e.g. a kind added by a
-    /// newer peer). Deserializing to this instead of failing keeps the whole
-    /// offer/answer parseable across versions; such candidates are ignored.
     #[serde(other)]
     Unknown,
 }
