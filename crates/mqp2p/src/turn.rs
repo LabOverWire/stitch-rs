@@ -218,6 +218,12 @@ impl Message {
             offset += alen + (4 - (alen % 4)) % 4;
         }
 
+        if offset != body.len() {
+            return Err(Error::TurnParse(
+                "trailing bytes after final attribute".into(),
+            ));
+        }
+
         Ok(Message {
             method,
             class,
@@ -266,7 +272,7 @@ impl ChannelData {
 }
 
 pub fn is_channel_data(buf: &[u8]) -> bool {
-    buf.first().is_some_and(|b| b & 0xC0 == 0x40)
+    buf.len() >= 2 && (CHANNEL_MIN..=CHANNEL_MAX).contains(&u16::from_be_bytes([buf[0], buf[1]]))
 }
 
 fn message_type(method: u16, class: Class) -> u16 {
@@ -692,5 +698,23 @@ mod tests {
         let mut bytes = Message::new(METHOD_BINDING, Class::Request, [0u8; 12]).encode(None, false);
         bytes[4] = 0;
         assert!(Message::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_trailing_unaligned_bytes() {
+        let mut bytes = Message::new(METHOD_BINDING, Class::Request, [0u8; 12]).encode(None, false);
+        bytes.extend_from_slice(&[0, 0, 0]);
+        let len = bytes.len() - HEADER_LEN;
+        set_length(&mut bytes, len);
+        assert!(Message::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn is_channel_data_agrees_with_the_decoder_range() {
+        for channel in [0x3FFFu16, CHANNEL_MAX + 1, 0x7000] {
+            let bytes = [(channel >> 8) as u8, channel as u8, 0, 0];
+            assert!(!is_channel_data(&bytes));
+            assert!(ChannelData::decode(&bytes).is_err());
+        }
     }
 }
