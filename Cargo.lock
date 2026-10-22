@@ -1442,6 +1442,7 @@ version = "0.3.0"
 dependencies = [
  "bytes",
  "clap",
+ "crc32fast",
  "flume",
  "mqtt5",
  "quinn",

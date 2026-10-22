@@ -4,6 +4,7 @@ pub mod quic;
 pub mod signaling;
 pub mod stun;
 pub mod transfer;
+pub mod turn;
 
 pub use error::Error;
 pub use peer::{P2pConnection, Peer, PeerConfig, PeerId};
