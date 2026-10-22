@@ -349,53 +349,62 @@ fn evict_overflow(state: &mut AcceptState) {
     }
 }
 
-async fn expire_buffered(state: Arc<Mutex<AcceptState>>, fingerprint: String, stable_id: usize) {
-    tokio::time::sleep(BUFFERED_CONNECTION_TTL).await;
-    let mut state = state.lock().expect("accept state");
-    if let Some(queue) = state.arrived.get_mut(&fingerprint)
-        && let Some(pos) = queue.iter().position(|b| b.conn.stable_id() == stable_id)
-    {
-        let expired = queue.remove(pos).expect("position valid");
-        expired.conn.close(0u32.into(), b"unclaimed");
-        if queue.is_empty() {
-            state.arrived.remove(&fingerprint);
+fn expire_buffered(state: &mut AcceptState) {
+    let now = Instant::now();
+    for queue in state.arrived.values_mut() {
+        while queue
+            .front()
+            .is_some_and(|b| now.duration_since(b.at) >= BUFFERED_CONNECTION_TTL)
+        {
+            let expired = queue.pop_front().expect("front present");
+            expired.conn.close(0u32.into(), b"unclaimed");
         }
     }
+    state.arrived.retain(|_, queue| !queue.is_empty());
 }
 
-fn deliver(state: &Arc<Mutex<AcceptState>>, fingerprint: String, mut conn: Connection) {
-    let stable_id = conn.stable_id();
-    {
-        let mut guard = state.lock().expect("accept state");
-        if guard.closed {
-            conn.close(0u32.into(), b"endpoint closed");
-            return;
-        }
-        if let Some(queue) = guard.waiters.get_mut(&fingerprint) {
-            while let Some((_, waiter)) = queue.pop_front() {
-                match waiter.send(conn) {
-                    Ok(()) => {
-                        if queue.is_empty() {
-                            guard.waiters.remove(&fingerprint);
-                        }
-                        return;
-                    }
-                    Err(returned) => conn = returned,
-                }
+fn spawn_sweep_loop(state: Arc<Mutex<AcceptState>>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(BUFFERED_CONNECTION_TTL).await;
+            let mut guard = state.lock().expect("accept state");
+            if guard.closed {
+                break;
             }
-            guard.waiters.remove(&fingerprint);
+            expire_buffered(&mut guard);
         }
-        evict_overflow(&mut guard);
-        guard
-            .arrived
-            .entry(fingerprint.clone())
-            .or_default()
-            .push_back(Buffered {
-                conn,
-                at: Instant::now(),
-            });
+    })
+}
+
+fn deliver(state: &Mutex<AcceptState>, fingerprint: String, mut conn: Connection) {
+    let mut guard = state.lock().expect("accept state");
+    if guard.closed {
+        conn.close(0u32.into(), b"endpoint closed");
+        return;
     }
-    tokio::spawn(expire_buffered(Arc::clone(state), fingerprint, stable_id));
+    if let Some(queue) = guard.waiters.get_mut(&fingerprint) {
+        while let Some((_, waiter)) = queue.pop_front() {
+            match waiter.send(conn) {
+                Ok(()) => {
+                    if queue.is_empty() {
+                        guard.waiters.remove(&fingerprint);
+                    }
+                    return;
+                }
+                Err(returned) => conn = returned,
+            }
+        }
+        guard.waiters.remove(&fingerprint);
+    }
+    evict_overflow(&mut guard);
+    guard
+        .arrived
+        .entry(fingerprint)
+        .or_default()
+        .push_back(Buffered {
+            conn,
+            at: Instant::now(),
+        });
 }
 
 fn spawn_accept_loop(endpoint: Endpoint, state: Arc<Mutex<AcceptState>>) -> JoinHandle<()> {
@@ -438,6 +447,7 @@ pub struct QuicEndpoint {
     transport: Arc<quinn::TransportConfig>,
     accept_state: Arc<Mutex<AcceptState>>,
     accept_task: JoinHandle<()>,
+    sweep_task: JoinHandle<()>,
 }
 
 impl QuicEndpoint {
@@ -478,6 +488,7 @@ impl QuicEndpoint {
 
         let accept_state = Arc::new(Mutex::new(AcceptState::default()));
         let accept_task = spawn_accept_loop(endpoint.clone(), Arc::clone(&accept_state));
+        let sweep_task = spawn_sweep_loop(Arc::clone(&accept_state));
 
         Ok(Self {
             endpoint,
@@ -485,6 +496,7 @@ impl QuicEndpoint {
             transport,
             accept_state,
             accept_task,
+            sweep_task,
         })
     }
 
@@ -579,6 +591,7 @@ impl QuicEndpoint {
 impl Drop for QuicEndpoint {
     fn drop(&mut self) {
         self.accept_task.abort();
+        self.sweep_task.abort();
         let mut state = self.accept_state.lock().expect("accept state");
         state.closed = true;
         state.waiters.clear();

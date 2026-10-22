@@ -513,10 +513,12 @@ impl Peer {
                 .await;
         }
 
-        let connection = self
-            .quic
-            .accept_with_fingerprint(&offer.cert_fingerprint)
-            .await?;
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.quic.accept_with_fingerprint(&offer.cert_fingerprint),
+        )
+        .await
+        .map_err(|_| Error::Signaling("timeout waiting for inbound connection".into()))??;
 
         let remote_addr = connection.remote_address();
 
