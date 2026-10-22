@@ -160,6 +160,12 @@ pub enum CandidateKind {
     Unknown,
 }
 
+impl CandidateKind {
+    pub fn is_connectable(&self) -> bool {
+        matches!(self, Self::Host | Self::Srflx)
+    }
+}
+
 #[derive(Clone)]
 pub struct SignalingClient {
     client: MqttClient,
