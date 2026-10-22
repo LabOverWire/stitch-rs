@@ -281,10 +281,43 @@ struct Buffered {
 
 #[derive(Default)]
 struct AcceptState {
-    waiters: HashMap<String, VecDeque<oneshot::Sender<Connection>>>,
+    waiters: HashMap<String, VecDeque<(u64, oneshot::Sender<Connection>)>>,
     arrived: HashMap<String, VecDeque<Buffered>>,
-    arrived_count: usize,
+    next_waiter_id: u64,
     closed: bool,
+}
+
+impl AcceptState {
+    fn buffered_total(&self) -> usize {
+        self.arrived.values().map(VecDeque::len).sum()
+    }
+
+    fn remove_waiter(&mut self, fingerprint: &str, id: u64) {
+        if let Some(queue) = self.waiters.get_mut(fingerprint) {
+            queue.retain(|(waiter_id, _)| *waiter_id != id);
+            if queue.is_empty() {
+                self.waiters.remove(fingerprint);
+            }
+        }
+    }
+}
+
+/// Removes a waiter on cancellation. If `accept_with_fingerprint` is dropped
+/// before a matching connection arrives, its sender would otherwise linger in
+/// `waiters` until a connection with that fingerprint happened to appear.
+struct WaiterGuard<'a> {
+    state: &'a Mutex<AcceptState>,
+    fingerprint: &'a str,
+    id: u64,
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .expect("accept state")
+            .remove_waiter(self.fingerprint, self.id);
+    }
 }
 
 fn connection_fingerprint(connection: &Connection) -> Option<String> {
@@ -296,23 +329,8 @@ fn connection_fingerprint(connection: &Connection) -> Option<String> {
     Some(compute_fingerprint(cert.as_ref()))
 }
 
-fn prune(state: &mut AcceptState) {
-    let now = Instant::now();
-    let mut removed = 0usize;
-    for queue in state.arrived.values_mut() {
-        while queue
-            .front()
-            .is_some_and(|b| now.duration_since(b.at) >= BUFFERED_CONNECTION_TTL)
-        {
-            let expired = queue.pop_front().expect("front present");
-            expired.conn.close(0u32.into(), b"unclaimed");
-            removed += 1;
-        }
-    }
-    state.arrived.retain(|_, queue| !queue.is_empty());
-    state.arrived_count -= removed;
-
-    while state.arrived_count >= MAX_BUFFERED_CONNECTIONS {
+fn evict_overflow(state: &mut AcceptState) {
+    while state.buffered_total() >= MAX_BUFFERED_CONNECTIONS {
         let Some(oldest) = state
             .arrived
             .iter()
@@ -325,43 +343,59 @@ fn prune(state: &mut AcceptState) {
         let queue = state.arrived.get_mut(&oldest).expect("oldest present");
         let dropped = queue.pop_front().expect("front present");
         dropped.conn.close(0u32.into(), b"accept buffer full");
-        state.arrived_count -= 1;
         if queue.is_empty() {
             state.arrived.remove(&oldest);
         }
     }
 }
 
-fn deliver(state: &Mutex<AcceptState>, fingerprint: String, mut conn: Connection) {
+async fn expire_buffered(state: Arc<Mutex<AcceptState>>, fingerprint: String, stable_id: usize) {
+    tokio::time::sleep(BUFFERED_CONNECTION_TTL).await;
     let mut state = state.lock().expect("accept state");
-    if state.closed {
-        conn.close(0u32.into(), b"endpoint closed");
-        return;
-    }
-    if let Some(queue) = state.waiters.get_mut(&fingerprint) {
-        while let Some(waiter) = queue.pop_front() {
-            match waiter.send(conn) {
-                Ok(()) => {
-                    if queue.is_empty() {
-                        state.waiters.remove(&fingerprint);
-                    }
-                    return;
-                }
-                Err(returned) => conn = returned,
-            }
+    if let Some(queue) = state.arrived.get_mut(&fingerprint)
+        && let Some(pos) = queue.iter().position(|b| b.conn.stable_id() == stable_id)
+    {
+        let expired = queue.remove(pos).expect("position valid");
+        expired.conn.close(0u32.into(), b"unclaimed");
+        if queue.is_empty() {
+            state.arrived.remove(&fingerprint);
         }
-        state.waiters.remove(&fingerprint);
     }
-    prune(&mut state);
-    state
-        .arrived
-        .entry(fingerprint)
-        .or_default()
-        .push_back(Buffered {
-            conn,
-            at: Instant::now(),
-        });
-    state.arrived_count += 1;
+}
+
+fn deliver(state: &Arc<Mutex<AcceptState>>, fingerprint: String, mut conn: Connection) {
+    let stable_id = conn.stable_id();
+    {
+        let mut guard = state.lock().expect("accept state");
+        if guard.closed {
+            conn.close(0u32.into(), b"endpoint closed");
+            return;
+        }
+        if let Some(queue) = guard.waiters.get_mut(&fingerprint) {
+            while let Some((_, waiter)) = queue.pop_front() {
+                match waiter.send(conn) {
+                    Ok(()) => {
+                        if queue.is_empty() {
+                            guard.waiters.remove(&fingerprint);
+                        }
+                        return;
+                    }
+                    Err(returned) => conn = returned,
+                }
+            }
+            guard.waiters.remove(&fingerprint);
+        }
+        evict_overflow(&mut guard);
+        guard
+            .arrived
+            .entry(fingerprint.clone())
+            .or_default()
+            .push_back(Buffered {
+                conn,
+                at: Instant::now(),
+            });
+    }
+    tokio::spawn(expire_buffered(Arc::clone(state), fingerprint, stable_id));
 }
 
 fn spawn_accept_loop(endpoint: Endpoint, state: Arc<Mutex<AcceptState>>) -> JoinHandle<()> {
@@ -395,7 +429,6 @@ fn spawn_accept_loop(endpoint: Endpoint, state: Arc<Mutex<AcceptState>>) -> Join
                 buffered.conn.close(0u32.into(), b"endpoint closed");
             }
         }
-        state.arrived_count = 0;
     })
 }
 
@@ -484,33 +517,50 @@ impl QuicEndpoint {
     }
 
     pub async fn accept_with_fingerprint(&self, expected_fingerprint: &str) -> Result<Connection> {
-        let receiver = {
+        let (id, receiver) = {
             let mut state = self.accept_state.lock().expect("accept state");
             if state.closed {
                 return Err(Error::Quic("endpoint closed".into()));
             }
-            if let Some(queue) = state.arrived.get_mut(expected_fingerprint)
-                && let Some(buffered) = queue.pop_front()
-            {
-                if queue.is_empty() {
-                    state.arrived.remove(expected_fingerprint);
+            loop {
+                let buffered = match state.arrived.get_mut(expected_fingerprint) {
+                    Some(queue) => {
+                        let front = queue.pop_front();
+                        if queue.is_empty() {
+                            state.arrived.remove(expected_fingerprint);
+                        }
+                        front
+                    }
+                    None => None,
+                };
+                match buffered {
+                    Some(buffered) if buffered.conn.close_reason().is_none() => {
+                        debug!(
+                            remote = %buffered.conn.remote_address(),
+                            "QUIC connection accepted with verified fingerprint"
+                        );
+                        return Ok(buffered.conn);
+                    }
+                    Some(_) => continue,
+                    None => break,
                 }
-                state.arrived_count -= 1;
-                debug!(
-                    remote = %buffered.conn.remote_address(),
-                    "QUIC connection accepted with verified fingerprint"
-                );
-                return Ok(buffered.conn);
             }
+            let id = state.next_waiter_id;
+            state.next_waiter_id += 1;
             let (sender, receiver) = oneshot::channel();
             state
                 .waiters
                 .entry(expected_fingerprint.to_string())
                 .or_default()
-                .push_back(sender);
-            receiver
+                .push_back((id, sender));
+            (id, receiver)
         };
 
+        let _guard = WaiterGuard {
+            state: &self.accept_state,
+            fingerprint: expected_fingerprint,
+            id,
+        };
         let connection = receiver
             .await
             .map_err(|_| Error::Quic("endpoint closed".into()))?;
@@ -529,6 +579,14 @@ impl QuicEndpoint {
 impl Drop for QuicEndpoint {
     fn drop(&mut self) {
         self.accept_task.abort();
+        let mut state = self.accept_state.lock().expect("accept state");
+        state.closed = true;
+        state.waiters.clear();
+        for (_, queue) in state.arrived.drain() {
+            for buffered in queue {
+                buffered.conn.close(0u32.into(), b"endpoint closed");
+            }
+        }
     }
 }
 
@@ -690,6 +748,26 @@ mod tests {
             connection_fingerprint(&accepted_b).as_deref(),
             Some(fp_b.as_str()),
             "the waiter for peer b received peer b's connection"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_accept_does_not_leak_a_waiter() {
+        let id = generate_self_signed_cert().expect("cert");
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("socket");
+        let ep = QuicEndpoint::bind(socket, id).expect("bind");
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(50),
+            ep.accept_with_fingerprint("sha256:never-arrives"),
+        )
+        .await;
+        assert!(outcome.is_err(), "no connection should arrive");
+
+        let state = ep.accept_state.lock().expect("accept state");
+        assert!(
+            state.waiters.is_empty(),
+            "a cancelled accept must remove its waiter"
         );
     }
 }
