@@ -10,11 +10,18 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct CertIdentity {
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
     pub fingerprint: String,
+}
+
+impl Drop for CertIdentity {
+    fn drop(&mut self) {
+        self.key_der.zeroize();
+    }
 }
 
 const ED25519_PKCS8_PREFIX: [u8; 16] = [
@@ -28,11 +35,14 @@ pub fn generate_self_signed_cert() -> Result<CertIdentity> {
 }
 
 pub fn cert_from_ed25519_seed(seed: &[u8; 32]) -> Result<CertIdentity> {
-    let mut pkcs8 = Vec::with_capacity(ED25519_PKCS8_PREFIX.len() + seed.len());
-    pkcs8.extend_from_slice(&ED25519_PKCS8_PREFIX);
-    pkcs8.extend_from_slice(seed);
+    let pkcs8 = Zeroizing::new({
+        let mut buf = Vec::with_capacity(ED25519_PKCS8_PREFIX.len() + seed.len());
+        buf.extend_from_slice(&ED25519_PKCS8_PREFIX);
+        buf.extend_from_slice(seed);
+        buf
+    });
     let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(
-        &PrivatePkcs8KeyDer::from(pkcs8),
+        &PrivatePkcs8KeyDer::from(pkcs8.as_slice()),
         &rcgen::PKCS_ED25519,
     )
     .map_err(|e| Error::Quic(format!("key load failed: {e}")))?;

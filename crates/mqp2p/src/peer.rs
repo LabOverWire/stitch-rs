@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
+use crate::quic::{self, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
     PeerInfo, SignalingClient, client_id_for, heartbeat_interval_secs,
@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 pub struct PeerConfig {
     pub name: String,
@@ -149,7 +150,7 @@ pub type PeerId = String;
 
 pub struct Peer {
     name: String,
-    identity: CertIdentity,
+    fingerprint: String,
     signaling: SignalingClient,
     quic: QuicEndpoint,
     record_id: String,
@@ -163,8 +164,8 @@ pub struct Peer {
 
 impl Peer {
     pub async fn new(mut config: PeerConfig) -> Result<Self> {
-        let identity = match config.ed25519_seed {
-            Some(seed) => quic::cert_from_ed25519_seed(&seed)?,
+        let identity = match config.ed25519_seed.take() {
+            Some(seed) => quic::cert_from_ed25519_seed(&Zeroizing::new(seed))?,
             None => quic::generate_self_signed_cert()?,
         };
 
@@ -202,19 +203,14 @@ impl Peer {
         };
 
         let quic_socket = std_socket.try_clone()?;
-        let cert_identity = CertIdentity {
-            cert_der: identity.cert_der.clone(),
-            key_der: identity.key_der.clone(),
-            fingerprint: identity.fingerprint.clone(),
-        };
+        let fingerprint = identity.fingerprint.clone();
         let offload = config.segmentation_offload;
         let mut transport = config.transport_config.take().unwrap_or_default();
         if let Some(enabled) = offload_override(offload) {
             transport.enable_segmentation_offload(enabled);
         }
         debug!(?offload, "QUIC transport configured");
-        let quic =
-            QuicEndpoint::bind_with_transport(quic_socket, cert_identity, Arc::new(transport))?;
+        let quic = QuicEndpoint::bind_with_transport(quic_socket, identity, Arc::new(transport))?;
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
@@ -240,7 +236,7 @@ impl Peer {
 
         Ok(Self {
             name: config.name,
-            identity,
+            fingerprint,
             signaling,
             quic,
             record_id: uuid::Uuid::new_v4().to_string(),
@@ -263,7 +259,7 @@ impl Peer {
                 &peer_id,
                 &self.name,
                 quic_port,
-                &self.identity.fingerprint,
+                &self.fingerprint,
                 public_addr.as_deref(),
                 self.lease_secs,
             )
@@ -278,7 +274,7 @@ impl Peer {
         let signaling = self.signaling.clone();
         let renew_id = peer_id.clone();
         let renew_name = self.name.clone();
-        let renew_fingerprint = self.identity.fingerprint.clone();
+        let renew_fingerprint = self.fingerprint.clone();
         let renew_public_addr = public_addr;
         let lease_secs = self.lease_secs;
         self.heartbeat = Some(tokio::spawn(async move {
@@ -317,7 +313,7 @@ impl Peer {
     }
 
     pub fn fingerprint(&self) -> &str {
-        &self.identity.fingerprint
+        &self.fingerprint
     }
 
     pub async fn connect_to(&self, target: &PeerInfo) -> Result<P2pConnection> {
@@ -344,7 +340,7 @@ impl Peer {
         let offer = ConnectionOffer {
             from: my_peer_id.to_string(),
             session_id: session_id.clone(),
-            cert_fingerprint: self.identity.fingerprint.clone(),
+            cert_fingerprint: self.fingerprint.clone(),
             candidates,
         };
 
@@ -483,7 +479,7 @@ impl Peer {
         let answer = ConnectionOffer {
             from: my_peer_id.to_string(),
             session_id: offer.session_id.clone(),
-            cert_fingerprint: self.identity.fingerprint.clone(),
+            cert_fingerprint: self.fingerprint.clone(),
             candidates,
         };
 
