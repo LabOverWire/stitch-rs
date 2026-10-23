@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use quinn::{AsyncUdpSocket, Connection, Endpoint, ServerConfig};
+use quinn::{Connection, Endpoint, ServerConfig};
 use rcgen::{CertificateParams, KeyPair};
 use ring::digest;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -12,7 +12,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info};
 use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Clone)]
 pub struct CertIdentity {
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
@@ -492,34 +491,6 @@ impl QuicEndpoint {
         )
         .map_err(|e| Error::Quic(format!("endpoint bind failed: {e}")))?;
 
-        Self::from_endpoint(endpoint, identity, transport)
-    }
-
-    pub fn bind_abstract(
-        socket: Arc<dyn AsyncUdpSocket>,
-        identity: CertIdentity,
-        transport: Arc<quinn::TransportConfig>,
-    ) -> Result<Self> {
-        let server_config = build_server_config(&identity, Arc::clone(&transport))?;
-        let runtime = quinn::default_runtime()
-            .ok_or_else(|| Error::Quic("no async runtime available".into()))?;
-
-        let endpoint = Endpoint::new_with_abstract_socket(
-            quinn::EndpointConfig::default(),
-            Some(server_config),
-            socket,
-            runtime,
-        )
-        .map_err(|e| Error::Quic(format!("endpoint bind failed: {e}")))?;
-
-        Self::from_endpoint(endpoint, identity, transport)
-    }
-
-    fn from_endpoint(
-        endpoint: Endpoint,
-        identity: CertIdentity,
-        transport: Arc<quinn::TransportConfig>,
-    ) -> Result<Self> {
         let local = endpoint
             .local_addr()
             .map_err(|e| Error::Quic(format!("{e}")))?;
@@ -652,15 +623,6 @@ mod tests {
         assert!(id.fingerprint.starts_with("sha256:"));
         assert!(!id.cert_der.is_empty());
         assert!(!id.key_der.is_empty());
-    }
-
-    #[test]
-    fn a_cloned_identity_carries_the_same_material() {
-        let id = generate_self_signed_cert().unwrap();
-        let clone = id.clone();
-        assert_eq!(id.cert_der, clone.cert_der);
-        assert_eq!(id.key_der, clone.key_der);
-        assert_eq!(id.fingerprint, clone.fingerprint);
     }
 
     #[test]

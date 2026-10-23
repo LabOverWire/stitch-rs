@@ -19,12 +19,13 @@ use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 const TURN_LIFETIME_SECS: u32 = 600;
+const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnServer {
     pub server: String,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
 }
 
 pub struct PeerConfig {
@@ -108,7 +109,7 @@ impl PeerConfig {
         self.turn = Some(TurnServer {
             server: server.into(),
             username: username.into(),
-            password: password.into(),
+            password: Zeroizing::new(password.into()),
         });
         self
     }
@@ -245,13 +246,17 @@ impl Peer {
         };
 
         let turn = if let Some(ref turn_server) = config.turn {
-            match setup_turn(turn_server).await {
-                Ok(client) => {
+            match tokio::time::timeout(TURN_SETUP_TIMEOUT, setup_turn(turn_server)).await {
+                Ok(Ok(client)) => {
                     info!(relayed = %client.relayed_addr(), "TURN allocation established");
                     Some(client)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(error = %e, "TURN allocation failed, peer will not advertise a relay candidate");
+                    None
+                }
+                Err(_) => {
+                    warn!("TURN allocation timed out, peer will not advertise a relay candidate");
                     None
                 }
             }
@@ -814,7 +819,7 @@ mod tests {
         let turn = config.turn.expect("turn configured");
         assert_eq!(turn.server, "turn.example.org:3478");
         assert_eq!(turn.username, "device-a");
-        assert_eq!(turn.password, password);
+        assert_eq!(*turn.password, password);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
+use zeroize::Zeroizing;
 
 const INBOUND_CAPACITY: usize = 1024;
 const RECV_BUFFER_LEN: usize = 65535;
@@ -36,11 +37,11 @@ pub fn long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
     hasher.finalize().into()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnConfig {
     pub server: SocketAddr,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
     pub lifetime_secs: u32,
 }
 
@@ -578,7 +579,7 @@ mod tests {
         let client = TurnClient::connect(TurnConfig {
             server: server_addr,
             username: "device-a".into(),
-            password,
+            password: Zeroizing::new(password),
             lifetime_secs: 600,
         })
         .await
