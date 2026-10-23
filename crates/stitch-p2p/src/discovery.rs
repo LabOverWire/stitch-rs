@@ -1,6 +1,8 @@
 use crate::hlc::{PEER_ID_LEN, PeerId};
 use crate::node::SyncNode;
+use crate::protocol::{SyncMessage, read_message, write_message};
 use crate::session;
+use crate::wire::WriteFrame;
 use mqp2p::{P2pConnection, Peer};
 use std::collections::HashSet;
 use std::future::Future;
@@ -9,12 +11,35 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+/// How long a gated peer waits for a connecting peer's membership proof before
+/// giving up and deciding on local membership alone. Bounds the miss path when
+/// the peer offers no proof (e.g. an ungated swarm).
+const PROOF_WAIT: Duration = Duration::from_secs(3);
+
 /// Decides whether a connected peer, identified by its verified transport
 /// public key, may join the swarm. Implemented by
 /// `stitch_p2p::membership::Membership` so a swarm accepts and dials only
 /// authorized members; without a gate every peer is admitted.
 pub trait MemberGate: Send + Sync + 'static {
     fn admits(&self, key: [u8; 32]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+
+    /// This node's own membership proof — the signed records it offers a peer
+    /// that may not yet have synced this node's membership. Default: nothing to
+    /// offer, so gates without a bootstrap story behave exactly as before.
+    fn local_proof(&self) -> Pin<Box<dyn Future<Output = Vec<WriteFrame>> + Send + '_>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    /// Decide admission for `key` given the membership proof it presented.
+    /// Default: ignore the proof and fall back to [`MemberGate::admits`].
+    fn admits_with_proof(
+        &self,
+        key: [u8; 32],
+        proof: Vec<WriteFrame>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+        let _ = proof;
+        self.admits(key)
+    }
 }
 
 async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) -> bool {
@@ -27,16 +52,48 @@ async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) 
     }
 }
 
+async fn offer_proof(conn: &P2pConnection, gate: &Arc<dyn MemberGate>) {
+    let frames = gate.local_proof().await;
+    if let Ok(mut stream) = conn.open_uni().await {
+        let _ = write_message(&mut stream, &SyncMessage::Delta(frames)).await;
+        let _ = stream.finish();
+    }
+}
+
+async fn receive_proof(conn: &P2pConnection) -> Option<Vec<WriteFrame>> {
+    let read = async {
+        let mut stream = conn.accept_uni().await.ok()?;
+        match read_message(&mut stream).await.ok()? {
+            SyncMessage::Delta(frames) => Some(frames),
+            _ => None,
+        }
+    };
+    tokio::time::timeout(PROOF_WAIT, read).await.ok().flatten()
+}
+
+/// Decide whether a connected peer may join. On a gated connection each side
+/// first offers its own proof (so a peer that has not yet synced this node's
+/// membership can still admit it), then admits on local membership; only on a
+/// local miss does it wait for the peer's proof and re-decide. This breaks the
+/// member-to-member bootstrap deadlock without admitting outsiders.
 async fn admitted(
     conn: P2pConnection,
     gate: &Option<Arc<dyn MemberGate>>,
 ) -> Option<P2pConnection> {
-    if gate_admits(gate, conn.remote_public_key()).await {
-        Some(conn)
-    } else {
-        let _ = conn.close();
-        None
+    if let Some(gate) = gate {
+        offer_proof(&conn, gate).await;
     }
+    if gate_admits(gate, conn.remote_public_key()).await {
+        return Some(conn);
+    }
+    if let (Some(gate), Some(key)) = (gate.as_ref(), conn.remote_public_key())
+        && let Some(proof) = receive_proof(&conn).await
+        && gate.admits_with_proof(key, proof).await
+    {
+        return Some(conn);
+    }
+    let _ = conn.close();
+    None
 }
 
 /// Derive a sync [`PeerId`] (the 32-byte writer identity used in HLC stamps)

@@ -185,7 +185,7 @@ impl Membership {
     /// loses to a newer revoke this node already holds), then authorization is
     /// read from the converged state. Admits iff `key` resolves to an authorized
     /// member rooted at the genesis owner.
-    pub async fn admits_with_proof(&self, key: PeerId, presented: Vec<WriteFrame>) -> bool {
+    pub async fn verify_proof(&self, key: PeerId, presented: Vec<WriteFrame>) -> bool {
         let verified: Vec<WriteFrame> = presented
             .into_iter()
             .filter(|frame| frame.entity == MEMBERS_ENTITY && verify_frame(frame))
@@ -241,6 +241,20 @@ impl crate::discovery::MemberGate for Membership {
         key: [u8; 32],
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         Box::pin(async move { self.is_member(&key).await })
+    }
+
+    fn local_proof(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<WriteFrame>> + Send + '_>> {
+        Box::pin(async move { self.proof().await })
+    }
+
+    fn admits_with_proof(
+        &self,
+        key: [u8; 32],
+        proof: Vec<WriteFrame>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move { self.verify_proof(key, proof).await })
     }
 }
 
@@ -456,7 +470,7 @@ mod tests {
         let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
         let receiver = Membership::new(signing_node(receiver_id.clone()), owner.peer_id());
         assert!(!receiver.is_member(&member.peer_id()).await);
-        assert!(receiver.admits_with_proof(member.peer_id(), proof).await);
+        assert!(receiver.verify_proof(member.peer_id(), proof).await);
         assert!(
             receiver.is_member(&member.peer_id()).await,
             "a verified proof converges the receiver's membership view"
@@ -475,9 +489,9 @@ mod tests {
 
         let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
         let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
-        assert!(!receiver.admits_with_proof(outsider.peer_id(), vec![]).await);
+        assert!(!receiver.verify_proof(outsider.peer_id(), vec![]).await);
         assert!(
-            !receiver.admits_with_proof(outsider.peer_id(), forged).await,
+            !receiver.verify_proof(outsider.peer_id(), forged).await,
             "a chain not rooted at the genesis owner must not admit"
         );
     }
@@ -494,7 +508,7 @@ mod tests {
         let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
         let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
         assert!(
-            !receiver.admits_with_proof(outsider.peer_id(), proof).await,
+            !receiver.verify_proof(outsider.peer_id(), proof).await,
             "a member's real chain cannot admit an outsider's transport key"
         );
     }
@@ -524,7 +538,7 @@ mod tests {
         assert!(!receiver.is_member(&member.peer_id()).await);
         assert!(
             !receiver
-                .admits_with_proof(member.peer_id(), vec![stale_invite])
+                .verify_proof(member.peer_id(), vec![stale_invite])
                 .await,
             "replaying an already-delivered invite must not resurrect a revoked member"
         );

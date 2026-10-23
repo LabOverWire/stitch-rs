@@ -12,7 +12,9 @@ use std::time::Duration;
 use stitch_p2p::{Op, Swarm, SyncNode, peer_id_from_fingerprint};
 
 #[cfg(all(feature = "membership", feature = "store"))]
-use stitch_p2p::membership::Role;
+use stitch_p2p::membership::{MEMBERS_ENTITY, Role, member_record_id};
+#[cfg(all(feature = "membership", feature = "store"))]
+use stitch_p2p::wire::WriteFrame;
 #[cfg(all(feature = "membership", feature = "store"))]
 use stitch_p2p::{Identity, MemberGate, Store};
 
@@ -290,5 +292,130 @@ async fn a_gated_swarm_rejects_an_uninvited_outsider() {
     assert!(
         !leaked,
         "a gated swarm admitted an uninvited outsider; its record reached the owner"
+    );
+}
+
+#[cfg(all(feature = "membership", feature = "store"))]
+fn frame_for(frames: &[WriteFrame], target: &stitch_p2p::PeerId) -> WriteFrame {
+    frames
+        .iter()
+        .find(|f| f.id == member_record_id(target))
+        .cloned()
+        .expect("membership frame for target")
+}
+
+#[cfg(all(feature = "membership", feature = "store"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_members_pair_directly_with_the_owner_offline() {
+    if !mqdb_available() {
+        eprintln!("skipping: `mqdb` binary not found on PATH");
+        return;
+    }
+    let (_broker, broker_addr, _tmp) = start_test_broker().await;
+
+    let owner_id = Identity::from_seed([30u8; 32]);
+    let owner_pid = owner_id.peer_id();
+    let admin_x = Identity::from_seed([31u8; 32]);
+    let x_pid = admin_x.peer_id();
+    let admin_y = Identity::from_seed([32u8; 32]);
+    let y_pid = admin_y.peer_id();
+    let member_a = Identity::from_seed([33u8; 32]);
+    let a_pid = member_a.peer_id();
+    let a_seed = member_a.seed();
+    let member_b = Identity::from_seed([34u8; 32]);
+    let b_pid = member_b.peer_id();
+    let b_seed = member_b.seed();
+
+    let owner = Store::with_owner(owner_id);
+    owner.invite(x_pid, Role::Admin).await.expect("invite x");
+    owner.invite(y_pid, Role::Admin).await.expect("invite y");
+    let owner_frames = owner.node().frames_for_entity(MEMBERS_ENTITY).await;
+    let o_to_x = frame_for(&owner_frames, &x_pid);
+    let o_to_y = frame_for(&owner_frames, &y_pid);
+
+    let x_store = Store::join(admin_x, owner_pid);
+    x_store
+        .invite(a_pid, Role::Member)
+        .await
+        .expect("x invites a");
+    let x_to_a = frame_for(
+        &x_store.node().frames_for_entity(MEMBERS_ENTITY).await,
+        &a_pid,
+    );
+
+    let y_store = Store::join(admin_y, owner_pid);
+    y_store
+        .invite(b_pid, Role::Member)
+        .await
+        .expect("y invites b");
+    let y_to_b = frame_for(
+        &y_store.node().frames_for_entity(MEMBERS_ENTITY).await,
+        &b_pid,
+    );
+
+    let member_a_store = Store::join(member_a, owner_pid);
+    member_a_store
+        .node()
+        .ingest(vec![o_to_x.clone(), x_to_a])
+        .await;
+    assert!(
+        !member_a_store
+            .membership()
+            .expect("a membership")
+            .is_member(&b_pid)
+            .await
+    );
+
+    let member_b_store = Store::join(member_b, owner_pid);
+    member_b_store
+        .node()
+        .ingest(vec![o_to_x, o_to_y, y_to_b])
+        .await;
+    assert!(
+        !member_b_store
+            .membership()
+            .expect("b membership")
+            .is_member(&a_pid)
+            .await
+    );
+
+    let (peer_a, _) = make_peer("mesh-a", &broker_addr, Some(a_seed)).await;
+    let (peer_b, _) = make_peer("mesh-b", &broker_addr, Some(b_seed)).await;
+
+    let pull = Duration::from_millis(300);
+    let gate_a: Arc<dyn MemberGate> = Arc::new(member_a_store.membership().expect("a membership"));
+    let gate_b: Arc<dyn MemberGate> = Arc::new(member_b_store.membership().expect("b membership"));
+    let swarm_a = Swarm::spawn_gated(peer_a, member_a_store.node().clone(), pull, gate_a);
+    let swarm_b = Swarm::spawn_gated(peer_b, member_b_store.node().clone(), pull, gate_b);
+
+    member_a_store
+        .create("task", "a", serde_json::json!({"by": "a"}))
+        .await
+        .expect("a write");
+    member_b_store
+        .create("task", "b", serde_json::json!({"by": "b"}))
+        .await
+        .expect("b write");
+
+    let converged = wait_until(Duration::from_secs(30), || async {
+        member_a_store.read("task", "b").await.is_some()
+            && member_b_store.read("task", "a").await.is_some()
+    })
+    .await;
+
+    swarm_a.abort();
+    swarm_b.abort();
+
+    assert!(
+        converged,
+        "two members who did not know each other failed to pair via the membership proof with the owner offline"
+    );
+    assert_eq!(
+        member_a_store.read("task", "b").await,
+        Some(serde_json::json!({"by": "b"}))
+    );
+    assert_eq!(
+        member_b_store.read("task", "a").await,
+        Some(serde_json::json!({"by": "a"}))
     );
 }
