@@ -6,6 +6,7 @@ use crate::signaling::{
 };
 use crate::stun;
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
+use crate::turn_client::{self, TurnClient};
 use bytes::Bytes;
 use mqtt5::ConnectOptions;
 use mqtt5::client::MqttClient;
@@ -17,11 +18,22 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+const TURN_LIFETIME_SECS: u32 = 600;
+const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+pub struct TurnServer {
+    pub server: String,
+    pub username: String,
+    pub password: Zeroizing<String>,
+}
+
 pub struct PeerConfig {
     pub name: String,
     pub broker_addr: String,
     pub bind_addr: SocketAddr,
     pub stun_server: Option<String>,
+    pub turn: Option<TurnServer>,
     pub credentials: Option<(String, String)>,
     pub lease_secs: u64,
     pub keepalive_secs: Option<u64>,
@@ -38,6 +50,7 @@ impl PeerConfig {
             broker_addr: broker_addr.into(),
             bind_addr: "0.0.0.0:0".parse().unwrap_or_else(|_| unreachable!()),
             stun_server: Some(stun::DEFAULT_STUN_SERVER.into()),
+            turn: None,
             credentials: None,
             lease_secs: PEER_LEASE_SECS,
             keepalive_secs: None,
@@ -84,6 +97,20 @@ impl PeerConfig {
 
     pub fn without_stun(mut self) -> Self {
         self.stun_server = None;
+        self
+    }
+
+    pub fn with_turn(
+        mut self,
+        server: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.turn = Some(TurnServer {
+            server: server.into(),
+            username: username.into(),
+            password: Zeroizing::new(password.into()),
+        });
         self
     }
 
@@ -158,8 +185,24 @@ pub struct Peer {
     std_socket: std::net::UdpSocket,
     host_addr: SocketAddr,
     srflx_addr: Option<SocketAddr>,
+    turn: Option<TurnClient>,
     lease_secs: u64,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+async fn setup_turn(turn: &TurnServer) -> Result<TurnClient> {
+    let server = tokio::net::lookup_host(&turn.server)
+        .await
+        .map_err(|e| Error::Turn(format!("TURN server resolve failed: {e}")))?
+        .next()
+        .ok_or_else(|| Error::Turn("TURN server resolved to no addresses".into()))?;
+    TurnClient::connect(turn_client::TurnConfig {
+        server,
+        username: turn.username.clone(),
+        password: turn.password.clone(),
+        lifetime_secs: TURN_LIFETIME_SECS,
+    })
+    .await
 }
 
 impl Peer {
@@ -199,6 +242,25 @@ impl Peer {
             result
         } else {
             debug!("STUN disabled, peer will only be reachable on LAN");
+            None
+        };
+
+        let turn = if let Some(ref turn_server) = config.turn {
+            match tokio::time::timeout(TURN_SETUP_TIMEOUT, setup_turn(turn_server)).await {
+                Ok(Ok(client)) => {
+                    info!(relayed = %client.relayed_addr(), "TURN allocation established");
+                    Some(client)
+                }
+                Ok(Err(e)) => {
+                    warn!(error = %e, "TURN allocation failed, peer will not advertise a relay candidate");
+                    None
+                }
+                Err(_) => {
+                    warn!("TURN allocation timed out, peer will not advertise a relay candidate");
+                    None
+                }
+            }
+        } else {
             None
         };
 
@@ -244,6 +306,7 @@ impl Peer {
             std_socket,
             host_addr,
             srflx_addr,
+            turn,
             lease_secs,
             heartbeat: None,
         })
@@ -334,6 +397,12 @@ impl Peer {
             candidates.push(Candidate {
                 addr: srflx,
                 kind: CandidateKind::Srflx,
+            });
+        }
+        if let Some(relayed) = self.turn.as_ref().map(|t| t.relayed_addr()) {
+            candidates.push(Candidate {
+                addr: relayed,
+                kind: CandidateKind::Relay,
             });
         }
 
@@ -473,6 +542,12 @@ impl Peer {
             candidates.push(Candidate {
                 addr: srflx,
                 kind: CandidateKind::Srflx,
+            });
+        }
+        if let Some(relayed) = self.turn.as_ref().map(|t| t.relayed_addr()) {
+            candidates.push(Candidate {
+                addr: relayed,
+                kind: CandidateKind::Relay,
             });
         }
 
@@ -733,6 +808,18 @@ mod tests {
             .with_lease_secs(15)
             .with_keepalive_secs(60);
         assert_eq!(config.effective_keepalive_secs(), 60);
+    }
+
+    #[test]
+    fn with_turn_sets_relay_server_details() {
+        let config = PeerConfig::new("edge", "127.0.0.1:1883");
+        assert!(config.turn.is_none());
+        let password = format!("pw-{}", std::process::id());
+        let config = config.with_turn("turn.example.org:3478", "device-a", password.clone());
+        let turn = config.turn.expect("turn configured");
+        assert_eq!(turn.server, "turn.example.org:3478");
+        assert_eq!(turn.username, "device-a");
+        assert_eq!(*turn.password, password);
     }
 
     #[test]

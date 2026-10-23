@@ -17,6 +17,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
+use zeroize::Zeroizing;
 
 const INBOUND_CAPACITY: usize = 1024;
 const RECV_BUFFER_LEN: usize = 65535;
@@ -36,11 +37,11 @@ pub fn long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
     hasher.finalize().into()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnConfig {
     pub server: SocketAddr,
     pub username: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
     pub lifetime_secs: u32,
 }
 
@@ -61,6 +62,7 @@ struct TurnInner {
     nonce: Mutex<String>,
     key: Mutex<[u8; 16]>,
     pending: Mutex<Option<Pending>>,
+    bound: Mutex<Option<(SocketAddr, u16)>>,
     request_lock: AsyncMutex<()>,
 }
 
@@ -139,9 +141,8 @@ pub struct TurnClient {
     inner: Arc<TurnInner>,
     relayed_addr: SocketAddr,
     channel: u16,
-    lifetime: u32,
     inbound_rx: Mutex<Option<tokio::sync::mpsc::Receiver<RelayDatagram>>>,
-    demux: Mutex<Option<JoinHandle<()>>>,
+    tasks: Mutex<Option<TaskGuard>>,
 }
 
 #[derive(Debug)]
@@ -182,6 +183,7 @@ impl TurnClient {
             nonce: Mutex::new(String::new()),
             key: Mutex::new([0u8; 16]),
             pending: Mutex::new(None),
+            bound: Mutex::new(None),
             request_lock: AsyncMutex::new(()),
         });
 
@@ -196,13 +198,14 @@ impl TurnClient {
         };
         debug!(%relayed_addr, lifetime, "turn allocation established");
 
+        let maintenance = tokio::spawn(run_maintenance(Arc::clone(&inner), lifetime));
+
         Ok(Self {
             inner,
             relayed_addr,
             channel: CHANNEL_MIN,
-            lifetime,
             inbound_rx: Mutex::new(Some(inbound_rx)),
-            demux: Mutex::new(Some(demux)),
+            tasks: Mutex::new(Some(TaskGuard { demux, maintenance })),
         })
     }
 
@@ -220,6 +223,7 @@ impl TurnClient {
                 ],
             )
             .await?;
+        *self.inner.bound.lock().unwrap() = Some((peer, self.channel));
         debug!(channel = self.channel, %peer, "turn channel bound");
         Ok(())
     }
@@ -232,33 +236,27 @@ impl TurnClient {
             .unwrap()
             .take()
             .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
-        let demux = self
-            .demux
+        let tasks = self
+            .tasks
             .lock()
             .unwrap()
             .take()
             .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
-        let maintenance = tokio::spawn(run_maintenance(
-            Arc::clone(&self.inner),
-            peer,
-            self.channel,
-            self.lifetime,
-        ));
         Ok(Arc::new(TurnRelaySocket {
             socket: Arc::clone(&self.inner.socket),
             channel: self.channel,
             peer,
             local: self.relayed_addr,
             inbound: Mutex::new(rx),
-            tasks: TaskGuard { demux, maintenance },
+            tasks,
         }))
     }
 }
 
 impl Drop for TurnClient {
     fn drop(&mut self) {
-        if let Some(demux) = self.demux.lock().unwrap().take() {
-            demux.abort();
+        if let Some(tasks) = self.tasks.lock().unwrap().take() {
+            tasks.abort();
         }
     }
 }
@@ -358,7 +356,7 @@ async fn run_demux(inner: Arc<TurnInner>, inbound_tx: tokio::sync::mpsc::Sender<
     }
 }
 
-async fn run_maintenance(inner: Arc<TurnInner>, peer: SocketAddr, channel: u16, lifetime: u32) {
+async fn run_maintenance(inner: Arc<TurnInner>, lifetime: u32) {
     let mut lifetime = lifetime;
     loop {
         let alloc_period = Duration::from_secs(u64::from((lifetime / 2).max(60)));
@@ -377,18 +375,21 @@ async fn run_maintenance(inner: Arc<TurnInner>, peer: SocketAddr, channel: u16, 
             Err(e) => warn!(error = %e, "turn refresh failed"),
         }
 
-        match inner
-            .request_authed(
-                METHOD_CHANNEL_BIND,
-                &[
-                    Attribute::ChannelNumber(channel),
-                    Attribute::XorPeerAddress(peer),
-                ],
-            )
-            .await
-        {
-            Ok(_) => debug!(channel, %peer, "turn channel rebound"),
-            Err(e) => warn!(error = %e, "turn channel rebind failed"),
+        let bound = *inner.bound.lock().unwrap();
+        if let Some((peer, channel)) = bound {
+            match inner
+                .request_authed(
+                    METHOD_CHANNEL_BIND,
+                    &[
+                        Attribute::ChannelNumber(channel),
+                        Attribute::XorPeerAddress(peer),
+                    ],
+                )
+                .await
+            {
+                Ok(_) => debug!(channel, %peer, "turn channel rebound"),
+                Err(e) => warn!(error = %e, "turn channel rebind failed"),
+            }
         }
     }
 }
@@ -578,7 +579,7 @@ mod tests {
         let client = TurnClient::connect(TurnConfig {
             server: server_addr,
             username: "device-a".into(),
-            password,
+            password: Zeroizing::new(password),
             lifetime_secs: 600,
         })
         .await

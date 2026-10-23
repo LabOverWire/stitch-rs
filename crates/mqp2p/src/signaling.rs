@@ -156,6 +156,7 @@ pub enum CandidateKind {
     Host,
     #[default]
     Srflx,
+    Relay,
     #[serde(other)]
     Unknown,
 }
@@ -523,6 +524,26 @@ fn check_response(response: &Value) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_relay_candidate_round_trips() {
+        let relay = Candidate {
+            addr: "203.0.113.7:5000".parse().unwrap(),
+            kind: CandidateKind::Relay,
+        };
+        let json = serde_json::to_string(&relay).unwrap();
+        assert!(json.contains("Relay"));
+        let decoded: Candidate = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.kind, CandidateKind::Relay));
+    }
+
+    #[test]
+    fn only_host_and_srflx_are_connectable() {
+        assert!(CandidateKind::Host.is_connectable());
+        assert!(CandidateKind::Srflx.is_connectable());
+        assert!(!CandidateKind::Relay.is_connectable());
+        assert!(!CandidateKind::Unknown.is_connectable());
+    }
+
     fn event(client_id: &str, event: &str, ts: u64) -> PresenceEvent {
         PresenceEvent {
             client_id: client_id.into(),
@@ -563,7 +584,7 @@ mod tests {
     fn an_unknown_candidate_kind_parses_instead_of_failing() {
         let candidate: Candidate = serde_json::from_value(serde_json::json!({
             "addr": "127.0.0.1:9000",
-            "kind": "Relay"
+            "kind": "Prflx"
         }))
         .expect("an unknown candidate kind must still deserialize");
         assert!(matches!(candidate.kind, CandidateKind::Unknown));
