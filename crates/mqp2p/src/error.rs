@@ -11,6 +11,9 @@ pub enum Error {
     #[error("TURN message parse error: {0}")]
     TurnParse(String),
 
+    #[error("TURN error: {0}")]
+    Turn(String),
+
     #[error("QUIC connection error: {0}")]
     Quic(String),
 
