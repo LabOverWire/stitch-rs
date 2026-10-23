@@ -163,6 +163,10 @@ pub enum CandidateKind {
 
 impl CandidateKind {
     pub fn is_connectable(&self) -> bool {
+        matches!(self, Self::Host | Self::Srflx | Self::Relay)
+    }
+
+    pub fn is_direct(&self) -> bool {
         matches!(self, Self::Host | Self::Srflx)
     }
 }
@@ -537,11 +541,16 @@ mod tests {
     }
 
     #[test]
-    fn only_host_and_srflx_are_connectable() {
+    fn relay_is_connectable_but_not_direct() {
         assert!(CandidateKind::Host.is_connectable());
         assert!(CandidateKind::Srflx.is_connectable());
-        assert!(!CandidateKind::Relay.is_connectable());
+        assert!(CandidateKind::Relay.is_connectable());
         assert!(!CandidateKind::Unknown.is_connectable());
+
+        assert!(CandidateKind::Host.is_direct());
+        assert!(CandidateKind::Srflx.is_direct());
+        assert!(!CandidateKind::Relay.is_direct());
+        assert!(!CandidateKind::Unknown.is_direct());
     }
 
     fn event(client_id: &str, event: &str, ts: u64) -> PresenceEvent {
