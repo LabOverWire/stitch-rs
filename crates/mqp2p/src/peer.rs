@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::quic::{self, QuicEndpoint, SegmentationOffload};
+use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
     PeerInfo, SignalingClient, client_id_for, heartbeat_interval_secs,
@@ -178,6 +178,8 @@ pub type PeerId = String;
 pub struct Peer {
     name: String,
     fingerprint: String,
+    identity: CertIdentity,
+    quic_transport: Arc<quinn::TransportConfig>,
     signaling: SignalingClient,
     quic: QuicEndpoint,
     record_id: String,
@@ -272,7 +274,10 @@ impl Peer {
             transport.enable_segmentation_offload(enabled);
         }
         debug!(?offload, "QUIC transport configured");
-        let quic = QuicEndpoint::bind_with_transport(quic_socket, identity, Arc::new(transport))?;
+        let quic_transport = Arc::new(transport);
+        let relay_identity = identity.clone();
+        let quic =
+            QuicEndpoint::bind_with_transport(quic_socket, identity, Arc::clone(&quic_transport))?;
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
@@ -299,6 +304,8 @@ impl Peer {
         Ok(Self {
             name: config.name,
             fingerprint,
+            identity: relay_identity,
+            quic_transport,
             signaling,
             quic,
             record_id: uuid::Uuid::new_v4().to_string(),
@@ -379,6 +386,74 @@ impl Peer {
         &self.fingerprint
     }
 
+    async fn relay_endpoint(&self, peer_relayed: SocketAddr) -> Result<QuicEndpoint> {
+        let turn = self
+            .turn
+            .as_ref()
+            .ok_or_else(|| Error::Turn("no turn allocation for relay".into()))?;
+        let socket = turn.relay_socket(peer_relayed).await?;
+        QuicEndpoint::bind_abstract(
+            socket,
+            self.identity.clone(),
+            Arc::clone(&self.quic_transport),
+        )
+    }
+
+    async fn connect_via_relay(
+        &self,
+        relay_addr: SocketAddr,
+        fingerprint: &str,
+    ) -> Result<(Connection, QuicEndpoint)> {
+        let endpoint = self.relay_endpoint(relay_addr).await?;
+        let connection = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            endpoint.connect(relay_addr, fingerprint),
+        )
+        .await
+        .map_err(|_| Error::Quic("relay candidate timed out".into()))??;
+        Ok((connection, endpoint))
+    }
+
+    async fn accept_direct(&self, fingerprint: &str) -> Result<Connection> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.quic.accept_with_fingerprint(fingerprint),
+        )
+        .await
+        .map_err(|_| Error::Signaling("timeout waiting for inbound connection".into()))?
+    }
+
+    async fn accept_direct_or_relay(
+        &self,
+        fingerprint: &str,
+        relay_addr: Option<SocketAddr>,
+    ) -> Result<(Connection, Option<QuicEndpoint>)> {
+        let Some(relay_addr) = relay_addr.filter(|_| self.turn.is_some()) else {
+            return Ok((self.accept_direct(fingerprint).await?, None));
+        };
+
+        let relay = match self.relay_endpoint(relay_addr).await {
+            Ok(endpoint) => endpoint,
+            Err(e) => {
+                warn!(relay = %relay_addr, error = %e, "relay endpoint setup failed, accepting direct only");
+                return Ok((self.accept_direct(fingerprint).await?, None));
+            }
+        };
+        let fp = fingerprint.to_string();
+        let relay_accept = async move {
+            let conn = relay.accept_with_fingerprint(&fp).await?;
+            Ok::<_, Error>((conn, relay))
+        };
+
+        tokio::select! {
+            direct = self.accept_direct(fingerprint) => Ok((direct?, None)),
+            relayed = relay_accept => {
+                let (connection, endpoint) = relayed?;
+                Ok((connection, Some(endpoint)))
+            }
+        }
+    }
+
     pub async fn connect_to(&self, target: &PeerInfo) -> Result<P2pConnection> {
         let my_peer_id = self
             .peer_id
@@ -456,7 +531,13 @@ impl Peer {
             all
         };
 
-        if ordered_candidates.is_empty() {
+        let relay_addr = answer
+            .candidates
+            .iter()
+            .find(|c| matches!(c.kind, CandidateKind::Relay))
+            .map(|c| c.addr);
+
+        if ordered_candidates.is_empty() && relay_addr.is_none() {
             return Err(Error::Signaling("no candidates in answer".into()));
         }
 
@@ -502,6 +583,29 @@ impl Peer {
             }
         }
 
+        let mut relay_endpoint = None;
+        if connection.is_none()
+            && let Some(relay_addr) = relay_addr
+            && self.turn.is_some()
+        {
+            info!(relay = %relay_addr, "trying relay candidate");
+            match self
+                .connect_via_relay(relay_addr, &answer.cert_fingerprint)
+                .await
+            {
+                Ok((conn, endpoint)) => {
+                    info!(
+                        relay = %relay_addr,
+                        peer = target.name,
+                        "P2P connection established via relay (initiator)"
+                    );
+                    connection = Some(conn);
+                    relay_endpoint = Some(endpoint);
+                }
+                Err(e) => warn!(relay = %relay_addr, error = %e, "relay candidate failed"),
+            }
+        }
+
         let connection =
             connection.ok_or_else(|| Error::Quic("all candidates exhausted".into()))?;
 
@@ -511,6 +615,7 @@ impl Peer {
             connection,
             remote_peer: target.clone(),
             remote_public_key,
+            relay_endpoint,
         })
     }
 
@@ -588,19 +693,22 @@ impl Peer {
 
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
 
-        for candidate in offer.candidates.iter().filter(|c| c.kind.is_connectable()) {
+        for candidate in offer.candidates.iter().filter(|c| c.kind.is_direct()) {
             let tokio_socket = tokio::net::UdpSocket::from_std(self.std_socket.try_clone()?)?;
             let _ = tokio_socket
                 .send_to(&[0x50, 0x32, 0x50, 0x50], candidate.addr)
                 .await;
         }
 
-        let connection = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.quic.accept_with_fingerprint(&offer.cert_fingerprint),
-        )
-        .await
-        .map_err(|_| Error::Signaling("timeout waiting for inbound connection".into()))??;
+        let relay_addr = offer
+            .candidates
+            .iter()
+            .find(|c| matches!(c.kind, CandidateKind::Relay))
+            .map(|c| c.addr);
+
+        let (connection, relay_endpoint) = self
+            .accept_direct_or_relay(&offer.cert_fingerprint, relay_addr)
+            .await?;
 
         let remote_addr = connection.remote_address();
 
@@ -620,6 +728,7 @@ impl Peer {
         info!(
             remote = %remote_addr,
             peer_id = remote_peer.id,
+            relayed = relay_endpoint.is_some(),
             "P2P connection established (responder)"
         );
 
@@ -627,6 +736,7 @@ impl Peer {
             connection,
             remote_peer,
             remote_public_key,
+            relay_endpoint,
         })
     }
 
@@ -674,11 +784,16 @@ pub struct P2pConnection {
     connection: Connection,
     remote_peer: PeerInfo,
     remote_public_key: Option<[u8; 32]>,
+    relay_endpoint: Option<QuicEndpoint>,
 }
 
 impl P2pConnection {
     pub fn remote_peer(&self) -> &PeerInfo {
         &self.remote_peer
+    }
+
+    pub fn is_relayed(&self) -> bool {
+        self.relay_endpoint.is_some()
     }
 
     /// The remote peer's verified Ed25519 public key, taken from the
@@ -886,6 +1001,7 @@ mod tests {
                 connection: raw,
                 remote_peer: info_a,
                 remote_public_key,
+                relay_endpoint: None,
             }
         });
 
@@ -895,6 +1011,7 @@ mod tests {
             connection: raw_a,
             remote_peer: info_b,
             remote_public_key,
+            relay_endpoint: None,
         };
         let conn_b = accept.await.expect("accept task");
 
