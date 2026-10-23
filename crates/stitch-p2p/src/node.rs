@@ -1,4 +1,5 @@
 use crate::lww::Op;
+use crate::replog::RecordOutcome;
 use crate::sync_state::{SyncState, WriteError};
 use crate::wire::WriteFrame;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -134,6 +135,36 @@ impl SyncNode {
         entity: &str,
     ) -> Vec<(String, Vec<u8>, crate::hlc::PeerId)> {
         self.state.lock().await.entries_with_authors(entity)
+    }
+
+    /// Every frame held for an entity, across all origins, for presenting a
+    /// signed proof to a peer that has not yet synced the records.
+    #[must_use]
+    pub async fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
+        self.state.lock().await.frames_for_entity(entity)
+    }
+
+    /// Apply externally supplied frames through the normal received-frame path
+    /// (verification, HLC observation, LWW merge) and fan the newly appended
+    /// ones out to live sessions. Returns how many were appended.
+    pub async fn ingest(&self, frames: Vec<WriteFrame>) -> usize {
+        let now = now_millis();
+        let mut applied = Vec::new();
+        {
+            let mut guard = self.state.lock().await;
+            for frame in frames {
+                if guard.receive(frame.clone(), now) == RecordOutcome::Appended {
+                    applied.push(frame);
+                }
+            }
+        }
+        if !applied.is_empty() {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .retain(|tx| applied.iter().all(|frame| tx.send(frame.clone()).is_ok()));
+        }
+        applied.len()
     }
 
     /// Subscribe to visible-state mutations (local and remote).

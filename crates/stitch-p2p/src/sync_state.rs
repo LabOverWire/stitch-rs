@@ -279,6 +279,17 @@ impl SyncState {
         self.log.delta_since(their)
     }
 
+    /// Every frame this node holds for an entity, across all origins. Used to
+    /// present a signed membership proof to a peer that has not yet synced the
+    /// records.
+    #[must_use]
+    pub fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
+        self.delta_since(&Cursors::new())
+            .into_iter()
+            .filter(|frame| frame.entity == entity)
+            .collect()
+    }
+
     #[must_use]
     pub fn visible(&self, entity: &str, id: &str) -> Option<&[u8]> {
         self.applier.visible(entity, id)

@@ -171,6 +171,31 @@ impl Membership {
         self.authorized().await.contains_key(peer)
     }
 
+    /// This node's membership proof: the signed `_members` frames it holds. A
+    /// peer presents these on connect so a receiver that has not yet synced the
+    /// peer's membership record can still authorize it against the genesis
+    /// owner, breaking the member-to-member bootstrap deadlock.
+    pub async fn proof(&self) -> Vec<WriteFrame> {
+        self.node.frames_for_entity(MEMBERS_ENTITY).await
+    }
+
+    /// Verify a peer's membership proof and decide whether to admit `key`. Each
+    /// presented frame must be a `_members` record with a valid signature;
+    /// verified frames are absorbed through the LWW engine (so a stale invite
+    /// loses to a newer revoke this node already holds), then authorization is
+    /// read from the converged state. Admits iff `key` resolves to an authorized
+    /// member rooted at the genesis owner.
+    pub async fn admits_with_proof(&self, key: PeerId, presented: Vec<WriteFrame>) -> bool {
+        let verified: Vec<WriteFrame> = presented
+            .into_iter()
+            .filter(|frame| frame.entity == MEMBERS_ENTITY && verify_frame(frame))
+            .collect();
+        if !verified.is_empty() {
+            self.node.ingest(verified).await;
+        }
+        self.is_member(&key).await
+    }
+
     /// A stream that fires whenever the `_members` set changes (an invite or a
     /// revoke, local or synced in), so a host can re-check live peers and drop
     /// those a revoke removed. Subscribe before the first [`Membership::is_member`]
@@ -251,7 +276,26 @@ mod tests {
     use super::*;
     use crate::hlc::{Hlc, Stamp};
     use crate::lww::Op;
+    use crate::node::SyncNode;
     use crate::sync_state::SyncState;
+    use std::sync::Arc;
+
+    fn signing_node(id: Arc<Identity>) -> SyncNode {
+        let mut state = SyncState::new(id.peer_id());
+        state.set_auth(id);
+        SyncNode::from_state(state)
+    }
+
+    async fn invite(node: &SyncNode, target: PeerId, role: Role) -> WriteFrame {
+        node.local_write(
+            Op::Insert,
+            MEMBERS_ENTITY,
+            member_record_id(&target),
+            vec![role.as_byte()],
+        )
+        .await
+        .expect("invite write")
+    }
 
     fn signed_frame(id: &Identity, seq: u64) -> WriteFrame {
         let mut frame = WriteFrame {
@@ -398,5 +442,91 @@ mod tests {
             .expect("write");
         assert!(frame.signature.is_some());
         assert!(verify_frame(&frame));
+    }
+
+    #[tokio::test]
+    async fn proof_admits_a_member_the_receiver_has_not_synced() {
+        let owner = Arc::new(Identity::from_seed([1u8; 32]));
+        let member = Arc::new(Identity::from_seed([2u8; 32]));
+        let owner_node = signing_node(owner.clone());
+        invite(&owner_node, member.peer_id(), Role::Member).await;
+        let proof = Membership::new(owner_node, owner.peer_id()).proof().await;
+        assert!(!proof.is_empty());
+
+        let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
+        let receiver = Membership::new(signing_node(receiver_id.clone()), owner.peer_id());
+        assert!(!receiver.is_member(&member.peer_id()).await);
+        assert!(receiver.admits_with_proof(member.peer_id(), proof).await);
+        assert!(
+            receiver.is_member(&member.peer_id()).await,
+            "a verified proof converges the receiver's membership view"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outsiders_self_granted_proof_is_rejected() {
+        let owner = Arc::new(Identity::from_seed([1u8; 32]));
+        let outsider = Arc::new(Identity::from_seed([9u8; 32]));
+        let outsider_node = signing_node(outsider.clone());
+        invite(&outsider_node, outsider.peer_id(), Role::Owner).await;
+        let forged = Membership::new(outsider_node, outsider.peer_id())
+            .proof()
+            .await;
+
+        let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
+        let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
+        assert!(!receiver.admits_with_proof(outsider.peer_id(), vec![]).await);
+        assert!(
+            !receiver.admits_with_proof(outsider.peer_id(), forged).await,
+            "a chain not rooted at the genesis owner must not admit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_chain_does_not_admit_a_different_key() {
+        let owner = Arc::new(Identity::from_seed([1u8; 32]));
+        let member = Arc::new(Identity::from_seed([2u8; 32]));
+        let outsider = Arc::new(Identity::from_seed([9u8; 32]));
+        let owner_node = signing_node(owner.clone());
+        invite(&owner_node, member.peer_id(), Role::Member).await;
+        let proof = Membership::new(owner_node, owner.peer_id()).proof().await;
+
+        let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
+        let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
+        assert!(
+            !receiver.admits_with_proof(outsider.peer_id(), proof).await,
+            "a member's real chain cannot admit an outsider's transport key"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_invite_cannot_resurrect_a_revoked_member() {
+        let owner = Arc::new(Identity::from_seed([1u8; 32]));
+        let member = Arc::new(Identity::from_seed([2u8; 32]));
+        let owner_node = signing_node(owner.clone());
+        let stale_invite = invite(&owner_node, member.peer_id(), Role::Member).await;
+        let revoke = owner_node
+            .local_write(
+                Op::Delete,
+                MEMBERS_ENTITY,
+                member_record_id(&member.peer_id()),
+                vec![],
+            )
+            .await
+            .expect("revoke write");
+
+        let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
+        let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
+        receiver
+            .node
+            .ingest(vec![stale_invite.clone(), revoke])
+            .await;
+        assert!(!receiver.is_member(&member.peer_id()).await);
+        assert!(
+            !receiver
+                .admits_with_proof(member.peer_id(), vec![stale_invite])
+                .await,
+            "replaying an already-delivered invite must not resurrect a revoked member"
+        );
     }
 }
