@@ -34,3 +34,5 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 rand = "0.10.0"
 mqtt5 = { version = "0.48.1", default-features = false }
+zeroize = "1.9.1"
+quinn = { version = "0.11", default-features = false }

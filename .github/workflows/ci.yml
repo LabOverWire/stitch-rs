@@ -52,6 +52,11 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/mqdb"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: mqdb --version
+      - name: Install coturn
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y coturn
+      - run: turnserver --version
       - run: cargo test -p mqp2p -p stitch-p2p -p stitch-tasks
 
   wasm-test:
