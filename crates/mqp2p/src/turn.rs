@@ -529,6 +529,42 @@ fn hmac_sha1(key: &[u8], msg: &[u8]) -> [u8; 20] {
     out
 }
 
+pub fn verify_integrity(buf: &[u8], key: &[u8]) -> bool {
+    if buf.len() < HEADER_LEN {
+        return false;
+    }
+    let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    if HEADER_LEN + msg_len > buf.len() {
+        return false;
+    }
+    let body = &buf[HEADER_LEN..HEADER_LEN + msg_len];
+    let mut offset = 0;
+    while offset + 4 <= body.len() {
+        let atyp = u16::from_be_bytes([body[offset], body[offset + 1]]);
+        let alen = u16::from_be_bytes([body[offset + 2], body[offset + 3]]) as usize;
+        let value_start = offset + 4;
+        if value_start + alen > body.len() {
+            return false;
+        }
+        if atyp == ATTR_MESSAGE_INTEGRITY {
+            if alen != 20 {
+                return false;
+            }
+            let mut prefix = buf[..HEADER_LEN + offset].to_vec();
+            set_length(&mut prefix, offset + 24);
+            let expected = hmac_sha1(key, &prefix);
+            let actual = &body[value_start..value_start + 20];
+            let mut diff = 0u8;
+            for (a, b) in expected.iter().zip(actual) {
+                diff |= a ^ b;
+            }
+            return diff == 0;
+        }
+        offset = value_start + alen + (4 - (alen % 4)) % 4;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +687,27 @@ mod tests {
         set_length(&mut prefix, mi_start - HEADER_LEN + 24);
         let expected = hmac_sha1(&key, &prefix);
         assert_eq!(&expected, &bytes[mi_start + 4..]);
+    }
+
+    #[test]
+    fn verify_integrity_accepts_a_valid_mac_and_rejects_tampering() {
+        let mut msg = Message::new(METHOD_ALLOCATE, Class::Success, [9u8; 12]);
+        msg.push(Attribute::XorRelayedAddress(
+            "203.0.113.9:7000".parse().unwrap(),
+        ))
+        .push(Attribute::Lifetime(600));
+        let key = [0x3Cu8; 16];
+        let bytes = msg.encode(Some(&key), true);
+
+        assert!(verify_integrity(&bytes, &key));
+        assert!(!verify_integrity(&bytes, &[0u8; 16]));
+
+        let mut tampered = bytes.clone();
+        tampered[HEADER_LEN + 6] ^= 0xFF;
+        assert!(!verify_integrity(&tampered, &key));
+
+        let without_mi = msg.encode(None, false);
+        assert!(!verify_integrity(&without_mi, &key));
     }
 
     #[test]

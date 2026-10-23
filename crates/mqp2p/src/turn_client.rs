@@ -8,7 +8,7 @@ use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
 use ring::rand::SecureRandom;
 use std::io::{self, IoSliceMut};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -49,6 +49,7 @@ struct RelayDatagram {
 
 struct Pending {
     txn: [u8; 12],
+    expect_integrity: bool,
     tx: oneshot::Sender<Message>,
 }
 
@@ -63,10 +64,19 @@ struct TurnInner {
 }
 
 impl TurnInner {
-    async fn transact(&self, bytes: Vec<u8>, txn: [u8; 12]) -> Result<Message> {
+    async fn transact(
+        &self,
+        bytes: Vec<u8>,
+        txn: [u8; 12],
+        expect_integrity: bool,
+    ) -> Result<Message> {
         let _guard = self.request_lock.lock().await;
         let (tx, mut rx) = oneshot::channel();
-        *self.pending.lock().unwrap() = Some(Pending { txn, tx });
+        *self.pending.lock().unwrap() = Some(Pending {
+            txn,
+            expect_integrity,
+            tx,
+        });
 
         let mut rto = INITIAL_RTO;
         for _ in 0..MAX_ATTEMPTS {
@@ -98,7 +108,7 @@ impl TurnInner {
             let key = *self.key.lock().unwrap();
             let bytes = msg.encode(Some(&key), false);
 
-            let resp = self.transact(bytes, txn).await?;
+            let resp = self.transact(bytes, txn, true).await?;
             if resp.class == Class::Error {
                 let code = resp.error_code().unwrap_or_default();
                 if code == STALE_NONCE && attempt == 0 {
@@ -122,17 +132,30 @@ pub struct TurnClient {
     relayed_addr: SocketAddr,
     channel: u16,
     inbound_rx: Mutex<Option<tokio::sync::mpsc::Receiver<RelayDatagram>>>,
+    tasks: Mutex<Option<TaskGuard>>,
+}
+
+#[derive(Debug)]
+struct TaskGuard {
     demux: JoinHandle<()>,
     refresh: JoinHandle<()>,
 }
 
+impl TaskGuard {
+    fn abort(&self) {
+        self.demux.abort();
+        self.refresh.abort();
+    }
+}
+
 impl TurnClient {
     pub async fn connect(config: TurnConfig) -> Result<Self> {
-        let bind_addr: SocketAddr = if config.server.is_ipv6() {
-            "[::]:0".parse().unwrap_or_else(|_| unreachable!())
+        let bind_ip = if config.server.is_ipv6() {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
         } else {
-            "0.0.0.0:0".parse().unwrap_or_else(|_| unreachable!())
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         };
+        let bind_addr = SocketAddr::new(bind_ip, 0);
         let socket = UdpSocket::bind(bind_addr)
             .await
             .map_err(|e| Error::Turn(format!("bind failed: {e}")))?;
@@ -165,8 +188,7 @@ impl TurnClient {
             relayed_addr,
             channel: CHANNEL_MIN,
             inbound_rx: Mutex::new(Some(inbound_rx)),
-            demux,
-            refresh,
+            tasks: Mutex::new(Some(TaskGuard { demux, refresh })),
         })
     }
 
@@ -203,20 +225,28 @@ impl TurnClient {
             .unwrap()
             .take()
             .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
         Ok(Arc::new(TurnRelaySocket {
             socket: Arc::clone(&self.inner.socket),
             channel: self.channel,
             peer,
             local: self.relayed_addr,
             inbound: Mutex::new(rx),
+            tasks,
         }))
     }
 }
 
 impl Drop for TurnClient {
     fn drop(&mut self) {
-        self.demux.abort();
-        self.refresh.abort();
+        if let Some(tasks) = self.tasks.lock().unwrap().take() {
+            tasks.abort();
+        }
     }
 }
 
@@ -224,7 +254,9 @@ async fn allocate(inner: &TurnInner, config: &TurnConfig) -> Result<(SocketAddr,
     let txn = new_transaction_id();
     let mut initial = Message::new(METHOD_ALLOCATE, Class::Request, txn);
     initial.push(Attribute::RequestedTransport(TRANSPORT_UDP));
-    let resp = inner.transact(initial.encode(None, false), txn).await?;
+    let resp = inner
+        .transact(initial.encode(None, false), txn, false)
+        .await?;
 
     if resp.class != Class::Success {
         let realm = resp
@@ -276,7 +308,7 @@ async fn run_demux(inner: Arc<TurnInner>, inbound_tx: tokio::sync::mpsc::Sender<
             Ok(n) => n,
             Err(e) => {
                 warn!(error = %e, "turn demux recv failed");
-                break;
+                continue;
             }
         };
         let data = &buf[..n];
@@ -293,7 +325,16 @@ async fn run_demux(inner: Arc<TurnInner>, inbound_tx: tokio::sync::mpsc::Sender<
         }
 
         if let Ok(msg) = Message::decode(data) {
+            let key = *inner.key.lock().unwrap();
             let mut pending = inner.pending.lock().unwrap();
+            let needs_integrity = pending
+                .as_ref()
+                .is_some_and(|p| p.txn == msg.transaction_id && p.expect_integrity)
+                && msg.class == Class::Success;
+            if needs_integrity && !turn::verify_integrity(data, &key) {
+                warn!("turn response failed message-integrity check, dropping");
+                continue;
+            }
             let matches = pending
                 .as_ref()
                 .is_some_and(|p| p.txn == msg.transaction_id);
@@ -305,14 +346,20 @@ async fn run_demux(inner: Arc<TurnInner>, inbound_tx: tokio::sync::mpsc::Sender<
 }
 
 async fn run_refresh(inner: Arc<TurnInner>, lifetime: u32) {
-    let period = Duration::from_secs(u64::from((lifetime / 2).max(60)));
+    let mut lifetime = lifetime;
     loop {
+        let period = Duration::from_secs(u64::from((lifetime / 2).max(60)));
         tokio::time::sleep(period).await;
         match inner
             .request_authed(METHOD_REFRESH, &[Attribute::Lifetime(lifetime)])
             .await
         {
-            Ok(_) => debug!("turn allocation refreshed"),
+            Ok(resp) => {
+                if let Some(granted) = resp.lifetime() {
+                    lifetime = granted;
+                }
+                debug!(lifetime, "turn allocation refreshed");
+            }
             Err(e) => {
                 warn!(error = %e, "turn refresh failed");
                 break;
@@ -337,6 +384,13 @@ pub struct TurnRelaySocket {
     peer: SocketAddr,
     local: SocketAddr,
     inbound: Mutex<tokio::sync::mpsc::Receiver<RelayDatagram>>,
+    tasks: TaskGuard,
+}
+
+impl Drop for TurnRelaySocket {
+    fn drop(&mut self) {
+        self.tasks.abort();
+    }
 }
 
 #[derive(Debug)]
@@ -359,7 +413,7 @@ impl AsyncUdpSocket for TurnRelaySocket {
 
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
         if transmit.destination != self.peer {
-            trace!(dest = %transmit.destination, "turn relay dropping datagram for unbound destination");
+            warn!(dest = %transmit.destination, "turn relay dropping datagram for unbound destination");
             return Ok(());
         }
         let frame = ChannelData {
@@ -392,7 +446,16 @@ impl AsyncUdpSocket for TurnRelaySocket {
                     };
                     count += 1;
                 }
-                Poll::Ready(None) | Poll::Pending => break,
+                Poll::Ready(None) => {
+                    if count == 0 {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "turn relay demux stopped",
+                        )));
+                    }
+                    break;
+                }
+                Poll::Pending => break,
             }
         }
         if count == 0 {
@@ -421,7 +484,7 @@ mod tests {
     use crate::turn::ChannelData;
     use std::future::poll_fn;
 
-    async fn fake_turn_server(socket: UdpSocket, relayed: SocketAddr) {
+    async fn fake_turn_server(socket: UdpSocket, relayed: SocketAddr, key: [u8; 16]) {
         let mut buf = vec![0u8; RECV_BUFFER_LEN];
         loop {
             let (n, from) = match socket.recv_from(&mut buf).await {
@@ -451,7 +514,7 @@ mod tests {
                             Message::new(METHOD_ALLOCATE, Class::Success, msg.transaction_id);
                         r.push(Attribute::XorRelayedAddress(relayed));
                         r.push(Attribute::Lifetime(600));
-                        r.encode(None, false)
+                        r.encode(Some(&key), false)
                     } else {
                         let mut r = Message::new(METHOD_ALLOCATE, Class::Error, msg.transaction_id);
                         r.push(Attribute::ErrorCode {
@@ -465,12 +528,12 @@ mod tests {
                 }
                 METHOD_CHANNEL_BIND => {
                     Message::new(METHOD_CHANNEL_BIND, Class::Success, msg.transaction_id)
-                        .encode(None, false)
+                        .encode(Some(&key), false)
                 }
                 METHOD_REFRESH => {
                     let mut r = Message::new(METHOD_REFRESH, Class::Success, msg.transaction_id);
                     r.push(Attribute::Lifetime(600));
-                    r.encode(None, false)
+                    r.encode(Some(&key), false)
                 }
                 _ => continue,
             };
@@ -483,9 +546,10 @@ mod tests {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server.local_addr().unwrap();
         let relayed: SocketAddr = "127.0.0.1:55555".parse().unwrap();
-        tokio::spawn(fake_turn_server(server, relayed));
-
         let password = format!("pw-{}", std::process::id());
+        let key = long_term_key("device-a", "example.org", &password);
+        tokio::spawn(fake_turn_server(server, relayed, key));
+
         let client = TurnClient::connect(TurnConfig {
             server: server_addr,
             username: "device-a".into(),
