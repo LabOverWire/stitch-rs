@@ -24,6 +24,7 @@ const INITIAL_RTO: Duration = Duration::from_millis(500);
 const MAX_RTO: Duration = Duration::from_secs(2);
 const MAX_ATTEMPTS: u32 = 7;
 const STALE_NONCE: u16 = 438;
+const CHANNEL_REFRESH: Duration = Duration::from_secs(240);
 
 pub fn long_term_key(username: &str, realm: &str, password: &str) -> [u8; 16] {
     let mut hasher = Md5::new();
@@ -109,19 +110,26 @@ impl TurnInner {
             let bytes = msg.encode(Some(&key), false);
 
             let resp = self.transact(bytes, txn, true).await?;
-            if resp.class == Class::Error {
-                let code = resp.error_code().unwrap_or_default();
-                if code == STALE_NONCE && attempt == 0 {
-                    if let Some(nonce) = resp.nonce() {
-                        *self.nonce.lock().unwrap() = nonce.to_string();
+            match resp.class {
+                Class::Success => return Ok(resp),
+                Class::Error => {
+                    let code = resp.error_code().unwrap_or_default();
+                    if code == STALE_NONCE && attempt == 0 {
+                        if let Some(nonce) = resp.nonce() {
+                            *self.nonce.lock().unwrap() = nonce.to_string();
+                        }
+                        continue;
                     }
-                    continue;
+                    return Err(Error::Turn(format!(
+                        "{method:#05x} rejected with code {code}"
+                    )));
                 }
-                return Err(Error::Turn(format!(
-                    "{method:#05x} rejected with code {code}"
-                )));
+                _ => {
+                    return Err(Error::Turn(format!(
+                        "{method:#05x} unexpected response class"
+                    )));
+                }
             }
-            return Ok(resp);
         }
         Err(Error::Turn("stale-nonce retry exhausted".into()))
     }
@@ -131,20 +139,21 @@ pub struct TurnClient {
     inner: Arc<TurnInner>,
     relayed_addr: SocketAddr,
     channel: u16,
+    lifetime: u32,
     inbound_rx: Mutex<Option<tokio::sync::mpsc::Receiver<RelayDatagram>>>,
-    tasks: Mutex<Option<TaskGuard>>,
+    demux: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug)]
 struct TaskGuard {
     demux: JoinHandle<()>,
-    refresh: JoinHandle<()>,
+    maintenance: JoinHandle<()>,
 }
 
 impl TaskGuard {
     fn abort(&self) {
         self.demux.abort();
-        self.refresh.abort();
+        self.maintenance.abort();
     }
 }
 
@@ -178,17 +187,22 @@ impl TurnClient {
 
         let demux = tokio::spawn(run_demux(Arc::clone(&inner), inbound_tx));
 
-        let (relayed_addr, lifetime) = allocate(&inner, &config).await?;
+        let (relayed_addr, lifetime) = match allocate(&inner, &config).await {
+            Ok(allocation) => allocation,
+            Err(e) => {
+                demux.abort();
+                return Err(e);
+            }
+        };
         debug!(%relayed_addr, lifetime, "turn allocation established");
-
-        let refresh = tokio::spawn(run_refresh(Arc::clone(&inner), lifetime));
 
         Ok(Self {
             inner,
             relayed_addr,
             channel: CHANNEL_MIN,
+            lifetime,
             inbound_rx: Mutex::new(Some(inbound_rx)),
-            tasks: Mutex::new(Some(TaskGuard { demux, refresh })),
+            demux: Mutex::new(Some(demux)),
         })
     }
 
@@ -197,8 +211,7 @@ impl TurnClient {
     }
 
     pub async fn bind_channel(&self, peer: SocketAddr) -> Result<()> {
-        let resp = self
-            .inner
+        self.inner
             .request_authed(
                 METHOD_CHANNEL_BIND,
                 &[
@@ -207,12 +220,6 @@ impl TurnClient {
                 ],
             )
             .await?;
-        if resp.class != Class::Success {
-            return Err(Error::Turn(format!(
-                "channel bind rejected: {:?}",
-                resp.error_code()
-            )));
-        }
         debug!(channel = self.channel, %peer, "turn channel bound");
         Ok(())
     }
@@ -225,27 +232,33 @@ impl TurnClient {
             .unwrap()
             .take()
             .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
-        let tasks = self
-            .tasks
+        let demux = self
+            .demux
             .lock()
             .unwrap()
             .take()
             .ok_or_else(|| Error::Turn("relay socket already taken".into()))?;
+        let maintenance = tokio::spawn(run_maintenance(
+            Arc::clone(&self.inner),
+            peer,
+            self.channel,
+            self.lifetime,
+        ));
         Ok(Arc::new(TurnRelaySocket {
             socket: Arc::clone(&self.inner.socket),
             channel: self.channel,
             peer,
             local: self.relayed_addr,
             inbound: Mutex::new(rx),
-            tasks,
+            tasks: TaskGuard { demux, maintenance },
         }))
     }
 }
 
 impl Drop for TurnClient {
     fn drop(&mut self) {
-        if let Some(tasks) = self.tasks.lock().unwrap().take() {
-            tasks.abort();
+        if let Some(demux) = self.demux.lock().unwrap().take() {
+            demux.abort();
         }
     }
 }
@@ -345,11 +358,12 @@ async fn run_demux(inner: Arc<TurnInner>, inbound_tx: tokio::sync::mpsc::Sender<
     }
 }
 
-async fn run_refresh(inner: Arc<TurnInner>, lifetime: u32) {
+async fn run_maintenance(inner: Arc<TurnInner>, peer: SocketAddr, channel: u16, lifetime: u32) {
     let mut lifetime = lifetime;
     loop {
-        let period = Duration::from_secs(u64::from((lifetime / 2).max(60)));
-        tokio::time::sleep(period).await;
+        let alloc_period = Duration::from_secs(u64::from((lifetime / 2).max(60)));
+        tokio::time::sleep(alloc_period.min(CHANNEL_REFRESH)).await;
+
         match inner
             .request_authed(METHOD_REFRESH, &[Attribute::Lifetime(lifetime)])
             .await
@@ -360,10 +374,21 @@ async fn run_refresh(inner: Arc<TurnInner>, lifetime: u32) {
                 }
                 debug!(lifetime, "turn allocation refreshed");
             }
-            Err(e) => {
-                warn!(error = %e, "turn refresh failed");
-                break;
-            }
+            Err(e) => warn!(error = %e, "turn refresh failed"),
+        }
+
+        match inner
+            .request_authed(
+                METHOD_CHANNEL_BIND,
+                &[
+                    Attribute::ChannelNumber(channel),
+                    Attribute::XorPeerAddress(peer),
+                ],
+            )
+            .await
+        {
+            Ok(_) => debug!(channel, %peer, "turn channel rebound"),
+            Err(e) => warn!(error = %e, "turn channel rebind failed"),
         }
     }
 }
