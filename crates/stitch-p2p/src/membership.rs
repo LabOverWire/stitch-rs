@@ -216,8 +216,13 @@ impl Membership {
     /// decision merges the verified frames onto local state in a scratch copy and
     /// reads authorization from it, so it is immune to replication-log sequence
     /// gaps and a stale invite loses LWW to a newer revoke already held. Admits
-    /// iff `key` resolves to an authorized member rooted at the genesis owner; the
-    /// verified frames are absorbed into durable state only when admitting.
+    /// iff `key` resolves to an authorized member rooted at the genesis owner.
+    ///
+    /// On admit, the verified frames are also offered to the durable log as a
+    /// best-effort convergence aid: a frame that is the next in-order write for
+    /// its origin lands immediately, while one behind a sequence gap is left for
+    /// the post-admission bridge sync to deliver. The admission decision never
+    /// depends on this and is correct in either case.
     pub async fn verify_proof(&self, key: PeerId, presented: Vec<WriteFrame>) -> bool {
         let verified: Vec<WriteFrame> = presented
             .into_iter()
@@ -622,6 +627,14 @@ mod tests {
         assert!(
             receiver.verify_proof(member.peer_id(), proof).await,
             "a member must bootstrap even when a granter interleaved a data write before the invite"
+        );
+        assert!(
+            receiver.is_member(&admin.peer_id()).await,
+            "the in-order owner->admin frame absorbs into durable state on admit"
+        );
+        assert!(
+            !receiver.is_member(&member.peer_id()).await,
+            "the gapped invite is not absorbed durably; it converges later via bridge sync"
         );
     }
 }

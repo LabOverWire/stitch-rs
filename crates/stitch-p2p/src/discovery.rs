@@ -59,16 +59,21 @@ async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) 
 
 async fn offer_proof(conn: &P2pConnection, gate: &Arc<dyn MemberGate>) {
     let frames = gate.local_proof().await;
-    match conn.open_uni().await {
-        Ok(mut stream) => {
-            if let Err(error) = write_message(&mut stream, &SyncMessage::Delta(frames)).await {
-                tracing::debug!(%error, "writing membership proof failed");
+    let send = async {
+        match conn.open_uni().await {
+            Ok(mut stream) => {
+                if let Err(error) = write_message(&mut stream, &SyncMessage::Delta(frames)).await {
+                    tracing::debug!(%error, "writing membership proof failed");
+                }
+                if let Err(error) = stream.finish() {
+                    tracing::debug!(%error, "finishing membership proof stream failed");
+                }
             }
-            if let Err(error) = stream.finish() {
-                tracing::debug!(%error, "finishing membership proof stream failed");
-            }
+            Err(error) => tracing::debug!(%error, "opening membership proof stream failed"),
         }
-        Err(error) => tracing::debug!(%error, "opening membership proof stream failed"),
+    };
+    if tokio::time::timeout(PROOF_WAIT, send).await.is_err() {
+        tracing::debug!("offering membership proof timed out");
     }
 }
 

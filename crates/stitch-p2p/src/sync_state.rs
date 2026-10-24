@@ -325,6 +325,9 @@ impl SyncState {
         entity: &str,
         extra: &[WriteFrame],
     ) -> Vec<(String, Vec<u8>, PeerId)> {
+        if extra.is_empty() {
+            return self.applier.entries_with_authors(entity);
+        }
         let mut scratch = self.applier.clone();
         for frame in extra {
             scratch.merge(frame.clone().into_stamped());
