@@ -279,6 +279,17 @@ impl SyncState {
         self.log.delta_since(their)
     }
 
+    /// Every frame this node holds for an entity, across all origins. Used to
+    /// present a signed membership proof to a peer that has not yet synced the
+    /// records.
+    #[must_use]
+    pub fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
+        self.delta_since(&Cursors::new())
+            .into_iter()
+            .filter(|frame| frame.entity == entity)
+            .collect()
+    }
+
     #[must_use]
     pub fn visible(&self, entity: &str, id: &str) -> Option<&[u8]> {
         self.applier.visible(entity, id)
@@ -300,6 +311,28 @@ impl SyncState {
     #[must_use]
     pub fn entries_with_authors(&self, entity: &str) -> Vec<(String, Vec<u8>, PeerId)> {
         self.applier.entries_with_authors(entity)
+    }
+
+    /// Every visible record of `entity` as `(id, data, author)`, evaluated as if
+    /// `extra` frames had been merged on top of local state. Decides a
+    /// membership proof without the replication log's in-order delivery: a
+    /// presented frame that loses LWW to a record already held (e.g. a replayed
+    /// invite under a newer revoke) cannot change the outcome, and a frame whose
+    /// origin has a sequence gap is still weighed instead of silently dropped.
+    #[must_use]
+    pub fn entries_with_authors_including(
+        &self,
+        entity: &str,
+        extra: &[WriteFrame],
+    ) -> Vec<(String, Vec<u8>, PeerId)> {
+        if extra.is_empty() {
+            return self.applier.entries_with_authors(entity);
+        }
+        let mut scratch = self.applier.clone();
+        for frame in extra {
+            scratch.merge(frame.clone().into_stamped());
+        }
+        scratch.entries_with_authors(entity)
     }
 
     pub fn collect_tombstone(&mut self, entity: &str, id: &str) -> bool {

@@ -37,7 +37,7 @@ struct Cell {
     gc_floor: Option<Stamp>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Applier {
     cells: HashMap<(String, String), Cell>,
 }
