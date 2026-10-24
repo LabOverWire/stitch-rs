@@ -2,7 +2,7 @@ use crate::hlc::{PEER_ID_LEN, PeerId};
 use crate::sync_state::FrameAuth;
 use crate::wire::{SIGNATURE_LEN, WriteFrame};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Reserved entity holding membership records (one per target peer, id = the
 /// target's hex peer id, data = a single role byte). Authorization reads this.
@@ -152,9 +152,15 @@ impl Membership {
 
     /// The authorized member set derived from converged `_members` records.
     pub async fn authorized(&self) -> HashMap<PeerId, Role> {
+        self.authorized_with(&[]).await
+    }
+
+    /// The authorized member set as if `extra` `_members` frames were merged on
+    /// top of converged state. With an empty slice this is [`Membership::authorized`].
+    async fn authorized_with(&self, extra: &[WriteFrame]) -> HashMap<PeerId, Role> {
         let records: Vec<(PeerId, PeerId, Role)> = self
             .node
-            .entries_with_authors(MEMBERS_ENTITY)
+            .entries_with_authors_including(MEMBERS_ENTITY, extra)
             .await
             .into_iter()
             .filter_map(|(id, data, granter)| {
@@ -171,29 +177,57 @@ impl Membership {
         self.authorized().await.contains_key(peer)
     }
 
-    /// This node's membership proof: the signed `_members` frames it holds. A
-    /// peer presents these on connect so a receiver that has not yet synced the
-    /// peer's membership record can still authorize it against the genesis
-    /// owner, breaking the member-to-member bootstrap deadlock.
+    /// This node's membership proof: the signed chain of `_members` records from
+    /// the genesis owner down to this node, newest-winning version of each. A
+    /// peer presents this on connect so a receiver that has not yet synced the
+    /// peer's membership can authorize it against the genesis owner, breaking the
+    /// member-to-member bootstrap deadlock. Only the presenter's own authorizing
+    /// chain is offered, never the full roster.
     pub async fn proof(&self) -> Vec<WriteFrame> {
-        self.node.frames_for_entity(MEMBERS_ENTITY).await
+        let self_id = self.node.self_id().await;
+        let mut winners: HashMap<String, WriteFrame> = HashMap::new();
+        for frame in self.node.frames_for_entity(MEMBERS_ENTITY).await {
+            match winners.get(&frame.id) {
+                Some(existing) if existing.stamp >= frame.stamp => {}
+                _ => {
+                    winners.insert(frame.id.clone(), frame);
+                }
+            }
+        }
+        let mut chain: Vec<WriteFrame> = Vec::new();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut cursor = member_record_id(&self_id);
+        while visited.insert(cursor.clone()) {
+            let Some(frame) = winners.get(&cursor) else {
+                break;
+            };
+            chain.push(frame.clone());
+            let granter = frame.stamp.peer;
+            if granter == self.owner {
+                break;
+            }
+            cursor = member_record_id(&granter);
+        }
+        chain
     }
 
     /// Verify a peer's membership proof and decide whether to admit `key`. Each
-    /// presented frame must be a `_members` record with a valid signature;
-    /// verified frames are absorbed through the LWW engine (so a stale invite
-    /// loses to a newer revoke this node already holds), then authorization is
-    /// read from the converged state. Admits iff `key` resolves to an authorized
-    /// member rooted at the genesis owner.
+    /// presented frame must be a `_members` record with a valid signature; the
+    /// decision merges the verified frames onto local state in a scratch copy and
+    /// reads authorization from it, so it is immune to replication-log sequence
+    /// gaps and a stale invite loses LWW to a newer revoke already held. Admits
+    /// iff `key` resolves to an authorized member rooted at the genesis owner; the
+    /// verified frames are absorbed into durable state only when admitting.
     pub async fn verify_proof(&self, key: PeerId, presented: Vec<WriteFrame>) -> bool {
         let verified: Vec<WriteFrame> = presented
             .into_iter()
             .filter(|frame| frame.entity == MEMBERS_ENTITY && verify_frame(frame))
             .collect();
-        if !verified.is_empty() {
+        let admit = self.authorized_with(&verified).await.contains_key(&key);
+        if admit && !verified.is_empty() {
             self.node.ingest(verified).await;
         }
-        self.is_member(&key).await
+        admit
     }
 
     /// A stream that fires whenever the `_members` set changes (an invite or a
@@ -463,12 +497,15 @@ mod tests {
         let owner = Arc::new(Identity::from_seed([1u8; 32]));
         let member = Arc::new(Identity::from_seed([2u8; 32]));
         let owner_node = signing_node(owner.clone());
-        invite(&owner_node, member.peer_id(), Role::Member).await;
-        let proof = Membership::new(owner_node, owner.peer_id()).proof().await;
+        let invite_frame = invite(&owner_node, member.peer_id(), Role::Member).await;
+
+        let member_node = signing_node(member.clone());
+        member_node.ingest(vec![invite_frame]).await;
+        let proof = Membership::new(member_node, owner.peer_id()).proof().await;
         assert!(!proof.is_empty());
 
         let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
-        let receiver = Membership::new(signing_node(receiver_id.clone()), owner.peer_id());
+        let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
         assert!(!receiver.is_member(&member.peer_id()).await);
         assert!(receiver.verify_proof(member.peer_id(), proof).await);
         assert!(
@@ -502,8 +539,11 @@ mod tests {
         let member = Arc::new(Identity::from_seed([2u8; 32]));
         let outsider = Arc::new(Identity::from_seed([9u8; 32]));
         let owner_node = signing_node(owner.clone());
-        invite(&owner_node, member.peer_id(), Role::Member).await;
-        let proof = Membership::new(owner_node, owner.peer_id()).proof().await;
+        let invite_frame = invite(&owner_node, member.peer_id(), Role::Member).await;
+
+        let member_node = signing_node(member.clone());
+        member_node.ingest(vec![invite_frame]).await;
+        let proof = Membership::new(member_node, owner.peer_id()).proof().await;
 
         let receiver_id = Arc::new(Identity::from_seed([3u8; 32]));
         let receiver = Membership::new(signing_node(receiver_id), owner.peer_id());
@@ -541,6 +581,47 @@ mod tests {
                 .verify_proof(member.peer_id(), vec![stale_invite])
                 .await,
             "replaying an already-delivered invite must not resurrect a revoked member"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_proof_admits_across_a_granters_interleaved_data_write() {
+        let owner = Arc::new(Identity::from_seed([1u8; 32]));
+        let admin = Arc::new(Identity::from_seed([4u8; 32]));
+        let member = Arc::new(Identity::from_seed([5u8; 32]));
+
+        let owner_node = signing_node(owner.clone());
+        let o_to_admin = invite(&owner_node, admin.peer_id(), Role::Admin).await;
+
+        let admin_node = signing_node(admin.clone());
+        admin_node.ingest(vec![o_to_admin.clone()]).await;
+        let admin_data = admin_node
+            .local_write(Op::Insert, "task", "k", vec![1])
+            .await
+            .expect("admin data write");
+        let admin_to_member = invite(&admin_node, member.peer_id(), Role::Member).await;
+        assert_eq!(
+            admin_to_member.seq, 2,
+            "the invite sits behind the data write"
+        );
+
+        let member_node = signing_node(member.clone());
+        member_node
+            .ingest(vec![o_to_admin, admin_data, admin_to_member])
+            .await;
+        let proof = Membership::new(member_node, owner.peer_id()).proof().await;
+        assert!(
+            proof.iter().all(|f| f.entity == MEMBERS_ENTITY),
+            "a proof is the membership chain only, never the granter's data"
+        );
+
+        let receiver = Membership::new(
+            signing_node(Arc::new(Identity::from_seed([3u8; 32]))),
+            owner.peer_id(),
+        );
+        assert!(
+            receiver.verify_proof(member.peer_id(), proof).await,
+            "a member must bootstrap even when a granter interleaved a data write before the invite"
         );
     }
 }

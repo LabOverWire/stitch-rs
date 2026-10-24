@@ -31,13 +31,18 @@ pub trait MemberGate: Send + Sync + 'static {
     }
 
     /// Decide admission for `key` given the membership proof it presented.
-    /// Default: ignore the proof and fall back to [`MemberGate::admits`].
+    /// Default: a gate with no membership model cannot verify a chain, so it
+    /// records how many frames it is setting aside and falls back to
+    /// [`MemberGate::admits`].
     fn admits_with_proof(
         &self,
         key: [u8; 32],
         proof: Vec<WriteFrame>,
     ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-        let _ = proof;
+        tracing::trace!(
+            frames = proof.len(),
+            "gate has no proof model; deciding on membership alone"
+        );
         self.admits(key)
     }
 }
@@ -54,9 +59,16 @@ async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) 
 
 async fn offer_proof(conn: &P2pConnection, gate: &Arc<dyn MemberGate>) {
     let frames = gate.local_proof().await;
-    if let Ok(mut stream) = conn.open_uni().await {
-        let _ = write_message(&mut stream, &SyncMessage::Delta(frames)).await;
-        let _ = stream.finish();
+    match conn.open_uni().await {
+        Ok(mut stream) => {
+            if let Err(error) = write_message(&mut stream, &SyncMessage::Delta(frames)).await {
+                tracing::debug!(%error, "writing membership proof failed");
+            }
+            if let Err(error) = stream.finish() {
+                tracing::debug!(%error, "finishing membership proof stream failed");
+            }
+        }
+        Err(error) => tracing::debug!(%error, "opening membership proof stream failed"),
     }
 }
 
@@ -238,18 +250,16 @@ async fn accept_loop(
     loop {
         match peer.accept_connection().await {
             Ok(conn) => {
-                let Some(conn) = admitted(conn, &gate).await else {
-                    continue;
-                };
                 let id = conn.remote_peer().id.clone();
                 connected.lock().expect("connected lock").insert(id.clone());
-                let handle = tokio::spawn(bridge(
+                let handle = tokio::spawn(admit_and_bridge(
                     conn,
                     node.clone(),
                     Role::Responder,
                     pull_interval,
                     Arc::clone(&connected),
                     id,
+                    gate.clone(),
                 ));
                 track(&bridges, handle);
             }
@@ -285,22 +295,18 @@ async fn connect_loop(
                     guard.insert(target.id.clone());
                 }
                 match peer.connect_to(&target).await {
-                    Ok(conn) => match admitted(conn, &gate).await {
-                        Some(conn) => {
-                            let handle = tokio::spawn(bridge(
-                                conn,
-                                node.clone(),
-                                Role::Initiator,
-                                pull_interval,
-                                Arc::clone(&connected),
-                                target.id.clone(),
-                            ));
-                            track(&bridges, handle);
-                        }
-                        None => {
-                            connected.lock().expect("connected lock").remove(&target.id);
-                        }
-                    },
+                    Ok(conn) => {
+                        let handle = tokio::spawn(admit_and_bridge(
+                            conn,
+                            node.clone(),
+                            Role::Initiator,
+                            pull_interval,
+                            Arc::clone(&connected),
+                            target.id.clone(),
+                            gate.clone(),
+                        ));
+                        track(&bridges, handle);
+                    }
                     Err(_) => {
                         connected.lock().expect("connected lock").remove(&target.id);
                     }
@@ -308,6 +314,23 @@ async fn connect_loop(
             }
         }
         tokio::time::sleep(discovery_interval).await;
+    }
+}
+
+async fn admit_and_bridge(
+    conn: P2pConnection,
+    node: SyncNode,
+    role: Role,
+    pull_interval: Duration,
+    connected: Arc<Mutex<HashSet<String>>>,
+    remote_id: String,
+    gate: Option<Arc<dyn MemberGate>>,
+) {
+    match admitted(conn, &gate).await {
+        Some(conn) => bridge(conn, node, role, pull_interval, connected, remote_id).await,
+        None => {
+            connected.lock().expect("connected lock").remove(&remote_id);
+        }
     }
 }
 

@@ -144,6 +144,27 @@ impl SyncNode {
         self.state.lock().await.frames_for_entity(entity)
     }
 
+    /// This node's own writer identity (the 32-byte peer id in its HLC stamps).
+    #[must_use]
+    pub async fn self_id(&self) -> crate::hlc::PeerId {
+        self.state.lock().await.self_id()
+    }
+
+    /// Visible records of an entity as `(id, data, author)`, evaluated as if
+    /// `extra` frames were merged on top — for deciding a membership proof
+    /// without going through the replication log's in-order delivery.
+    #[must_use]
+    pub async fn entries_with_authors_including(
+        &self,
+        entity: &str,
+        extra: &[WriteFrame],
+    ) -> Vec<(String, Vec<u8>, crate::hlc::PeerId)> {
+        self.state
+            .lock()
+            .await
+            .entries_with_authors_including(entity, extra)
+    }
+
     /// Apply externally supplied frames through the normal received-frame path
     /// (verification, HLC observation, LWW merge) and fan the newly appended
     /// ones out to live sessions. Returns how many were appended.
