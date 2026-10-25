@@ -6,7 +6,6 @@ rust-version = "1.89"
 license = "Apache-2.0"
 description = "Peer-to-peer transport (QUIC + NAT traversal) over an MQTT signaling channel."
 repository = "https://github.com/LabOverWire/stitch-rs"
-publish = false
 
 [dependencies]
 mqtt5 = { version = "0.48.1", default-features = false }
