@@ -419,3 +419,102 @@ async fn two_members_pair_directly_with_the_owner_offline() {
         Some(serde_json::json!({"by": "a"}))
     );
 }
+
+#[cfg(all(feature = "membership", feature = "store"))]
+struct CountingGate {
+    inner: stitch_p2p::membership::Membership,
+    offers: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(all(feature = "membership", feature = "store"))]
+impl MemberGate for CountingGate {
+    fn admits(
+        &self,
+        key: [u8; 32],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        self.inner.admits(key)
+    }
+
+    fn local_proof(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<WriteFrame>> + Send + '_>> {
+        self.offers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.local_proof()
+    }
+
+    fn admits_with_proof(
+        &self,
+        key: [u8; 32],
+        proof: Vec<WriteFrame>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        self.inner.admits_with_proof(key, proof)
+    }
+}
+
+#[cfg(all(feature = "membership", feature = "store"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mutually_admitting_members_exchange_no_proof() {
+    if !mqdb_available() {
+        eprintln!("skipping: `mqdb` binary not found on PATH");
+        return;
+    }
+    let (_broker, broker_addr, _tmp) = start_test_broker().await;
+
+    let owner_id = Identity::from_seed([40u8; 32]);
+    let owner_pid = owner_id.peer_id();
+    let owner_seed = owner_id.seed();
+    let admin_id = Identity::from_seed([41u8; 32]);
+    let admin_pid = admin_id.peer_id();
+    let admin_seed = admin_id.seed();
+
+    let owner = Store::with_owner(owner_id);
+    owner.invite(admin_pid, Role::Admin).await.expect("invite");
+    let admin = Store::join(admin_id, owner_pid);
+
+    let (owner_peer, _) = make_peer("count-owner", &broker_addr, Some(owner_seed)).await;
+    let (admin_peer, _) = make_peer("count-admin", &broker_addr, Some(admin_seed)).await;
+
+    let owner_offers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let admin_offers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let owner_gate: Arc<dyn MemberGate> = Arc::new(CountingGate {
+        inner: owner.membership().expect("owner membership"),
+        offers: owner_offers.clone(),
+    });
+    let admin_gate: Arc<dyn MemberGate> = Arc::new(CountingGate {
+        inner: admin.membership().expect("admin membership"),
+        offers: admin_offers.clone(),
+    });
+
+    let pull = Duration::from_millis(300);
+    let swarm_owner = Swarm::spawn_gated(owner_peer, owner.node().clone(), pull, owner_gate);
+    let swarm_admin = Swarm::spawn_gated(admin_peer, admin.node().clone(), pull, admin_gate);
+
+    admin
+        .create("task", "k", serde_json::json!({"by": "admin"}))
+        .await
+        .expect("admin write");
+
+    let converged = wait_until(Duration::from_secs(30), || async {
+        owner.read("task", "k").await.is_some()
+    })
+    .await;
+
+    swarm_owner.abort();
+    swarm_admin.abort();
+
+    assert!(
+        converged,
+        "mutually-admitting members failed to pair and sync"
+    );
+    assert_eq!(
+        owner_offers.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "owner disclosed its proof to a peer it already admits locally"
+    );
+    assert_eq!(
+        admin_offers.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "admin disclosed its proof to a peer it already admits locally"
+    );
+}

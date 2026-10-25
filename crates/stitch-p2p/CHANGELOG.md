@@ -5,6 +5,19 @@ All notable changes to the `stitch-p2p` crate are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The gated-discovery membership-proof handshake is now **request-driven**. Each
+  side asks for the peer's proof only when it cannot admit the peer from local
+  membership, and serves its own proof only when asked — a proof is never pushed
+  unconditionally, so it is no longer disclosed to peers that already admit the
+  node, and a converged pair exchanges only a one-byte request marker each way.
+  The whole exchange is bounded by a single timeout. `proof()` now reads the
+  `_members` frames through a per-entity accessor that clones only the matching
+  frames instead of copying the entire replication log.
+
 ## [0.2.0] - 2026-10-24
 
 Initial public release: a pure peer-to-peer state-sync engine — multi-leader,

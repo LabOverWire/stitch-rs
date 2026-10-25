@@ -93,6 +93,22 @@ impl ReplLog {
             .collect()
     }
 
+    /// Every frame held for `entity`, across all origins. Scans the per-origin
+    /// logs but clones only the matching frames, so presenting a membership
+    /// proof does not copy unrelated data frames.
+    #[must_use]
+    pub fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
+        let mut out = Vec::new();
+        for log in self.observed.values() {
+            for frame in log {
+                if frame.entity == entity {
+                    out.push(frame.clone());
+                }
+            }
+        }
+        out
+    }
+
     #[must_use]
     pub fn delta_since(&self, their: &Cursors) -> Vec<WriteFrame> {
         let mut out = Vec::new();
