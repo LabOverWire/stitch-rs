@@ -817,14 +817,20 @@ async fn scope_opened_before_connect_backfills_on_connect() {
         .unwrap();
 
     let flush_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut flushed = false;
     while tokio::time::Instant::now() < flush_deadline {
         if store_a.pending_count("").await.unwrap() == 0
             && store_a.pending_count("p1").await.unwrap() == 0
         {
+            flushed = true;
             break;
         }
         sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        flushed,
+        "store A must flush the seeded rows to the broker before store B connects"
+    );
 
     let mut remote_b = RemoteConfig::new(broker.tcp_url());
     remote_b.auto_connect = false;
