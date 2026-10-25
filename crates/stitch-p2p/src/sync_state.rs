@@ -284,10 +284,7 @@ impl SyncState {
     /// records.
     #[must_use]
     pub fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
-        self.delta_since(&Cursors::new())
-            .into_iter()
-            .filter(|frame| frame.entity == entity)
-            .collect()
+        self.log.frames_for_entity(entity)
     }
 
     #[must_use]

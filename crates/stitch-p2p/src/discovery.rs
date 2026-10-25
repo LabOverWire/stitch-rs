@@ -9,11 +9,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
-/// How long a gated peer waits for a connecting peer's membership proof before
-/// giving up and deciding on local membership alone. Bounds the miss path when
-/// the peer offers no proof (e.g. an ungated swarm).
+/// How long the membership-proof exchange may take before a gated peer gives up
+/// and decides on local membership alone. Bounds the whole handshake, so a peer
+/// that never participates (e.g. an ungated swarm) costs at most this.
 const PROOF_WAIT: Duration = Duration::from_secs(3);
 
 /// Decides whether a connected peer, identified by its verified transport
@@ -57,60 +58,86 @@ async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) 
     }
 }
 
-async fn offer_proof(conn: &P2pConnection, gate: &Arc<dyn MemberGate>) {
-    let frames = gate.local_proof().await;
-    let send = async {
-        match conn.open_uni().await {
-            Ok(mut stream) => {
-                if let Err(error) = write_message(&mut stream, &SyncMessage::Delta(frames)).await {
-                    tracing::debug!(%error, "writing membership proof failed");
-                }
-                if let Err(error) = stream.finish() {
-                    tracing::debug!(%error, "finishing membership proof stream failed");
-                }
-            }
-            Err(error) => tracing::debug!(%error, "opening membership proof stream failed"),
+async fn write_want<W: AsyncWrite + Unpin>(stream: &mut W, want: bool) -> std::io::Result<()> {
+    stream.write_all(&[u8::from(want)]).await
+}
+
+async fn read_want<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<bool> {
+    let mut byte = [0u8; 1];
+    stream.read_exact(&mut byte).await?;
+    Ok(byte[0] != 0)
+}
+
+/// Run the request-driven membership-proof exchange on a gated connection and
+/// return whether a presented proof admits `key`. Each side opens one uni
+/// stream carrying a `want` byte (set only when it could not admit the peer
+/// locally); it then writes a `Delta` with its proof only if the peer asked. A
+/// peer's proof is therefore disclosed only to a peer that requested it, never
+/// pushed, and a converged pair exchanges only the two `want` bytes. The whole
+/// exchange is bounded by [`PROOF_WAIT`], so a peer that never participates
+/// falls back to the local decision instead of hanging. A node must still run
+/// the exchange even when it admits the peer locally, in order to serve the
+/// peer's own request; against a peer that never opens its stream (e.g. an
+/// ungated swarm) this costs up to [`PROOF_WAIT`] before admission, which only
+/// affects mixed gated/ungated topologies — an all-gated pair resolves at once.
+async fn proof_exchange(
+    conn: &P2pConnection,
+    gate: &Arc<dyn MemberGate>,
+    key: [u8; 32],
+    local_ok: bool,
+) -> bool {
+    let exchange = async {
+        let mut out = conn.open_uni().await.ok()?;
+        write_want(&mut out, !local_ok).await.ok()?;
+        let mut inbound = conn.accept_uni().await.ok()?;
+        let peer_wants = read_want(&mut inbound).await.ok()?;
+        if peer_wants {
+            let offered = gate.local_proof().await;
+            write_message(&mut out, &SyncMessage::Delta(offered))
+                .await
+                .ok()?;
+        }
+        let _ = out.finish();
+        if local_ok {
+            return Some(false);
+        }
+        match read_message(&mut inbound).await.ok()? {
+            SyncMessage::Delta(frames) => Some(gate.admits_with_proof(key, frames).await),
+            _ => Some(false),
         }
     };
-    if tokio::time::timeout(PROOF_WAIT, send).await.is_err() {
-        tracing::debug!("offering membership proof timed out");
+    match tokio::time::timeout(PROOF_WAIT, exchange).await {
+        Ok(Some(result)) => result,
+        _ => false,
     }
 }
 
-async fn receive_proof(conn: &P2pConnection) -> Option<Vec<WriteFrame>> {
-    let read = async {
-        let mut stream = conn.accept_uni().await.ok()?;
-        match read_message(&mut stream).await.ok()? {
-            SyncMessage::Delta(frames) => Some(frames),
-            _ => None,
-        }
-    };
-    tokio::time::timeout(PROOF_WAIT, read).await.ok().flatten()
-}
-
-/// Decide whether a connected peer may join. On a gated connection each side
-/// first offers its own proof (so a peer that has not yet synced this node's
-/// membership can still admit it), then admits on local membership; only on a
-/// local miss does it wait for the peer's proof and re-decide. This breaks the
-/// member-to-member bootstrap deadlock without admitting outsiders.
+/// Decide whether a connected peer may join. On a gated connection both sides
+/// run a request-driven proof exchange: a side asks for the peer's proof only
+/// when it cannot admit the peer from local membership, and serves its own
+/// proof only when asked. A peer is admitted on local membership or on a proof
+/// that resolves it to the genesis owner — breaking the member-to-member
+/// bootstrap deadlock without pushing membership to peers that never needed it.
 async fn admitted(
     conn: P2pConnection,
     gate: &Option<Arc<dyn MemberGate>>,
 ) -> Option<P2pConnection> {
-    if let Some(gate) = gate {
-        offer_proof(&conn, gate).await;
-    }
-    if gate_admits(gate, conn.remote_public_key()).await {
+    let key = conn.remote_public_key();
+    let local_ok = gate_admits(gate, key).await;
+    let Some(gate) = gate else {
         return Some(conn);
+    };
+    let Some(key) = key else {
+        let _ = conn.close();
+        return None;
+    };
+    let proof_ok = proof_exchange(&conn, gate, key, local_ok).await;
+    if local_ok || proof_ok {
+        Some(conn)
+    } else {
+        let _ = conn.close();
+        None
     }
-    if let (Some(gate), Some(key)) = (gate.as_ref(), conn.remote_public_key())
-        && let Some(proof) = receive_proof(&conn).await
-        && gate.admits_with_proof(key, proof).await
-    {
-        return Some(conn);
-    }
-    let _ = conn.close();
-    None
 }
 
 /// Derive a sync [`PeerId`] (the 32-byte writer identity used in HLC stamps)
