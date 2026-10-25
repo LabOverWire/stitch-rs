@@ -1,4 +1,5 @@
 use crate::lww::Op;
+use crate::replog::RecordOutcome;
 use crate::sync_state::{SyncState, WriteError};
 use crate::wire::WriteFrame;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -134,6 +135,57 @@ impl SyncNode {
         entity: &str,
     ) -> Vec<(String, Vec<u8>, crate::hlc::PeerId)> {
         self.state.lock().await.entries_with_authors(entity)
+    }
+
+    /// Every frame held for an entity, across all origins, for presenting a
+    /// signed proof to a peer that has not yet synced the records.
+    #[must_use]
+    pub async fn frames_for_entity(&self, entity: &str) -> Vec<WriteFrame> {
+        self.state.lock().await.frames_for_entity(entity)
+    }
+
+    /// This node's own writer identity (the 32-byte peer id in its HLC stamps).
+    #[must_use]
+    pub async fn self_id(&self) -> crate::hlc::PeerId {
+        self.state.lock().await.self_id()
+    }
+
+    /// Visible records of an entity as `(id, data, author)`, evaluated as if
+    /// `extra` frames were merged on top — for deciding a membership proof
+    /// without going through the replication log's in-order delivery.
+    #[must_use]
+    pub async fn entries_with_authors_including(
+        &self,
+        entity: &str,
+        extra: &[WriteFrame],
+    ) -> Vec<(String, Vec<u8>, crate::hlc::PeerId)> {
+        self.state
+            .lock()
+            .await
+            .entries_with_authors_including(entity, extra)
+    }
+
+    /// Apply externally supplied frames through the normal received-frame path
+    /// (verification, HLC observation, LWW merge) and fan the newly appended
+    /// ones out to live sessions. Returns how many were appended.
+    pub async fn ingest(&self, frames: Vec<WriteFrame>) -> usize {
+        let now = now_millis();
+        let mut applied = Vec::new();
+        {
+            let mut guard = self.state.lock().await;
+            for frame in frames {
+                if guard.receive(frame.clone(), now) == RecordOutcome::Appended {
+                    applied.push(frame);
+                }
+            }
+        }
+        if !applied.is_empty() {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .retain(|tx| applied.iter().all(|frame| tx.send(frame.clone()).is_ok()));
+        }
+        applied.len()
     }
 
     /// Subscribe to visible-state mutations (local and remote).

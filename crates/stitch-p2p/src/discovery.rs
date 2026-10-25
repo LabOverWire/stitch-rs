@@ -1,6 +1,8 @@
 use crate::hlc::{PEER_ID_LEN, PeerId};
 use crate::node::SyncNode;
+use crate::protocol::{SyncMessage, read_message, write_message};
 use crate::session;
+use crate::wire::WriteFrame;
 use mqp2p::{P2pConnection, Peer};
 use std::collections::HashSet;
 use std::future::Future;
@@ -9,12 +11,40 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
+/// How long a gated peer waits for a connecting peer's membership proof before
+/// giving up and deciding on local membership alone. Bounds the miss path when
+/// the peer offers no proof (e.g. an ungated swarm).
+const PROOF_WAIT: Duration = Duration::from_secs(3);
+
 /// Decides whether a connected peer, identified by its verified transport
 /// public key, may join the swarm. Implemented by
 /// `stitch_p2p::membership::Membership` so a swarm accepts and dials only
 /// authorized members; without a gate every peer is admitted.
 pub trait MemberGate: Send + Sync + 'static {
     fn admits(&self, key: [u8; 32]) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+
+    /// This node's own membership proof — the signed records it offers a peer
+    /// that may not yet have synced this node's membership. Default: nothing to
+    /// offer, so gates without a bootstrap story behave exactly as before.
+    fn local_proof(&self) -> Pin<Box<dyn Future<Output = Vec<WriteFrame>> + Send + '_>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    /// Decide admission for `key` given the membership proof it presented.
+    /// Default: a gate with no membership model cannot verify a chain, so it
+    /// records how many frames it is setting aside and falls back to
+    /// [`MemberGate::admits`].
+    fn admits_with_proof(
+        &self,
+        key: [u8; 32],
+        proof: Vec<WriteFrame>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+        tracing::trace!(
+            frames = proof.len(),
+            "gate has no proof model; deciding on membership alone"
+        );
+        self.admits(key)
+    }
 }
 
 async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) -> bool {
@@ -27,16 +57,60 @@ async fn gate_admits(gate: &Option<Arc<dyn MemberGate>>, key: Option<[u8; 32]>) 
     }
 }
 
+async fn offer_proof(conn: &P2pConnection, gate: &Arc<dyn MemberGate>) {
+    let frames = gate.local_proof().await;
+    let send = async {
+        match conn.open_uni().await {
+            Ok(mut stream) => {
+                if let Err(error) = write_message(&mut stream, &SyncMessage::Delta(frames)).await {
+                    tracing::debug!(%error, "writing membership proof failed");
+                }
+                if let Err(error) = stream.finish() {
+                    tracing::debug!(%error, "finishing membership proof stream failed");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "opening membership proof stream failed"),
+        }
+    };
+    if tokio::time::timeout(PROOF_WAIT, send).await.is_err() {
+        tracing::debug!("offering membership proof timed out");
+    }
+}
+
+async fn receive_proof(conn: &P2pConnection) -> Option<Vec<WriteFrame>> {
+    let read = async {
+        let mut stream = conn.accept_uni().await.ok()?;
+        match read_message(&mut stream).await.ok()? {
+            SyncMessage::Delta(frames) => Some(frames),
+            _ => None,
+        }
+    };
+    tokio::time::timeout(PROOF_WAIT, read).await.ok().flatten()
+}
+
+/// Decide whether a connected peer may join. On a gated connection each side
+/// first offers its own proof (so a peer that has not yet synced this node's
+/// membership can still admit it), then admits on local membership; only on a
+/// local miss does it wait for the peer's proof and re-decide. This breaks the
+/// member-to-member bootstrap deadlock without admitting outsiders.
 async fn admitted(
     conn: P2pConnection,
     gate: &Option<Arc<dyn MemberGate>>,
 ) -> Option<P2pConnection> {
-    if gate_admits(gate, conn.remote_public_key()).await {
-        Some(conn)
-    } else {
-        let _ = conn.close();
-        None
+    if let Some(gate) = gate {
+        offer_proof(&conn, gate).await;
     }
+    if gate_admits(gate, conn.remote_public_key()).await {
+        return Some(conn);
+    }
+    if let (Some(gate), Some(key)) = (gate.as_ref(), conn.remote_public_key())
+        && let Some(proof) = receive_proof(&conn).await
+        && gate.admits_with_proof(key, proof).await
+    {
+        return Some(conn);
+    }
+    let _ = conn.close();
+    None
 }
 
 /// Derive a sync [`PeerId`] (the 32-byte writer identity used in HLC stamps)
@@ -181,18 +255,16 @@ async fn accept_loop(
     loop {
         match peer.accept_connection().await {
             Ok(conn) => {
-                let Some(conn) = admitted(conn, &gate).await else {
-                    continue;
-                };
                 let id = conn.remote_peer().id.clone();
                 connected.lock().expect("connected lock").insert(id.clone());
-                let handle = tokio::spawn(bridge(
+                let handle = tokio::spawn(admit_and_bridge(
                     conn,
                     node.clone(),
                     Role::Responder,
                     pull_interval,
                     Arc::clone(&connected),
                     id,
+                    gate.clone(),
                 ));
                 track(&bridges, handle);
             }
@@ -228,22 +300,18 @@ async fn connect_loop(
                     guard.insert(target.id.clone());
                 }
                 match peer.connect_to(&target).await {
-                    Ok(conn) => match admitted(conn, &gate).await {
-                        Some(conn) => {
-                            let handle = tokio::spawn(bridge(
-                                conn,
-                                node.clone(),
-                                Role::Initiator,
-                                pull_interval,
-                                Arc::clone(&connected),
-                                target.id.clone(),
-                            ));
-                            track(&bridges, handle);
-                        }
-                        None => {
-                            connected.lock().expect("connected lock").remove(&target.id);
-                        }
-                    },
+                    Ok(conn) => {
+                        let handle = tokio::spawn(admit_and_bridge(
+                            conn,
+                            node.clone(),
+                            Role::Initiator,
+                            pull_interval,
+                            Arc::clone(&connected),
+                            target.id.clone(),
+                            gate.clone(),
+                        ));
+                        track(&bridges, handle);
+                    }
                     Err(_) => {
                         connected.lock().expect("connected lock").remove(&target.id);
                     }
@@ -251,6 +319,23 @@ async fn connect_loop(
             }
         }
         tokio::time::sleep(discovery_interval).await;
+    }
+}
+
+async fn admit_and_bridge(
+    conn: P2pConnection,
+    node: SyncNode,
+    role: Role,
+    pull_interval: Duration,
+    connected: Arc<Mutex<HashSet<String>>>,
+    remote_id: String,
+    gate: Option<Arc<dyn MemberGate>>,
+) {
+    match admitted(conn, &gate).await {
+        Some(conn) => bridge(conn, node, role, pull_interval, connected, remote_id).await,
+        None => {
+            connected.lock().expect("connected lock").remove(&remote_id);
+        }
     }
 }
 
