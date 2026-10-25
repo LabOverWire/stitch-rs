@@ -71,11 +71,15 @@ async fn read_want<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<bool
 /// Run the request-driven membership-proof exchange on a gated connection and
 /// return whether a presented proof admits `key`. Each side opens one uni
 /// stream carrying a `want` byte (set only when it could not admit the peer
-/// locally) followed by a `Delta` that is the local proof when the peer asked
-/// and empty otherwise. A peer's proof is therefore disclosed only to a peer
-/// that requested it, never pushed, and a converged pair exchanges only the two
-/// `want` bytes. The whole exchange is bounded by [`PROOF_WAIT`], so a peer that
-/// never participates falls back to the local decision instead of hanging.
+/// locally); it then writes a `Delta` with its proof only if the peer asked. A
+/// peer's proof is therefore disclosed only to a peer that requested it, never
+/// pushed, and a converged pair exchanges only the two `want` bytes. The whole
+/// exchange is bounded by [`PROOF_WAIT`], so a peer that never participates
+/// falls back to the local decision instead of hanging. A node must still run
+/// the exchange even when it admits the peer locally, in order to serve the
+/// peer's own request; against a peer that never opens its stream (e.g. an
+/// ungated swarm) this costs up to [`PROOF_WAIT`] before admission, which only
+/// affects mixed gated/ungated topologies — an all-gated pair resolves at once.
 async fn proof_exchange(
     conn: &P2pConnection,
     gate: &Arc<dyn MemberGate>,
@@ -87,14 +91,12 @@ async fn proof_exchange(
         write_want(&mut out, !local_ok).await.ok()?;
         let mut inbound = conn.accept_uni().await.ok()?;
         let peer_wants = read_want(&mut inbound).await.ok()?;
-        let offered = if peer_wants {
-            gate.local_proof().await
-        } else {
-            Vec::new()
-        };
-        write_message(&mut out, &SyncMessage::Delta(offered))
-            .await
-            .ok()?;
+        if peer_wants {
+            let offered = gate.local_proof().await;
+            write_message(&mut out, &SyncMessage::Delta(offered))
+                .await
+                .ok()?;
+        }
         let _ = out.finish();
         if local_ok {
             return Some(false);
