@@ -777,3 +777,95 @@ async fn reconnect_validator_fires_on_connected() {
 }
 
 use std::collections::HashMap;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scope_opened_before_connect_backfills_on_connect() {
+    init_tracing();
+    let broker = BrokerHarness::new().start().await.expect("start broker");
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_a),
+        "backfill-a".into(),
+    );
+    store_a.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+
+    store_a
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store_a
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hello")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    let flush_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < flush_deadline {
+        if store_a.pending_count("").await.unwrap() == 0
+            && store_a.pending_count("p1").await.unwrap() == 0
+        {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let mut remote_b = RemoteConfig::new(broker.tcp_url());
+    remote_b.auto_connect = false;
+    let options_b = StoreOptions {
+        persistence: Some(PersistenceConfig {
+            db_path: dir_b.path().join("db"),
+            passphrase: None,
+        }),
+        remote: Some(remote_b),
+    };
+    let store_b = Store::with_client_id(fixture_config(), options_b, "backfill-b".into());
+    store_b.initialize().await.unwrap();
+
+    store_b.replace_scope("p1").await.unwrap();
+    assert!(
+        store_b.snapshot("task", "p1").await.unwrap().is_empty(),
+        "a scope opened while disconnected must start empty"
+    );
+
+    store_b
+        .reconnect(&broker.tcp_url(), None, None, None)
+        .await
+        .unwrap();
+    wait_for_connected(&store_b).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut converged = false;
+    while tokio::time::Instant::now() < deadline {
+        let tasks = store_b.snapshot("task", "p1").await.unwrap();
+        if tasks.len() == 1 && tasks[0].get("id").and_then(Value::as_str) == Some("t1") {
+            converged = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        converged,
+        "a scope opened before connect must backfill its children once connected, with no second replace_scope"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}

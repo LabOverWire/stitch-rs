@@ -1335,9 +1335,8 @@ impl StoreInner {
         Ok(inner)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     async fn open_scope_with_server(
-        self: &Arc<Self>,
+        self: &Shared<Self>,
         scope_id: &str,
         remote: &RemoteSyncLayer,
     ) -> Result<()> {
@@ -1867,6 +1866,25 @@ async fn on_connected(inner: Shared<StoreInner>) {
             .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
             .await;
         inner.state.lock_guard().initial_sync_done = true;
+        backfill_current_scope(&inner, remote).await;
+    }
+}
+
+async fn backfill_current_scope(inner: &Shared<StoreInner>, remote: &Shared<RemoteSyncLayer>) {
+    let Some(persistence) = &inner.persistence else {
+        return;
+    };
+    let _serializer = inner.replace_scope_lock.lock().await;
+    let Some(scope_id) = inner.state.lock_guard().current_scope.clone() else {
+        return;
+    };
+    persistence.set_suppress_notifications(true);
+    let outcome = inner
+        .open_scope_with_server(&scope_id, remote.as_ref())
+        .await;
+    persistence.set_suppress_notifications(false);
+    if let Err(err) = outcome {
+        tracing::warn!(scope = %scope_id, error = %err, "scope backfill on connect failed");
     }
 }
 
