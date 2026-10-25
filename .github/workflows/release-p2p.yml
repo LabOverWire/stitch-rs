@@ -1,0 +1,122 @@
+name: Release p2p
+
+on:
+  push:
+    tags: ["mqp2p-v*", "stitch-p2p-v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag to build and publish (mqp2p-v0.3.0 or stitch-p2p-v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-mqp2p:
+    name: Publish mqp2p to crates.io
+    if: ${{ startsWith(inputs.ref || github.ref_name, 'mqp2p-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches mqp2p version
+        run: |
+          REF="${{ inputs.ref || github.ref_name }}"
+          TAG="${REF#mqp2p-v}"
+          VERSION=$(grep '^version' crates/mqp2p/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag mqp2p-v$TAG does not match mqp2p version $VERSION"
+            exit 1
+          fi
+
+      - name: Publish mqp2p
+        run: |
+          set -euo pipefail
+          if out=$(cargo publish --package mqp2p --locked 2>&1); then
+            printf '%s\n' "$out"
+          else
+            printf '%s\n' "$out"
+            printf '%s' "$out" | grep -q 'already uploaded' \
+              && echo "mqp2p already published at this version" \
+              || exit 1
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-stitch-p2p:
+    name: Publish stitch-p2p to crates.io
+    if: ${{ startsWith(inputs.ref || github.ref_name, 'stitch-p2p-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches stitch-p2p version
+        run: |
+          REF="${{ inputs.ref || github.ref_name }}"
+          TAG="${REF#stitch-p2p-v}"
+          VERSION=$(grep '^version' crates/stitch-p2p/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "Tag stitch-p2p-v$TAG does not match stitch-p2p version $VERSION"
+            exit 1
+          fi
+
+      - name: Wait for the required mqp2p version on the index
+        run: |
+          set -euo pipefail
+          REQ=$(grep '^mqp2p' crates/stitch-p2p/Cargo.toml | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
+          echo "stitch-p2p requires mqp2p $REQ"
+          for i in $(seq 1 30); do
+            if curl -sf https://index.crates.io/mq/p2/mqp2p | grep -q "\"vers\":\"$REQ\""; then
+              echo "mqp2p $REQ is indexed"
+              exit 0
+            fi
+            echo "waiting for mqp2p $REQ on the crates.io index ($i/30)"
+            sleep 10
+          done
+          echo "mqp2p $REQ did not appear on the index in time"
+          exit 1
+
+      - name: Publish stitch-p2p
+        run: |
+          set -euo pipefail
+          if out=$(cargo publish --package stitch-p2p --locked 2>&1); then
+            printf '%s\n' "$out"
+          else
+            printf '%s\n' "$out"
+            printf '%s' "$out" | grep -q 'already uploaded' \
+              && echo "stitch-p2p already published at this version" \
+              || exit 1
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: [publish-mqp2p, publish-stitch-p2p]
+    if: ${{ always() && github.event_name == 'push' && (needs.publish-mqp2p.result == 'success' || needs.publish-stitch-p2p.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
