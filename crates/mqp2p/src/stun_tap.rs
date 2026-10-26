@@ -23,7 +23,11 @@ impl StunTap {
         (Arc::new(Self { inner, responses }), rx)
     }
 
-    pub(crate) fn send_datagram(&self, destination: SocketAddr, packet: &[u8]) -> std::io::Result<()> {
+    pub(crate) fn send_datagram(
+        &self,
+        destination: SocketAddr,
+        packet: &[u8],
+    ) -> std::io::Result<()> {
         self.inner.try_send(&Transmit {
             destination,
             ecn: None,
@@ -252,8 +256,15 @@ mod tests {
 
         let n = poll_once(&tap, &mut bufs, &mut meta);
         assert_eq!(n, 2);
-        assert_eq!(meta[0].len, 0, "the STUN datagram must be hidden from quinn");
-        assert_eq!(meta[1].len, quic.len(), "the QUIC datagram must pass through");
+        assert_eq!(
+            meta[0].len, 0,
+            "the STUN datagram must be hidden from quinn"
+        );
+        assert_eq!(
+            meta[1].len,
+            quic.len(),
+            "the QUIC datagram must pass through"
+        );
         assert_eq!(&bufs[1][..meta[1].len], &quic[..]);
 
         assert_eq!(responses.try_recv().expect("stun tapped"), stun);
@@ -274,6 +285,10 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(Error::Stun { .. })));
-        assert_eq!(inner.sent_count(), 1, "a binding request must have been sent");
+        assert_eq!(
+            inner.sent_count(),
+            1,
+            "a binding request must have been sent"
+        );
     }
 }

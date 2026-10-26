@@ -855,7 +855,9 @@ async fn spawn_fake_stun(mapped: Arc<std::sync::Mutex<SocketAddr>>) -> SocketAdd
             let mut txn = [0u8; 12];
             txn.copy_from_slice(&buf[8..20]);
             let target = *mapped.lock().expect("mapped lock");
-            let _ = socket.send_to(&xor_binding_response(&txn, target), from).await;
+            let _ = socket
+                .send_to(&xor_binding_response(&txn, target), from)
+                .await;
         }
     });
     addr
