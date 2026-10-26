@@ -48,7 +48,7 @@ jobs:
             printf '%s\n' "$out"
           else
             printf '%s\n' "$out"
-            printf '%s' "$out" | grep -q 'already uploaded' \
+            printf '%s' "$out" | grep -qE 'already uploaded|already exists on crates\.io' \
               && echo "mqp2p already published at this version" \
               || exit 1
           fi
@@ -102,7 +102,7 @@ jobs:
             printf '%s\n' "$out"
           else
             printf '%s\n' "$out"
-            printf '%s' "$out" | grep -q 'already uploaded' \
+            printf '%s' "$out" | grep -qE 'already uploaded|already exists on crates\.io' \
               && echo "stitch-p2p already published at this version" \
               || exit 1
           fi
