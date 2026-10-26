@@ -5,18 +5,22 @@ use crate::signaling::{
     PeerInfo, SignalingClient, client_id_for, heartbeat_interval_secs,
 };
 use crate::stun;
+use crate::stun_tap::{self, StunTap};
 use crate::transfer::{self, FileOffer, TransferProgress, TransferResult};
 use crate::turn_client::{self, TurnClient};
 use bytes::Bytes;
 use mqtt5::ConnectOptions;
 use mqtt5::client::MqttClient;
-use quinn::Connection;
+use quinn::{AsyncUdpSocket, Connection};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
+
+const STUN_REDISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
 const TURN_LIFETIME_SECS: u32 = 600;
 const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -190,6 +194,9 @@ pub struct Peer {
     turn: Option<TurnClient>,
     lease_secs: u64,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
+    stun_tap: Option<Arc<StunTap>>,
+    stun_responses: Option<UnboundedReceiver<Vec<u8>>>,
+    stun_server: Option<String>,
 }
 
 async fn setup_turn(turn: &TurnServer) -> Result<TurnClient> {
@@ -213,6 +220,8 @@ impl Peer {
             Some(seed) => quic::cert_from_ed25519_seed(&Zeroizing::new(seed))?,
             None => quic::generate_self_signed_cert()?,
         };
+
+        let stun_server = config.stun_server.clone();
 
         let std_socket = std::net::UdpSocket::bind(config.bind_addr)?;
         std_socket.set_nonblocking(true)?;
@@ -276,8 +285,17 @@ impl Peer {
         debug!(?offload, "QUIC transport configured");
         let quic_transport = Arc::new(transport);
         let relay_identity = identity.clone();
-        let quic =
-            QuicEndpoint::bind_with_transport(quic_socket, identity, Arc::clone(&quic_transport))?;
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| Error::Quic("no async runtime available".into()))?;
+        let inner_socket = runtime
+            .wrap_udp_socket(quic_socket)
+            .map_err(|e| Error::Quic(format!("socket wrap failed: {e}")))?;
+        let (stun_tap, stun_responses) = StunTap::wrap(inner_socket);
+        let quic = QuicEndpoint::bind_abstract(
+            Arc::clone(&stun_tap) as Arc<dyn AsyncUdpSocket>,
+            identity,
+            Arc::clone(&quic_transport),
+        )?;
 
         let lease_secs = config.effective_lease_secs();
         let keepalive_secs = config.effective_keepalive_secs();
@@ -316,6 +334,9 @@ impl Peer {
             turn,
             lease_secs,
             heartbeat: None,
+            stun_tap: Some(stun_tap),
+            stun_responses: Some(stun_responses),
+            stun_server,
         })
     }
 
@@ -347,20 +368,57 @@ impl Peer {
         let renew_fingerprint = self.fingerprint.clone();
         let renew_public_addr = public_addr;
         let lease_secs = self.lease_secs;
+        let mut rediscovery = match (
+            self.stun_tap.clone(),
+            self.stun_responses.take(),
+            self.stun_server.clone(),
+        ) {
+            (Some(tap), Some(responses), Some(server)) => Some((tap, responses, server)),
+            _ => None,
+        };
         self.heartbeat = Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
                 heartbeat_interval_secs(lease_secs),
             ));
             ticker.tick().await;
+            let mut current_public_addr = renew_public_addr;
             loop {
                 ticker.tick().await;
+                if let Some((tap, responses, server)) = rediscovery.as_mut() {
+                    match stun_tap::rediscover_srflx(
+                        tap,
+                        responses,
+                        server.as_str(),
+                        STUN_REDISCOVER_TIMEOUT,
+                    )
+                    .await
+                    {
+                        Ok(addr) => {
+                            let addr_str = addr.to_string();
+                            if current_public_addr.as_deref() != Some(addr_str.as_str()) {
+                                match signaling.update_peer_addr(&renew_id, addr).await {
+                                    Ok(()) => {
+                                        info!(peer_id = renew_id, addr = %addr, "srflx address changed; updated peer record");
+                                        current_public_addr = Some(addr_str);
+                                    }
+                                    Err(e) => {
+                                        warn!(peer_id = renew_id, error = %e, "srflx address update failed");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!(peer_id = renew_id, error = %e, "srflx re-discovery failed");
+                        }
+                    }
+                }
                 if let Err(e) = signaling
                     .ensure_registered(
                         &renew_id,
                         &renew_name,
                         quic_port,
                         &renew_fingerprint,
-                        renew_public_addr.as_deref(),
+                        current_public_addr.as_deref(),
                         lease_secs,
                     )
                     .await

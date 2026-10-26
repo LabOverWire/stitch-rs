@@ -3,6 +3,7 @@ pub mod peer;
 pub mod quic;
 pub mod signaling;
 pub mod stun;
+mod stun_tap;
 pub mod transfer;
 pub mod turn;
 pub mod turn_client;
