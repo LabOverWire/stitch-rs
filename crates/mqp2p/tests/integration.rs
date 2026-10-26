@@ -810,3 +810,129 @@ async fn a_writer_clock_ahead_does_not_keep_a_dead_peer_live() {
 
     observer.shutdown().await.expect("observer shutdown failed");
 }
+
+fn xor_binding_response(txn: &[u8; 12], mapped: SocketAddr) -> Vec<u8> {
+    const MAGIC: u32 = 0x2112_A442;
+    let port = mapped.port();
+    let ip = match mapped.ip() {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => panic!("fake STUN server serves IPv4 mappings only"),
+    };
+    let xor_port = port ^ (MAGIC >> 16) as u16;
+    let xor_ip = ip ^ MAGIC;
+
+    let mut attr = Vec::new();
+    attr.extend_from_slice(&0x0020u16.to_be_bytes());
+    attr.extend_from_slice(&8u16.to_be_bytes());
+    attr.push(0);
+    attr.push(0x01);
+    attr.extend_from_slice(&xor_port.to_be_bytes());
+    attr.extend_from_slice(&xor_ip.to_be_bytes());
+
+    let mut response = Vec::new();
+    response.extend_from_slice(&0x0101u16.to_be_bytes());
+    response.extend_from_slice(&(attr.len() as u16).to_be_bytes());
+    response.extend_from_slice(&MAGIC.to_be_bytes());
+    response.extend_from_slice(txn);
+    response.extend_from_slice(&attr);
+    response
+}
+
+async fn spawn_fake_stun(mapped: Arc<std::sync::Mutex<SocketAddr>>) -> SocketAddr {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind fake STUN server");
+    let addr = socket.local_addr().expect("fake STUN local addr");
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
+            if n < 20 {
+                continue;
+            }
+            let mut txn = [0u8; 12];
+            txn.copy_from_slice(&buf[8..20]);
+            let target = *mapped.lock().expect("mapped lock");
+            let _ = socket
+                .send_to(&xor_binding_response(&txn, target), from)
+                .await;
+        }
+    });
+    addr
+}
+
+async fn public_addr_of(peer: &Peer, id: &str) -> Option<String> {
+    peer.discover_peers()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|p| p.id.as_str() == id)
+        .and_then(|p| p.public_addr)
+}
+
+#[tokio::test]
+async fn srflx_change_is_rediscovered_and_the_record_updated() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn")
+        .with_test_writer()
+        .try_init();
+
+    let tmpdir = tempfile::tempdir().expect("failed to create tmpdir");
+    let db_dir = tmpdir.path().join("db");
+    std::fs::create_dir_all(&db_dir).expect("failed to create db dir");
+    let passwd_file = create_passwd_file(tmpdir.path());
+
+    let broker_port = pick_free_port();
+    let _broker = start_broker(broker_port, &db_dir, &passwd_file, &[]);
+    wait_for_port(broker_port);
+    wait_for_broker_ready(broker_port);
+    let broker_addr = format!("127.0.0.1:{broker_port}");
+
+    let first: SocketAddr = "198.51.100.10:5000".parse().unwrap();
+    let second: SocketAddr = "203.0.113.77:6000".parse().unwrap();
+    let mapped = Arc::new(std::sync::Mutex::new(first));
+    let stun_addr = spawn_fake_stun(Arc::clone(&mapped)).await;
+
+    let mut peer = Peer::new(
+        peer_config("roamer", &broker_addr)
+            .with_stun_server(stun_addr.to_string())
+            .with_lease_secs(2),
+    )
+    .await
+    .expect("peer creation failed");
+    let id = peer.register().await.expect("register failed");
+
+    let mut initial = None;
+    for _ in 0..20 {
+        if public_addr_of(&peer, &id).await.as_deref() == Some(first.to_string().as_str()) {
+            initial = Some(first);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(
+        initial,
+        Some(first),
+        "the initial srflx discovered at registration must be published"
+    );
+
+    *mapped.lock().expect("mapped lock") = second;
+
+    let mut updated = None;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if public_addr_of(&peer, &id).await.as_deref() == Some(second.to_string().as_str()) {
+            updated = Some(second);
+            break;
+        }
+    }
+    assert_eq!(
+        updated,
+        Some(second),
+        "a changed NAT mapping must be re-discovered mid-session and the record updated"
+    );
+
+    peer.shutdown().await.expect("peer shutdown failed");
+}

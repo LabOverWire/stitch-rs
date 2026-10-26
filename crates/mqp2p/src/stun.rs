@@ -14,7 +14,42 @@ const HOLE_PUNCH_MAGIC: [u8; 4] = [0x50, 0x32, 0x50, 0x50];
 
 pub const DEFAULT_STUN_SERVER: &str = "stun.l.google.com:19302";
 
-fn build_binding_request(txn_id: &[u8; 12]) -> [u8; STUN_HEADER_LEN] {
+pub(crate) fn looks_like_binding_response(buf: &[u8]) -> bool {
+    buf.len() >= STUN_HEADER_LEN
+        && u16::from_be_bytes([buf[0], buf[1]]) == STUN_BINDING_RESPONSE
+        && u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) == STUN_MAGIC
+}
+
+pub(crate) async fn resolve_server(stun_server: &str) -> Result<SocketAddr> {
+    tokio::net::lookup_host(stun_server)
+        .await
+        .map_err(|e| Error::Stun {
+            server: unspecified_server(),
+            reason: format!("DNS lookup failed for {stun_server}: {e}"),
+        })?
+        .next()
+        .ok_or_else(|| Error::Stun {
+            server: unspecified_server(),
+            reason: format!("no addresses found for {stun_server}"),
+        })
+}
+
+pub(crate) fn random_txn_id() -> Result<[u8; 12]> {
+    let mut txn_id = [0u8; 12];
+    ring::rand::SystemRandom::new()
+        .fill(&mut txn_id)
+        .map_err(|_| Error::Stun {
+            server: unspecified_server(),
+            reason: "failed to generate random transaction ID".into(),
+        })?;
+    Ok(txn_id)
+}
+
+fn unspecified_server() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 0))
+}
+
+pub(crate) fn build_binding_request(txn_id: &[u8; 12]) -> [u8; STUN_HEADER_LEN] {
     let mut buf = [0u8; STUN_HEADER_LEN];
     let msg_type = STUN_BINDING_REQUEST.to_be_bytes();
     buf[0] = msg_type[0];
@@ -82,7 +117,7 @@ fn parse_mapped_address(attr_value: &[u8]) -> std::result::Result<SocketAddr, St
     }
 }
 
-fn parse_binding_response(
+pub(crate) fn parse_binding_response(
     buf: &[u8],
     txn_id: &[u8; 12],
 ) -> std::result::Result<SocketAddr, String> {
@@ -139,26 +174,8 @@ fn parse_binding_response(
 }
 
 pub async fn discover_external_addr(socket: &UdpSocket, stun_server: &str) -> Result<SocketAddr> {
-    let server_addr: SocketAddr = tokio::net::lookup_host(stun_server)
-        .await
-        .map_err(|e| Error::Stun {
-            server: "0.0.0.0:0".parse().unwrap_or_else(|_| unreachable!()),
-            reason: format!("DNS lookup failed for {stun_server}: {e}"),
-        })?
-        .next()
-        .ok_or_else(|| Error::Stun {
-            server: "0.0.0.0:0".parse().unwrap_or_else(|_| unreachable!()),
-            reason: format!("no addresses found for {stun_server}"),
-        })?;
-
-    let mut txn_id = [0u8; 12];
-    ring::rand::SystemRandom::new()
-        .fill(&mut txn_id)
-        .map_err(|_| Error::Stun {
-            server: server_addr,
-            reason: "failed to generate random transaction ID".into(),
-        })?;
-
+    let server_addr = resolve_server(stun_server).await?;
+    let txn_id = random_txn_id()?;
     let request = build_binding_request(&txn_id);
 
     socket
