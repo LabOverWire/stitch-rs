@@ -908,7 +908,7 @@ impl Store {
     /// Switch the active scope. If a remote is connected, fetches the new
     /// scope's root + children, reconciles them with local state, replays any
     /// buffered live mutations, and atomically swaps the memory cache. When
-    /// offline (or on wasm), loads the scope from persistence if configured.
+    /// offline, loads the scope from persistence if configured.
     /// Emits `ScopeCleared` for the prior scope (if any) and `ScopeLoaded` for
     /// the new one on the memory bus.
     pub async fn replace_scope(&self, scope_id: &str) -> Result<()> {
@@ -925,7 +925,6 @@ impl Store {
             .replace(scope_id.to_string());
 
         if let Some(prev) = previous
-            && prev != scope_id
             && let Some(remote) = &inner.remote
         {
             let _ = remote.close_scope(&prev).await;

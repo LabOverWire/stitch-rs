@@ -830,10 +830,15 @@ async fn second_viewer_connected_replace_scope_sees_seeded_children_in_browser()
     }
     for _ in 0..50 {
         if seeder
-            .pending_mutation_count(project_id.clone())
+            .pending_mutation_count(String::new())
             .await
             .expect("pending count")
             == 0
+            && seeder
+                .pending_mutation_count(project_id.clone())
+                .await
+                .expect("pending count")
+                == 0
         {
             break;
         }
