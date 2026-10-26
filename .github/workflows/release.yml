@@ -47,15 +47,46 @@ jobs:
           fi
 
       - name: Publish stitch-sync
-        run: cargo publish --package stitch-sync || echo "already published"
+        run: |
+          set -euo pipefail
+          if out=$(cargo publish --package stitch-sync 2>&1); then
+            printf '%s\n' "$out"
+          else
+            printf '%s\n' "$out"
+            printf '%s' "$out" | grep -q 'already uploaded' \
+              && echo "stitch-sync already published at this version" \
+              || exit 1
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Wait for crates.io index
-        run: sleep 30
+      - name: Wait for stitch-sync on the crates.io index
+        run: |
+          set -euo pipefail
+          REQ=$(grep '^version' crates/stitch/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "stitch-wasm requires stitch-sync $REQ"
+          for i in $(seq 1 60); do
+            if curl -sf https://index.crates.io/st/it/stitch-sync | grep -q "\"vers\":\"$REQ\""; then
+              echo "stitch-sync $REQ is indexed"
+              exit 0
+            fi
+            echo "waiting for stitch-sync $REQ on the crates.io index ($i/60)"
+            sleep 15
+          done
+          echo "stitch-sync $REQ did not appear on the index in time"
+          exit 1
 
       - name: Publish stitch-wasm
-        run: cargo publish --package stitch-wasm --no-verify || echo "already published"
+        run: |
+          set -euo pipefail
+          if out=$(cargo publish --package stitch-wasm --no-verify 2>&1); then
+            printf '%s\n' "$out"
+          else
+            printf '%s\n' "$out"
+            printf '%s' "$out" | grep -q 'already uploaded' \
+              && echo "stitch-wasm already published at this version" \
+              || exit 1
+          fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
