@@ -875,3 +875,81 @@ async fn scope_opened_before_connect_backfills_on_connect() {
     store_b.shutdown().await.unwrap();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_replace_scope_delivers_children_to_a_second_viewer() {
+    init_tracing();
+    let broker = BrokerHarness::new().start().await.expect("start broker");
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_a),
+        "viewer-a".into(),
+    );
+    store_a.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+
+    store_a
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    for n in 0..5 {
+        store_a
+            .create(
+                "task",
+                "p1",
+                make_record(&[
+                    ("id", json!(format!("t{n}"))),
+                    ("title", json!(format!("seat {n}"))),
+                    ("projectId", json!("p1")),
+                ]),
+                Origin::Local,
+            )
+            .await
+            .unwrap();
+    }
+
+    let flush_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut flushed = false;
+    while tokio::time::Instant::now() < flush_deadline {
+        if store_a.pending_count("").await.unwrap() == 0
+            && store_a.pending_count("p1").await.unwrap() == 0
+        {
+            flushed = true;
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        flushed,
+        "store A must flush the seeded rows to the broker before store B opens the scope"
+    );
+
+    let store_b = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_b),
+        "viewer-b".into(),
+    );
+    store_b.initialize().await.unwrap();
+    wait_for_connected(&store_b).await;
+
+    store_b.replace_scope("p1").await.unwrap();
+
+    let tasks = store_b.snapshot("task", "p1").await.unwrap();
+    assert_eq!(
+        tasks.len(),
+        5,
+        "a replace_scope issued while connected must deliver the scope's existing children synchronously, not leave the second viewer empty"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}

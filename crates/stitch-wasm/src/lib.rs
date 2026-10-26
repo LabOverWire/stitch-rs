@@ -583,12 +583,14 @@ impl Store {
         }
     }
 
-    /// Switch the active scope, loading its rows from persistence into the
-    /// in-memory cache. Use after reopening a persistent store to rehydrate a
-    /// scope's snapshot.
+    /// Switch the active scope. When the remote is connected, fetches the
+    /// scope's root and children from the server and reconciles them into the
+    /// in-memory cache; otherwise loads the scope from persistence. Use after
+    /// reopening a persistent store, or to open a scope created by another
+    /// client, to populate its snapshot.
     ///
     /// # Errors
-    /// Returns an error if the load fails.
+    /// Returns an error if the server open or the persistence load fails.
     #[wasm_bindgen(js_name = "replaceScope")]
     pub async fn replace_scope(&self, scope_id: String) -> Result<(), JsValue> {
         self.inner

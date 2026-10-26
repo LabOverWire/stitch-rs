@@ -782,3 +782,97 @@ async fn child_create_syncs_to_a_live_broker_in_browser() {
         "the child create and its scope version bump must reach the broker"
     );
 }
+
+#[wasm_bindgen_test]
+async fn second_viewer_connected_replace_scope_sees_seeded_children_in_browser() {
+    let Some(url) = option_env!("STITCH_WASM_BROKER_URL") else {
+        return;
+    };
+    let authed_opts = |db_name: &str| {
+        js_sys::JSON::parse(&format!(
+            r#"{{"persistence":{{"dbName":"{db_name}"}},"remote":{{"url":"{url}","username":"testuser","password":"testpass"}}}}"#
+        ))
+        .unwrap()
+    };
+
+    let seeder = stitch_wasm::create_store(config(), authed_opts("stitch-second-viewer-seeder"))
+        .expect("create seeder");
+    seeder.initialize().await.expect("initialize seeder");
+    seeder
+        .set_authenticated_user(Some("testuser".into()))
+        .expect("set seeder user");
+    for _ in 0..50 {
+        if seeder.connection_status().expect("status") == "Connected" {
+            break;
+        }
+        sleep_ms(100).await;
+    }
+
+    let project_id = seeder
+        .create(
+            "project".into(),
+            String::new(),
+            js_sys::JSON::parse(r#"{"name":"shared event"}"#).unwrap(),
+            None,
+        )
+        .await
+        .expect("create project");
+    for n in 0..5 {
+        seeder
+            .create(
+                "task".into(),
+                project_id.clone(),
+                js_sys::JSON::parse(&format!(r#"{{"title":"seat {n}"}}"#)).unwrap(),
+                None,
+            )
+            .await
+            .expect("create task");
+    }
+    for _ in 0..50 {
+        if seeder
+            .pending_mutation_count(String::new())
+            .await
+            .expect("pending count")
+            == 0
+            && seeder
+                .pending_mutation_count(project_id.clone())
+                .await
+                .expect("pending count")
+                == 0
+        {
+            break;
+        }
+        sleep_ms(100).await;
+    }
+
+    let viewer = stitch_wasm::create_store(config(), authed_opts("stitch-second-viewer-viewer"))
+        .expect("create viewer");
+    viewer.initialize().await.expect("initialize viewer");
+    viewer
+        .set_authenticated_user(Some("testuser".into()))
+        .expect("set viewer user");
+    for _ in 0..50 {
+        if viewer.connection_status().expect("status") == "Connected" {
+            break;
+        }
+        sleep_ms(100).await;
+    }
+    assert_eq!(
+        viewer.connection_status().expect("status"),
+        "Connected",
+        "the second viewer must reach Connected before opening the scope"
+    );
+
+    viewer
+        .replace_scope(project_id.clone())
+        .await
+        .expect("replace_scope");
+
+    assert_eq!(
+        viewer
+            .get_child_count("task".into(), project_id.clone())
+            .expect("child count"),
+        5,
+        "a replace_scope issued while connected must deliver the scope's existing children to a second viewer"
+    );
+}

@@ -908,7 +908,7 @@ impl Store {
     /// Switch the active scope. If a remote is connected, fetches the new
     /// scope's root + children, reconciles them with local state, replays any
     /// buffered live mutations, and atomically swaps the memory cache. When
-    /// offline (or on wasm), loads the scope from persistence if configured.
+    /// offline, loads the scope from persistence if configured.
     /// Emits `ScopeCleared` for the prior scope (if any) and `ScopeLoaded` for
     /// the new one on the memory bus.
     pub async fn replace_scope(&self, scope_id: &str) -> Result<()> {
@@ -924,33 +924,27 @@ impl Store {
             .current_scope
             .replace(scope_id.to_string());
 
-        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(prev) = previous
+            && let Some(remote) = &inner.remote
         {
-            if let Some(prev) = previous
-                && prev != scope_id
-                && let Some(remote) = &inner.remote
-            {
-                let _ = remote.close_scope(&prev).await;
-            }
-
-            let connected =
-                inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected;
-            if let (Some(remote), true) = (&inner.remote, connected) {
-                let outcome = {
-                    let _suppress = inner
-                        .persistence
-                        .as_ref()
-                        .map(|p| p.suppress_notifications());
-                    inner
-                        .open_scope_with_server(scope_id, remote.as_ref())
-                        .await
-                };
-                inner.state.lock_guard().current_scope_server_synced = outcome.is_ok();
-                return outcome;
-            }
+            let _ = remote.close_scope(&prev).await;
         }
-        #[cfg(target_arch = "wasm32")]
-        drop(previous);
+
+        let connected =
+            inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected;
+        if let (Some(remote), true) = (&inner.remote, connected) {
+            let outcome = {
+                let _suppress = inner
+                    .persistence
+                    .as_ref()
+                    .map(|p| p.suppress_notifications());
+                inner
+                    .open_scope_with_server(scope_id, remote.as_ref())
+                    .await
+            };
+            inner.state.lock_guard().current_scope_server_synced = outcome.is_ok();
+            return outcome;
+        }
 
         if inner.persistence.is_some() {
             let bundle = inner.load_bundle_from_persistence(scope_id).await?;

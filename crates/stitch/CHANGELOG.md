@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On `wasm32`, `replace_scope` issued while the transport was already
+  `Connected` never fetched the scope from the server — the server-open branch
+  was gated behind `#[cfg(not(target_arch = "wasm32"))]`, so it only loaded from
+  local persistence. A second viewer opening a scope it did not create saw an
+  empty view, and server population depended entirely on the connect-time
+  backfill, which races `replace_scope` for the scope lock and no-ops when it
+  wins before the scope is set. The connected server-open path now runs on all
+  targets, so a connected `replace_scope` reconciles the scope's root and
+  children itself regardless of the backfill race. Native behavior is unchanged.
+
 ## [0.6.1] - 2026-10-25
 
 ### Fixed
