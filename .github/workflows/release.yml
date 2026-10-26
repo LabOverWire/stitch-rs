@@ -53,7 +53,7 @@ jobs:
             printf '%s\n' "$out"
           else
             printf '%s\n' "$out"
-            printf '%s' "$out" | grep -q 'already uploaded' \
+            printf '%s' "$out" | grep -qE 'already uploaded|already exists on crates\.io' \
               && echo "stitch-sync already published at this version" \
               || exit 1
           fi
@@ -83,7 +83,7 @@ jobs:
             printf '%s\n' "$out"
           else
             printf '%s\n' "$out"
-            printf '%s' "$out" | grep -q 'already uploaded' \
+            printf '%s' "$out" | grep -qE 'already uploaded|already exists on crates\.io' \
               && echo "stitch-wasm already published at this version" \
               || exit 1
           fi
