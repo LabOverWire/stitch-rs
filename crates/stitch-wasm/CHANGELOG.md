@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-25
+
+### Fixed
+
+- A scope opened before the remote connected rebuilt empty and never backfilled
+  on connect, leaving a permanently empty view until a reload. Inherited from
+  stitch-sync: the store now re-opens the current scope on connect, so a scope
+  opened during connection warmup converges. See the stitch-sync changelog.
+
+## [0.6.0] - 2026-10-22
+
 ### Added
 
 - `Store.updateIf` / `Store.deleteIf` — compare-and-set update/delete gated on a

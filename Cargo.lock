@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-p2p"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ed25519-dalek",
  "fjall",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-sync"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "flume",
@@ -2386,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "stitch-wasm"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "futures",
  "js-sys",

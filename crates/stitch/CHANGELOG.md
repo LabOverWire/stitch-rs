@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-25
+
 ### Fixed
 
 - A scope opened with `replace_scope` while the remote was still connecting was
@@ -16,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root and children, so a scope opened during connection warmup converges
   without reopening. Applies to persistence-backed stores (native and wasm);
   remote-only stores with no persistence are unaffected.
+
+## [0.6.0] - 2026-10-22
 
 ### Added
 

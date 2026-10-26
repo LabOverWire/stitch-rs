@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
 ### Changed
 
-- The gated-discovery membership-proof handshake is now **request-driven**. Each
+- **Breaking (gated-discovery wire):** the gated-discovery membership-proof
+  handshake is now **request-driven** and does not interoperate with a 0.2.0
+  gated peer, which pushed its proof unconditionally. Each
   side asks for the peer's proof only when it cannot admit the peer from local
   membership, and serves its own proof only when asked — a proof is never pushed
   unconditionally, so it is no longer disclosed to peers that already admit the
