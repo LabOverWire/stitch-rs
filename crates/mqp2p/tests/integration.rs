@@ -863,8 +863,8 @@ async fn spawn_fake_stun(mapped: Arc<std::sync::Mutex<SocketAddr>>) -> SocketAdd
     addr
 }
 
-async fn public_addr_of(sig: &mqp2p::signaling::SignalingClient, id: &str) -> Option<String> {
-    sig.list_peers()
+async fn public_addr_of(peer: &Peer, id: &str) -> Option<String> {
+    peer.discover_peers()
         .await
         .ok()?
         .into_iter()
@@ -895,17 +895,8 @@ async fn srflx_change_is_rediscovered_and_the_record_updated() {
     let mapped = Arc::new(std::sync::Mutex::new(first));
     let stun_addr = spawn_fake_stun(Arc::clone(&mapped)).await;
 
-    let opts =
-        ConnectOptions::new("srflx-observer".to_string()).with_credentials("testuser", b"testpass");
-    let sig = mqp2p::signaling::SignalingClient::new(MqttClient::with_options(opts));
-    sig.connect(&broker_addr)
-        .await
-        .expect("observer connect failed");
-
     let mut peer = Peer::new(
-        PeerConfig::new("roamer", &broker_addr)
-            .with_bind_addr("127.0.0.1:0".parse().unwrap())
-            .with_credentials("testuser", "testpass")
+        peer_config("roamer", &broker_addr)
             .with_stun_server(stun_addr.to_string())
             .with_lease_secs(2),
     )
@@ -915,7 +906,7 @@ async fn srflx_change_is_rediscovered_and_the_record_updated() {
 
     let mut initial = None;
     for _ in 0..20 {
-        if public_addr_of(&sig, &id).await.as_deref() == Some(first.to_string().as_str()) {
+        if public_addr_of(&peer, &id).await.as_deref() == Some(first.to_string().as_str()) {
             initial = Some(first);
             break;
         }
@@ -932,7 +923,7 @@ async fn srflx_change_is_rediscovered_and_the_record_updated() {
     let mut updated = None;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        if public_addr_of(&sig, &id).await.as_deref() == Some(second.to_string().as_str()) {
+        if public_addr_of(&peer, &id).await.as_deref() == Some(second.to_string().as_str()) {
             updated = Some(second);
             break;
         }
