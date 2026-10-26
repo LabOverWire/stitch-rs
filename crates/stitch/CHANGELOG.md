@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A scope opened with `replace_scope` while the remote was still connecting was
+  rebuilt empty and never backfilled once the transport reached `Connected`,
+  leaving consumers with a permanently empty view until a reload. On connect,
+  the store now re-opens the current scope against the server and reconciles its
+  root and children, so a scope opened during connection warmup converges
+  without reopening. Applies to persistence-backed stores (native and wasm);
+  remote-only stores with no persistence are unaffected.
+
 ### Added
 
 - `Store::update_if` / `Store::delete_if` — compare-and-set writes gated on a

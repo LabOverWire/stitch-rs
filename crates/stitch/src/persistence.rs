@@ -58,6 +58,11 @@ impl PersistenceLayer {
         self.suppress.store(suppress, Ordering::SeqCst);
     }
 
+    pub fn suppress_notifications(&self) -> SuppressGuard<'_> {
+        self.suppress.store(true, Ordering::SeqCst);
+        SuppressGuard { layer: self }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn db(&self) -> DynDb {
         self.db.read_guard().clone()
@@ -245,5 +250,15 @@ impl PersistenceLayer {
         data.get(&self.config.scope.scope_field)
             .and_then(Value::as_str)
             .map(str::to_string)
+    }
+}
+
+pub struct SuppressGuard<'a> {
+    layer: &'a PersistenceLayer,
+}
+
+impl Drop for SuppressGuard<'_> {
+    fn drop(&mut self) {
+        self.layer.suppress.store(false, Ordering::SeqCst);
     }
 }

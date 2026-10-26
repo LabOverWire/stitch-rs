@@ -62,6 +62,7 @@ struct StoreInner {
 
 struct StoreState {
     current_scope: Option<String>,
+    current_scope_server_synced: bool,
     initial_sync_done: bool,
     authenticated_user: Option<String>,
     last_connection_status: ConnectionStatus,
@@ -935,15 +936,16 @@ impl Store {
             let connected =
                 inner.state.lock_guard().last_connection_status == ConnectionStatus::Connected;
             if let (Some(remote), true) = (&inner.remote, connected) {
-                if let Some(persistence) = &inner.persistence {
-                    persistence.set_suppress_notifications(true);
-                }
-                let outcome = inner
-                    .open_scope_with_server(scope_id, remote.as_ref())
-                    .await;
-                if let Some(persistence) = &inner.persistence {
-                    persistence.set_suppress_notifications(false);
-                }
+                let outcome = {
+                    let _suppress = inner
+                        .persistence
+                        .as_ref()
+                        .map(|p| p.suppress_notifications());
+                    inner
+                        .open_scope_with_server(scope_id, remote.as_ref())
+                        .await
+                };
+                inner.state.lock_guard().current_scope_server_synced = outcome.is_ok();
                 return outcome;
             }
         }
@@ -954,6 +956,7 @@ impl Store {
             let bundle = inner.load_bundle_from_persistence(scope_id).await?;
             inner.memory.load_scope(scope_id, bundle).await?;
         }
+        inner.state.lock_guard().current_scope_server_synced = false;
         Ok(())
     }
 
@@ -1282,6 +1285,7 @@ impl StoreInner {
             queue,
             state: Mutex::new(StoreState {
                 current_scope: None,
+                current_scope_server_synced: false,
                 initial_sync_done: options.remote.is_none(),
                 authenticated_user: None,
                 last_connection_status: ConnectionStatus::Offline,
@@ -1335,9 +1339,8 @@ impl StoreInner {
         Ok(inner)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     async fn open_scope_with_server(
-        self: &Arc<Self>,
+        self: &Shared<Self>,
         scope_id: &str,
         remote: &RemoteSyncLayer,
     ) -> Result<()> {
@@ -1867,6 +1870,36 @@ async fn on_connected(inner: Shared<StoreInner>) {
             .sync_root_entity_list(&accessor, queue_ref, user.as_deref())
             .await;
         inner.state.lock_guard().initial_sync_done = true;
+        backfill_current_scope(&inner, remote).await;
+    }
+}
+
+async fn backfill_current_scope(inner: &Shared<StoreInner>, remote: &Shared<RemoteSyncLayer>) {
+    let Some(persistence) = &inner.persistence else {
+        return;
+    };
+    let _serializer = inner.replace_scope_lock.lock().await;
+    let scope_id = {
+        let state = inner.state.lock_guard();
+        if state.current_scope_server_synced {
+            return;
+        }
+        match &state.current_scope {
+            Some(scope_id) => scope_id.clone(),
+            None => return,
+        }
+    };
+    let outcome = {
+        let _suppress = persistence.suppress_notifications();
+        inner
+            .open_scope_with_server(&scope_id, remote.as_ref())
+            .await
+    };
+    match outcome {
+        Ok(()) => inner.state.lock_guard().current_scope_server_synced = true,
+        Err(err) => {
+            tracing::warn!(scope = %scope_id, error = %err, "scope backfill on connect failed")
+        }
     }
 }
 
@@ -2084,6 +2117,7 @@ mod tests {
             queue: None,
             state: Mutex::new(StoreState {
                 current_scope: None,
+                current_scope_server_synced: false,
                 initial_sync_done: true,
                 authenticated_user: None,
                 last_connection_status: status,
