@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-26
+
 ### Fixed
 
 - The advertised server-reflexive address is now re-discovered mid-session. STUN

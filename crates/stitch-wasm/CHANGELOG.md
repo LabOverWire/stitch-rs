@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-26
+
+### Fixed
+
+- A second viewer opening a scope it did not create saw an empty view a large
+  fraction of the time, even when the open was issued while connected. Inherited
+  from stitch-sync: on wasm, a connected `replaceScope` now fetches the scope's
+  root and children from the server instead of only loading local persistence,
+  so a late subscriber converges without a reload. See the stitch-sync changelog.
+
 ## [0.6.1] - 2026-10-25
 
 ### Fixed
