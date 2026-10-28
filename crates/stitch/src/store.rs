@@ -517,11 +517,15 @@ impl Store {
                     }
                 }
                 Err(err) if err.is_not_found() => {
-                    inner.rollback_local_row(entity, id, origin).await;
-                    if let Some(queue) = &inner.queue {
-                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
+                    if inner.pending_insert_exists(entity, id).await {
+                        inner.flush_notify.notify_one();
+                    } else {
+                        inner.rollback_local_row(entity, id, origin).await;
+                        if let Some(queue) = &inner.queue {
+                            let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
                 Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
@@ -616,11 +620,14 @@ impl Store {
                     }
                 }
                 Err(err) if err.is_not_found() => {
-                    inner.rollback_local_row(entity, id, origin).await;
-                    if let Some(queue) = &inner.queue {
-                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
+                    if inner.pending_insert_exists(entity, id).await {
+                        inner.flush_notify.notify_one();
+                    } else {
+                        if let Some(queue) = &inner.queue {
+                            let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
                 Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
@@ -1444,6 +1451,24 @@ impl StoreInner {
             && !origin.skips_persistence()
         {
             let _ = persistence.delete(entity, id, origin).await;
+        }
+    }
+
+    async fn pending_insert_exists(&self, entity: &str, id: &str) -> bool {
+        let Some(queue) = &self.queue else {
+            return false;
+        };
+        match queue.has_pending_insert(entity, id).await {
+            Ok(exists) => exists,
+            Err(err) => {
+                tracing::warn!(
+                    entity = %entity,
+                    id = %id,
+                    error = %err,
+                    "has_pending_insert check failed; treating as no pending insert"
+                );
+                false
+            }
         }
     }
 

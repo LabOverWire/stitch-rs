@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no error to act on. Both now reject with `Error::NotFound`, drop the stale
   local row, and clear the doomed queued mutation so it is not retried in a
   loop, matching how `create` surfaces a `409`/`403`. `update_if`/`delete_if`
-  likewise drop the stale local row on a `404`.
+  likewise drop the stale local row on a `404`. When an insert for the same row
+  is still queued (a create whose remote sync has not yet succeeded), the `404`
+  is instead treated as "not created yet": the row and its queued mutations are
+  kept and the flush loop is notified, so a transiently-failed create is not
+  resurrected server-side by the next flush.
 - A `404`/`403`/`409`/`412` error parsed from a broker reply that omitted the
   `entity`/`id` fields rendered as `entity not found: /` with both empty. The
   error now falls back to the entity and id the caller passed, so a `notFound`
