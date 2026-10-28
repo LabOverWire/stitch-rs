@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-28
+
 ### Fixed
 
 - On a live connection, `update` and `delete` silently resolved `Ok` when the
