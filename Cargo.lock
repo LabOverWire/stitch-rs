@@ -1379,9 +1379,9 @@ dependencies = [
 
 [[package]]
 name = "mqdb-agent"
-version = "0.8.38"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01dbe0edfe437c74fb41745fe510e7735e9b9e049588f565d669c4855f484625"
+checksum = "5139f203ba1552ea06f2be7cb8968095790f3944a0ba625fd49be2e117fb4ea0"
 dependencies = [
  "arc-swap",
  "comfy-table",

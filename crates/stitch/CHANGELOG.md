@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped the native `mqdb-agent` dependency to `0.9.0`. The agent is used only
+  internally (local fjall-backed persistence and the in-process broker the test
+  harness spins up); no public API changed.
+
 ## [0.6.3] - 2026-10-28
 
 ### Fixed
