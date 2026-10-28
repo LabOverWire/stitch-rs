@@ -276,8 +276,13 @@ impl SyncEngine {
                 .or_insert_with(|| Value::String(scope_id.to_string()));
         }
         let topic = format!("{}/{}/create", self.prefix, entity);
+        let create_id = data
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let response = self.request(&topic, Value::Object(data)).await?;
-        check_response(&response)?;
+        check_response(&response, entity, &create_id)?;
         let id = extract_id(&response)?;
         if is_child && !scope_id.is_empty() {
             self.bump_scope_version(scope_id).await?;
@@ -294,7 +299,7 @@ impl SyncEngine {
     ) -> Result<()> {
         let topic = format!("{}/{}/{}/update", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(data)).await?;
-        check_response(&response)?;
+        check_response(&response, entity, id)?;
         let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
         if is_child && !scope_id.is_empty() {
             self.bump_scope_version(scope_id).await?;
@@ -305,7 +310,7 @@ impl SyncEngine {
     pub async fn sync_delete(&self, entity: &str, scope_id: &str, id: &str) -> Result<()> {
         let topic = format!("{}/{}/{}/delete", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(Map::new())).await?;
-        check_response(&response)?;
+        check_response(&response, entity, id)?;
         let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
         if is_child && !scope_id.is_empty() {
             self.bump_scope_version(scope_id).await?;
@@ -327,7 +332,7 @@ impl SyncEngine {
         );
         let topic = format!("{}/{}/{}/update", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(data)).await?;
-        check_response(&response)?;
+        check_response(&response, entity, id)?;
         let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
         if is_child && !scope_id.is_empty() {
             self.bump_scope_version(scope_id).await?;
@@ -349,7 +354,7 @@ impl SyncEngine {
         );
         let topic = format!("{}/{}/{}/delete", self.prefix, entity, id);
         let response = self.request(&topic, Value::Object(payload)).await?;
-        check_response(&response)?;
+        check_response(&response, entity, id)?;
         let is_child = self.config.scope.child_entities.iter().any(|e| e == entity);
         if is_child && !scope_id.is_empty() {
             self.bump_scope_version(scope_id).await?;
@@ -367,7 +372,7 @@ impl SyncEngine {
             self.prefix, self.config.scope.root_entity, scope_id
         );
         let response = self.request(&topic, Value::Object(payload)).await?;
-        check_response(&response)?;
+        check_response(&response, &self.config.scope.root_entity, scope_id)?;
         self.state
             .applied_version
             .lock_guard()
@@ -387,7 +392,7 @@ impl SyncEngine {
         let topic = format!("{}/{}/{}", self.prefix, entity, id);
         match self.request(&topic, Value::Object(Map::new())).await {
             Ok(response) => {
-                if let Err(err) = check_response(&response) {
+                if let Err(err) = check_response(&response, entity, id) {
                     if err.is_not_found() {
                         return Ok(None);
                     }
@@ -420,7 +425,7 @@ impl SyncEngine {
         }
         let topic = format!("{}/{}/list", self.prefix, entity);
         let response = self.request(&topic, Value::Object(payload)).await?;
-        check_response(&response)?;
+        check_response(&response, entity, "")?;
         let data = response.get("data").cloned().unwrap_or(Value::Null);
         let Value::Array(arr) = data else {
             return Ok(Vec::new());
@@ -791,7 +796,7 @@ fn build_mutation(entity: String, op: Operation, payload: Value) -> Option<SyncM
     })
 }
 
-fn check_response(response: &Map<String, Value>) -> Result<()> {
+fn check_response(response: &Map<String, Value>, entity: &str, id: &str) -> Result<()> {
     let status = response.get("status").and_then(Value::as_str);
     if status != Some("error") {
         return Ok(());
@@ -805,12 +810,14 @@ fn check_response(response: &Map<String, Value>) -> Result<()> {
     let entity = response
         .get("entity")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(entity)
         .to_string();
     let id = response
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(id)
         .to_string();
     Err(match code {
         400 => Error::Rejected(message),
@@ -859,12 +866,12 @@ mod tests {
     fn check_response_passes_a_non_error_status() {
         let mut map = Map::new();
         map.insert("status".into(), Value::String("ok".into()));
-        assert!(check_response(&map).is_ok());
+        assert!(check_response(&map, "task", "t1").is_ok());
     }
 
     #[test]
     fn check_response_maps_a_bad_request_to_a_permanent_rejection() {
-        let err = check_response(&error_response(400)).unwrap_err();
+        let err = check_response(&error_response(400), "task", "t1").unwrap_err();
         assert!(matches!(err, Error::Rejected(_)));
         assert!(err.is_permanent_mutation());
         assert!(!err.is_transient());
@@ -872,14 +879,30 @@ mod tests {
 
     #[test]
     fn check_response_maps_a_server_error_to_a_transient_error() {
-        let err = check_response(&error_response(500)).unwrap_err();
+        let err = check_response(&error_response(500), "task", "t1").unwrap_err();
         assert!(matches!(err, Error::Mqtt(_)));
         assert!(err.is_transient());
     }
 
     #[test]
     fn check_response_maps_a_conflict() {
-        let err = check_response(&error_response(409)).unwrap_err();
+        let err = check_response(&error_response(409), "task", "t1").unwrap_err();
         assert!(err.is_conflict());
+    }
+
+    #[test]
+    fn check_response_falls_back_to_caller_entity_and_id_when_absent() {
+        let err = check_response(&error_response(404), "task", "t1").unwrap_err();
+        assert!(err.is_not_found());
+        assert_eq!(err.to_string(), "entity not found: task/t1");
+    }
+
+    #[test]
+    fn check_response_prefers_server_entity_and_id_when_present() {
+        let mut map = error_response(404);
+        map.insert("entity".into(), Value::String("hold".into()));
+        map.insert("id".into(), Value::String("h9".into()));
+        let err = check_response(&map, "task", "t1").unwrap_err();
+        assert_eq!(err.to_string(), "entity not found: hold/h9");
     }
 }

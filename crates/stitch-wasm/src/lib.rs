@@ -502,7 +502,11 @@ impl Store {
             .map_err(stitch_err)
     }
 
-    /// Delete a row. No-op if absent.
+    /// Delete a row.
+    ///
+    /// On a live connection, a `404` from the server (the row was already
+    /// deleted out from under a stale local copy) drops the stale row and
+    /// rejects with an `err.kind = "notFound"` error.
     ///
     /// # Errors
     /// Returns an error if the write fails.
