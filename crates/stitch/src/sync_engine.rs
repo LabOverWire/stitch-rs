@@ -645,10 +645,8 @@ fn handle_scope_message(state: &EngineState, msg: IncomingMessage) {
 
     let scope_id = parsed.scope_id.clone();
     let awaiting = state.awaiting_state.lock_guard().contains(&scope_id);
-    if awaiting {
-        if let Some(list) = state.buffered.lock_guard().get_mut(&scope_id) {
-            list.push(mutation);
-        }
+    if awaiting && let Some(list) = state.buffered.lock_guard().get_mut(&scope_id) {
+        list.push(mutation);
         return;
     }
     if is_own {
@@ -973,5 +971,20 @@ mod tests {
             rx.try_recv().is_err(),
             "own-origin events must not echo to the bus outside the scope-open window"
         );
+    }
+
+    #[test]
+    fn remote_event_is_delivered_when_awaiting_but_buffer_already_drained() {
+        let state = scope_engine_state("client-a");
+        state.awaiting_state.lock_guard().insert("e1".to_string());
+        let mut rx = state.mutation_bus.subscribe();
+
+        handle_scope_message(&state, own_created_message("client-b"));
+
+        let delivered = rx
+            .try_recv()
+            .expect("remote event must reach the bus when the awaiting flag outlives the buffer");
+        assert_eq!(delivered.scope_id, "e1");
+        assert_eq!(delivered.mutation.id, "h1");
     }
 }
