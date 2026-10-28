@@ -415,6 +415,10 @@ impl Store {
 
     /// Partial-update an existing row. `fields` is merged into the row;
     /// null-valued entries are stripped before write (matching TS behavior).
+    ///
+    /// On a live connection, if the server rejects the write with `404`
+    /// (the row was deleted out from under a stale local copy), the stale row
+    /// is removed locally and the call returns [`Error::NotFound`].
     pub async fn update(
         &self,
         entity: &str,
@@ -512,7 +516,14 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
-                Err(err) if err.is_not_found() || err.is_transient() => {
+                Err(err) if err.is_not_found() => {
+                    inner.rollback_local_row(entity, id, origin).await;
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
+                    }
+                    return Err(err);
+                }
+                Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -524,7 +535,9 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a row. No-op if the row doesn't exist.
+    /// Delete a row. No-op if the row doesn't exist locally. On a live
+    /// connection, if the server rejects the delete with `404`, the stale row
+    /// is removed locally and the call returns [`Error::NotFound`].
     pub async fn delete(&self, entity: &str, id: &str, origin: Origin) -> Result<()> {
         let inner = self.inner()?;
         let scope_field = &inner.config.scope.scope_field;
@@ -602,7 +615,14 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
-                Err(err) if err.is_not_found() || err.is_transient() => {
+                Err(err) if err.is_not_found() => {
+                    inner.rollback_local_row(entity, id, origin).await;
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
+                    }
+                    return Err(err);
+                }
+                Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
                 }
                 Err(err) => {
@@ -678,7 +698,9 @@ impl Store {
     /// still equals `expected_version`, returning the new version. Requires a
     /// live remote — it is sent to the broker first (never queued) and applied
     /// locally only on success; a stale version yields
-    /// [`Error::PreconditionFailed`] with no local change.
+    /// [`Error::PreconditionFailed`] with no local change. If the server has
+    /// no such row, the stale local copy is removed and the call returns
+    /// [`Error::NotFound`].
     pub async fn update_if(
         &self,
         entity: &str,
@@ -696,9 +718,18 @@ impl Store {
             return Err(Error::ConnectionClosed);
         }
         let scope_id = Self::resolve_scope_for_cas(inner, entity, id).await?;
-        let new_version = remote
+        let new_version = match remote
             .sync_update_checked(entity, &scope_id, id, fields.clone(), expected_version)
-            .await?;
+            .await
+        {
+            Ok(version) => version,
+            Err(err) => {
+                if err.is_not_found() {
+                    inner.rollback_local_row(entity, id, Origin::Local).await;
+                }
+                return Err(err);
+            }
+        };
         let mut local = fields;
         local.insert("_version".to_string(), Value::from(new_version));
         if let Err(e) = inner
@@ -729,7 +760,8 @@ impl Store {
     /// Compare-and-set delete: remove the row only if its server version still
     /// equals `expected_version`. Same remote-first, online-only semantics as
     /// [`Store::update_if`]; a stale version yields [`Error::PreconditionFailed`]
-    /// with no local change.
+    /// with no local change. If the server has no such row, the stale local
+    /// copy is removed and the call returns [`Error::NotFound`].
     pub async fn delete_if(&self, entity: &str, id: &str, expected_version: u64) -> Result<()> {
         let inner = self.inner()?;
         let Some(remote) = &inner.remote else {
@@ -741,9 +773,15 @@ impl Store {
             return Err(Error::ConnectionClosed);
         }
         let scope_id = Self::resolve_scope_for_cas(inner, entity, id).await?;
-        remote
+        if let Err(err) = remote
             .sync_delete_checked(entity, &scope_id, id, expected_version)
-            .await?;
+            .await
+        {
+            if err.is_not_found() {
+                inner.rollback_local_row(entity, id, Origin::Local).await;
+            }
+            return Err(err);
+        }
         if let Err(e) = inner.memory.delete(entity, id, Origin::Local).await {
             tracing::warn!(
                 entity,

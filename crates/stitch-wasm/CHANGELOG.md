@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `update`/`delete` on a connected store resolved successfully when the broker
+  answered `404` for a row the client still held locally (a stale copy that
+  missed a delete), so the promise never rejected and the phantom row stayed in
+  the store. They now reject with an `err.kind = "notFound"` error and drop the
+  stale local row; `updateIf`/`deleteIf` likewise drop it, and the `notFound`
+  message now names the entity and id instead of reading `entity not found: /`.
+  Inherited from stitch-sync; see its changelog.
+
 ## [0.6.2] - 2026-10-26
 
 ### Fixed

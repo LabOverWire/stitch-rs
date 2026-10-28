@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On a live connection, `update` and `delete` silently resolved `Ok` when the
+  broker answered `404` for a row the caller still held locally (a stale copy
+  that missed a delete), swallowing the error and leaving the phantom row in the
+  cache — a client heartbeating a lease via `update` kept its claim forever with
+  no error to act on. Both now reject with `Error::NotFound`, drop the stale
+  local row, and clear the doomed queued mutation so it is not retried in a
+  loop, matching how `create` surfaces a `409`/`403`. `update_if`/`delete_if`
+  likewise drop the stale local row on a `404`.
+- A `404`/`403`/`409`/`412` error parsed from a broker reply that omitted the
+  `entity`/`id` fields rendered as `entity not found: /` with both empty. The
+  error now falls back to the entity and id the caller passed, so a `notFound`
+  from `update_if` reads `entity not found: <entity>/<id>`.
+
 ## [0.6.2] - 2026-10-26
 
 ### Fixed

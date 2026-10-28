@@ -9,7 +9,7 @@ use stitch::config::{
 };
 use stitch::types::StoreEvent;
 use stitch::{Origin, Store, StoreOptions};
-use stitch_harness::BrokerHarness;
+use stitch_harness::{BrokerHarness, RunningBroker};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -947,6 +947,144 @@ async fn connected_replace_scope_delivers_children_to_a_second_viewer() {
         tasks.len(),
         5,
         "a replace_scope issued while connected must deliver the scope's existing children synchronously, not leave the second viewer empty"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+async fn hold_stale_row_server_deleted() -> (RunningBroker, TempDir, TempDir, Store, Store) {
+    init_tracing();
+    let broker = BrokerHarness::new().start().await.expect("start broker");
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_a),
+        "a-holder".into(),
+    );
+    let store_b = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_b),
+        "b-deleter".into(),
+    );
+    store_a.initialize().await.unwrap();
+    store_b.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+    wait_for_connected(&store_b).await;
+
+    store_a
+        .create(
+            "project",
+            "",
+            make_record(&[("id", json!("p1")), ("name", json!("Alpha"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store_a
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t1")),
+                ("title", json!("hold")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+
+    store_b.replace_scope("p1").await.unwrap();
+    for _ in 0..50 {
+        if store_b.read("task", "t1").await.unwrap().is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    store_b.delete("task", "t1", Origin::Local).await.unwrap();
+    assert!(
+        store_b.read("task", "t1").await.unwrap().is_none(),
+        "store_b should have deleted t1 server-side"
+    );
+
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        store_a.read("task", "t1").await.unwrap().is_some(),
+        "store_a must still hold the stale t1 (it never opened scope p1, so it missed the delete)"
+    );
+
+    (broker, dir_a, dir_b, store_a, store_b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_update_on_server_deleted_row_rejects_not_found() {
+    let (broker, _da, _db, store_a, store_b) = hold_stale_row_server_deleted().await;
+
+    let result = store_a
+        .update(
+            "task",
+            "t1",
+            make_record(&[("title", json!("heartbeat"))]),
+            Origin::Local,
+        )
+        .await;
+
+    assert!(
+        result.as_ref().is_err_and(stitch::Error::is_not_found),
+        "update on a connected store must reject notFound when the broker answers 404, got {result:?}"
+    );
+    assert!(
+        store_a.read("task", "t1").await.unwrap().is_none(),
+        "the stale local row must be dropped after a server 404"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_delete_on_server_deleted_row_rejects_not_found() {
+    let (broker, _da, _db, store_a, store_b) = hold_stale_row_server_deleted().await;
+
+    let result = store_a.delete("task", "t1", Origin::Local).await;
+
+    assert!(
+        result.as_ref().is_err_and(stitch::Error::is_not_found),
+        "delete on a connected store must reject notFound when the broker answers 404, got {result:?}"
+    );
+    assert!(
+        store_a.read("task", "t1").await.unwrap().is_none(),
+        "the stale local row must be dropped after a server 404"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn update_if_not_found_message_names_entity_and_id() {
+    let (broker, _da, _db, store_a, store_b) = hold_stale_row_server_deleted().await;
+
+    let err = store_a
+        .update_if(
+            "task",
+            "t1",
+            make_record(&[("title", json!("heartbeat"))]),
+            1,
+        )
+        .await
+        .expect_err("update_if on a server-deleted row must reject");
+    assert!(err.is_not_found(), "expected notFound, got {err:?}");
+    assert_eq!(err.to_string(), "entity not found: task/t1");
+    assert!(
+        store_a.read("task", "t1").await.unwrap().is_none(),
+        "the stale local row must be dropped after a server 404"
     );
 
     store_a.shutdown().await.unwrap();
