@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A write made while a scope was being opened could be silently deleted from the
+  local store when the scope snapshot arrived. If the snapshot was taken before
+  the write reached the server, the open's `reconcile_children` removed the local
+  row (absent from the server list and no longer pending), and the write's own
+  change event — which would restore it — was dropped as a self-echo before it
+  could be buffered, so the row was lost locally while the server kept it, with
+  no error. Own-origin events for a scope that is awaiting its snapshot are now
+  buffered and replayed after the reconcile, like events from other clients, so
+  a write acknowledged after the open began survives.
+
 ### Changed
 
 - Bumped the native `mqdb-agent` dependency to `0.9.0`. The agent is used only

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A row created with `create` while a scope was being opened via `replaceScope`
+  could vanish from the local store when the scope snapshot arrived, while the
+  server kept it and no error was raised. Inherited from stitch-sync: own-origin
+  events for a scope awaiting its snapshot are now buffered and replayed after
+  the reconcile, so a write acknowledged after the open began survives. See the
+  stitch-sync changelog.
+
 ## [0.6.3] - 2026-10-28
 
 ### Fixed

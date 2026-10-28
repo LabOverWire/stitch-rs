@@ -624,9 +624,7 @@ fn handle_response(state: &EngineState, msg: IncomingMessage) {
 }
 
 fn handle_scope_message(state: &EngineState, msg: IncomingMessage) {
-    if own_user_property(state, &msg) {
-        return;
-    }
+    let is_own_origin = own_user_property(state, &msg);
     let Some(parsed) = parse_scoped_topic(&state.prefix, &state.root_entity, &msg.topic) else {
         return;
     };
@@ -640,17 +638,20 @@ fn handle_scope_message(state: &EngineState, msg: IncomingMessage) {
         Ok(v) => v,
         Err(_) => return,
     };
-    if sender_is_self(&state.client_id, &payload) {
-        return;
-    }
+    let is_own = is_own_origin || sender_is_self(&state.client_id, &payload);
     let Some(mutation) = build_mutation(parsed.entity.clone(), event_op, payload) else {
         return;
     };
 
     let scope_id = parsed.scope_id.clone();
-    let buffered = state.awaiting_state.lock_guard().contains(&scope_id);
-    if buffered && let Some(list) = state.buffered.lock_guard().get_mut(&scope_id) {
-        list.push(mutation);
+    let awaiting = state.awaiting_state.lock_guard().contains(&scope_id);
+    if awaiting {
+        if let Some(list) = state.buffered.lock_guard().get_mut(&scope_id) {
+            list.push(mutation);
+        }
+        return;
+    }
+    if is_own {
         return;
     }
     let _ = state
@@ -904,5 +905,73 @@ mod tests {
         map.insert("id".into(), Value::String("h9".into()));
         let err = check_response(&map, "task", "t1").unwrap_err();
         assert_eq!(err.to_string(), "entity not found: hold/h9");
+    }
+
+    fn scope_engine_state(client_id: &str) -> EngineState {
+        let (mutation_bus, _) = broadcast::channel(16);
+        let (connection_status, _) = broadcast::channel(16);
+        EngineState {
+            pending_requests: Mutex::new(HashMap::new()),
+            subscribed_scopes: Mutex::new(HashSet::new()),
+            awaiting_state: Mutex::new(HashSet::new()),
+            buffered: Mutex::new(HashMap::new()),
+            applied_version: Mutex::new(HashMap::new()),
+            mutation_bus,
+            connection_status,
+            session_invalid: Mutex::new(None),
+            client_id: client_id.to_string(),
+            prefix: "$DB".to_string(),
+            response_prefix: "$DB/clients".to_string(),
+            root_entity: "event".to_string(),
+            top_level_patterns: Vec::new(),
+        }
+    }
+
+    fn own_created_message(client_id: &str) -> IncomingMessage {
+        let payload = serde_json::json!({
+            "id": "h1",
+            "data": { "id": "h1", "eventId": "e1", "seat": "A1" },
+            "sender": client_id,
+        });
+        IncomingMessage {
+            topic: "$DB/event/e1/hold/events/created".to_string(),
+            payload: serde_json::to_vec(&payload).unwrap(),
+            user_properties: vec![(ORIGIN_USER_PROPERTY.to_string(), client_id.to_string())],
+        }
+    }
+
+    #[test]
+    fn own_created_event_is_buffered_while_scope_is_awaiting_state() {
+        let state = scope_engine_state("client-a");
+        state.awaiting_state.lock_guard().insert("e1".to_string());
+        state
+            .buffered
+            .lock_guard()
+            .insert("e1".to_string(), Vec::new());
+
+        handle_scope_message(&state, own_created_message("client-a"));
+
+        let buffered = state.buffered.lock_guard();
+        let list = buffered.get("e1").expect("scope buffer exists");
+        assert_eq!(
+            list.len(),
+            1,
+            "an own-origin write during scope open must be buffered so the reconcile cannot drop it"
+        );
+        assert_eq!(list[0].id, "h1");
+        assert_eq!(list[0].op, Operation::Insert);
+    }
+
+    #[test]
+    fn own_created_event_is_dropped_when_not_awaiting_state() {
+        let state = scope_engine_state("client-a");
+        let mut rx = state.mutation_bus.subscribe();
+
+        handle_scope_message(&state, own_created_message("client-a"));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "own-origin events must not echo to the bus outside the scope-open window"
+        );
     }
 }
