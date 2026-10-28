@@ -623,6 +623,7 @@ impl Store {
                     if inner.pending_insert_exists(entity, id).await {
                         inner.flush_notify.notify_one();
                     } else {
+                        inner.rollback_local_row(entity, id, origin).await;
                         if let Some(queue) = &inner.queue {
                             let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                         }
@@ -731,7 +732,7 @@ impl Store {
         {
             Ok(version) => version,
             Err(err) => {
-                if err.is_not_found() {
+                if err.is_not_found() && !inner.pending_insert_exists(entity, id).await {
                     inner.rollback_local_row(entity, id, Origin::Local).await;
                 }
                 return Err(err);
@@ -784,7 +785,7 @@ impl Store {
             .sync_delete_checked(entity, &scope_id, id, expected_version)
             .await
         {
-            if err.is_not_found() {
+            if err.is_not_found() && !inner.pending_insert_exists(entity, id).await {
                 inner.rollback_local_row(entity, id, Origin::Local).await;
             }
             return Err(err);
