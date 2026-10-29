@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Error::PublishRejected { reason_code }` and the classifier
+  `Error::is_terminal_publish_rejection()`. A broker that refuses a write's
+  publish with a PUBACK/PUBREC reason code (>= `0x80`) is now surfaced with that
+  code instead of being flattened into a generic `Mqtt` error.
+
+### Fixed
+
+- A `create`/`update`/`delete` whose publish the broker refused with a terminal
+  reason code — not authorized (`0x87`), invalid topic name (`0x90`), invalid
+  payload format (`0x99`) — resolved `Ok`, kept the optimistic local row, and was
+  re-published by the offline queue every 250 ms for as long as the client stayed
+  connected. Such a write now rejects with `Error::PublishRejected`; `create`
+  rolls back the optimistic row and the queue drops the mutation, while a refusal
+  with a retryable reason code (e.g. quota exceeded `0x97`, or an unknown code) is
+  still retried as before.
+
 ## [0.6.4] - 2026-10-28
 
 ### Fixed

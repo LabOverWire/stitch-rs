@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `create`/`update`/`delete` the broker refused to publish — e.g. a `sale`
+  write denied by a topic ACL (PUBACK reason `0x87` Not authorized) — resolved
+  successfully, left a phantom local row, and was re-sent roughly four times a
+  second until the page closed. It now rejects: a `0x87` refusal surfaces as
+  `err.kind = "notAuthorized"` (other terminal reason codes as
+  `"publishRejected"`), `create` drops the phantom local row, and the offline
+  queue stops re-sending. A refusal with a retryable reason code (e.g. quota
+  exceeded) is still retried. Inherited from stitch-sync; see its changelog.
+
 ## [0.6.4] - 2026-10-28
 
 ### Fixed

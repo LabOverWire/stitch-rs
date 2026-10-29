@@ -399,6 +399,12 @@ impl Store {
                         .await;
                     return Err(err);
                 }
+                Err(err) if err.is_terminal_publish_rejection() => {
+                    inner
+                        .rollback_local_create(entity, &id, &effective_scope, origin)
+                        .await;
+                    return Err(err);
+                }
                 Err(err) => {
                     tracing::warn!(
                         entity = %entity,
@@ -527,6 +533,12 @@ impl Store {
                         return Err(err);
                     }
                 }
+                Err(err) if err.is_terminal_publish_rejection() => {
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
+                    }
+                    return Err(err);
+                }
                 Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();
                 }
@@ -629,6 +641,12 @@ impl Store {
                         }
                         return Err(err);
                     }
+                }
+                Err(err) if err.is_terminal_publish_rejection() => {
+                    if let Some(queue) = &inner.queue {
+                        let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
+                    }
+                    return Err(err);
                 }
                 Err(err) if err.is_transient() => {
                     inner.flush_notify.notify_one();

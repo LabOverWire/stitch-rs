@@ -30,6 +30,16 @@ fn js_err(ctx: &str, e: &JsValue) -> Error {
     Error::Mqtt(format!("{ctx}: {e:?}"))
 }
 
+fn publish_rejection_code(e: &JsValue) -> Option<u8> {
+    let message = e.as_string()?;
+    let tail = message.split("reason code").nth(1)?;
+    let digits: String = tail.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits
+        .parse::<u16>()
+        .ok()
+        .and_then(|n| u8::try_from(n).ok())
+}
+
 #[async_trait::async_trait(?Send)]
 impl MqttClientApi for WasmMqttClientAdapter {
     async fn connect(&self, url: &str, args: ConnectArgs) -> Result<ConnectOutcome> {
@@ -99,7 +109,10 @@ impl MqttClientApi for WasmMqttClientAdapter {
             .publish_with_options(&topic, &payload, &opts)
             .await
             .map(|_| ())
-            .map_err(|e| js_err("publish", &e))
+            .map_err(|e| match publish_rejection_code(&e) {
+                Some(reason_code) => Error::PublishRejected { reason_code },
+                None => js_err("publish", &e),
+            })
     }
 
     async fn subscribe(&self, topic: String, on_message: MessageHandler) -> Result<()> {
