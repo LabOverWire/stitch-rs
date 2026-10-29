@@ -9,7 +9,7 @@ use mqtt5::types::{
     ConnectOptions, Message, PublishOptions, PublishProperties, ReasonCode, SubscribeOptions,
     WillMessage,
 };
-use mqtt5::{MqttClient, QoS};
+use mqtt5::{MqttClient, MqttError, QoS};
 use std::time::Duration;
 
 pub(crate) struct NativeMqttClient {
@@ -107,7 +107,12 @@ impl MqttClientApi for NativeMqttClient {
             .publish_with_options(topic.clone(), payload, opts)
             .await
             .map(|_| ())
-            .map_err(|e| Error::Mqtt(format!("publish:{topic}: {e}")))
+            .map_err(|e| match e {
+                MqttError::PublishFailed(reason_code) => Error::PublishRejected {
+                    reason_code: u8::from(reason_code),
+                },
+                other => Error::Mqtt(format!("publish:{topic}: {other}")),
+            })
     }
 
     async fn subscribe(&self, topic: String, on_message: MessageHandler) -> Result<()> {

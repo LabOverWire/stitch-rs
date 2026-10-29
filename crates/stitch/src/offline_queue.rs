@@ -306,6 +306,25 @@ async fn flush_consolidated(
                 );
                 FlushOutcome::Keep
             }
+            Err(err) if err.is_terminal_publish_rejection() && mutation.op == Operation::Insert => {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    error = %err,
+                    "dropping queued insert the broker refused to publish; rolling back the optimistic local row"
+                );
+                FlushOutcome::DropRejected
+            }
+            Err(err) if err.is_terminal_publish_rejection() => {
+                tracing::warn!(
+                    entity = %mutation.entity,
+                    id = %mutation.id,
+                    op = ?mutation.op,
+                    error = %err,
+                    "dropping queued mutation the broker refused to publish"
+                );
+                FlushOutcome::Drop
+            }
             Err(err) if err.is_permanent_mutation() => {
                 tracing::error!(
                     entity = %mutation.entity,
@@ -799,6 +818,7 @@ mod tests {
         fail_update_not_found: bool,
         fail_create_transient: bool,
         fail_create_rejected: bool,
+        fail_create_publish_rejection: Option<u8>,
         read_result: Mutex<Option<Record>>,
     }
 
@@ -810,6 +830,9 @@ mod tests {
             }
             if self.fail_create_rejected {
                 return Err(Error::Rejected("schema violation".into()));
+            }
+            if let Some(reason_code) = self.fail_create_publish_rejection {
+                return Err(Error::PublishRejected { reason_code });
             }
             self.creates.lock_guard().push((entity.to_string(), data));
             Ok(())
@@ -961,6 +984,68 @@ mod tests {
         assert!(
             sender.creates.lock_guard().is_empty(),
             "a record the broker no longer holds must not be re-created by the flush"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_drops_and_rolls_back_an_insert_refused_with_not_authorized()
+    -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        queue
+            .queue(pending(
+                Operation::Insert,
+                "t1",
+                Some(record(&[("id", "t1"), ("status", "pending")])),
+                1,
+            ))
+            .await?;
+
+        let refusing = FakeSender {
+            fail_create_publish_rejection: Some(0x87),
+            ..Default::default()
+        };
+        let summary = queue.flush(&refusing).await?;
+        assert_eq!(summary.retained, 0);
+        assert_eq!(summary.rejected_inserts.len(), 1);
+        assert_eq!(summary.rejected_inserts[0].id, "t1");
+
+        let recovered = FakeSender::default();
+        assert_eq!(queue.flush(&recovered).await?.retained, 0);
+        assert!(
+            recovered.creates.lock_guard().is_empty(),
+            "an insert the broker refused to publish must not be re-sent"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_retains_an_insert_refused_with_a_retryable_reason_code()
+    -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        queue
+            .queue(pending(
+                Operation::Insert,
+                "t1",
+                Some(record(&[("id", "t1"), ("status", "pending")])),
+                1,
+            ))
+            .await?;
+
+        let refusing = FakeSender {
+            fail_create_publish_rejection: Some(0x97),
+            ..Default::default()
+        };
+        let summary = queue.flush(&refusing).await?;
+        assert_eq!(summary.retained, 1);
+        assert!(summary.rejected_inserts.is_empty());
+
+        let recovered = FakeSender::default();
+        assert_eq!(queue.flush(&recovered).await?.retained, 0);
+        assert_eq!(
+            recovered.creates.lock_guard().len(),
+            1,
+            "a quota-exceeded refusal must be retried once the broker recovers"
         );
         Ok(())
     }

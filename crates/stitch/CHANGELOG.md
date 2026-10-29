@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Error::PublishRejected { reason_code }` and the classifier
+  `Error::is_terminal_publish_rejection()`. A broker that refuses a write's
+  publish with a PUBACK/PUBREC reason code (>= `0x80`) is now surfaced with that
+  code instead of being flattened into a generic `Mqtt` error.
+
+### Fixed
+
+- A `create`/`update`/`delete` whose publish the broker refused with a terminal
+  reason code — not authorized (`0x87`), invalid topic name (`0x90`), invalid
+  payload format (`0x99`) — resolved `Ok`, kept the optimistic local change, and
+  was re-published by the offline queue every 250 ms for as long as the client
+  stayed connected. Such a write now rejects with `Error::PublishRejected` and the
+  optimistic local change is reverted: `create` removes the phantom row, `update`
+  restores the pre-update row, and `delete` reinstates the removed row. The queue
+  drops the mutation, while a refusal with a retryable reason code (e.g. quota
+  exceeded `0x97`, or an unknown code) is still retried as before. A mutation
+  queued while offline and refused this way on a later flush is dropped (stopping
+  the re-send loop), but its optimistic local change is not yet reverted on the
+  flush path.
+
+### Changed
+
+- An `update` or `delete` the broker refuses with an ownership denial (`403`) now
+  reverts the optimistic local change and returns `Error::Ownership`, matching
+  `create` and the new terminal-publish-rejection behavior. It previously dropped
+  the queued mutation and resolved `Ok`, leaving the local change applied.
+
 ## [0.6.4] - 2026-10-28
 
 ### Fixed

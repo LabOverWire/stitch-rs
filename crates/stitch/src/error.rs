@@ -6,8 +6,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Every fallible operation in stitch returns this error type. Use the
 /// classifier methods ([`Error::is_transient`], [`Error::is_not_found`],
 /// [`Error::is_conflict`], [`Error::is_ownership`],
-/// [`Error::is_permanent_mutation`], [`Error::is_corruption`]) to branch on
-/// recoverable vs terminal failures.
+/// [`Error::is_permanent_mutation`], [`Error::is_terminal_publish_rejection`],
+/// [`Error::is_corruption`]) to branch on recoverable vs terminal failures.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("not initialized")]
@@ -44,6 +44,9 @@ pub enum Error {
     #[error("mqtt error: {0}")]
     Mqtt(String),
 
+    #[error("publish rejected with reason code {reason_code}")]
+    PublishRejected { reason_code: u8 },
+
     #[error("rejected: {0}")]
     Rejected(String),
 
@@ -66,6 +69,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+const TERMINAL_PUBLISH_REASON_CODES: [u8; 3] = [0x87, 0x90, 0x99];
+
+fn publish_reason_is_terminal(reason_code: u8) -> bool {
+    TERMINAL_PUBLISH_REASON_CODES.contains(&reason_code)
+}
+
 impl Error {
     #[must_use]
     pub fn mqdb(method: impl Into<String>, source: mqdb_core::error::Error) -> Self {
@@ -79,13 +88,23 @@ impl Error {
     }
 
     /// `true` if a retry might succeed (timeout, dropped connection, generic
-    /// MQTT error).
+    /// MQTT error, or a publish rejection whose reason code is not terminal).
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            Self::Timeout(_) | Self::ConnectionClosed | Self::Mqtt(_)
-        )
+        match self {
+            Self::Timeout(_) | Self::ConnectionClosed | Self::Mqtt(_) => true,
+            Self::PublishRejected { reason_code } => !publish_reason_is_terminal(*reason_code),
+            _ => false,
+        }
+    }
+
+    /// `true` if the broker refused the publish with a reason code that a retry
+    /// cannot fix (not authorized, invalid topic name, invalid payload format).
+    /// The store rolls back the optimistic row and the offline queue drops the
+    /// mutation instead of re-sending it.
+    #[must_use]
+    pub fn is_terminal_publish_rejection(&self) -> bool {
+        matches!(self, Self::PublishRejected { reason_code } if publish_reason_is_terminal(*reason_code))
     }
 
     /// `true` if the server rejected the call because the authenticated user
@@ -155,6 +174,36 @@ impl Error {
                 }
             }
             _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_authorized_publish_rejection_is_terminal_not_transient() {
+        let err = Error::PublishRejected { reason_code: 0x87 };
+        assert!(err.is_terminal_publish_rejection());
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn invalid_topic_and_payload_publish_rejections_are_terminal() {
+        for code in [0x90, 0x99] {
+            let err = Error::PublishRejected { reason_code: code };
+            assert!(err.is_terminal_publish_rejection(), "0x{code:02x}");
+            assert!(!err.is_transient(), "0x{code:02x}");
+        }
+    }
+
+    #[test]
+    fn quota_and_unknown_publish_rejections_are_retried_not_terminal() {
+        for code in [0x97, 0x91, 0x80, 0x83] {
+            let err = Error::PublishRejected { reason_code: code };
+            assert!(err.is_transient(), "0x{code:02x}");
+            assert!(!err.is_terminal_publish_rejection(), "0x{code:02x}");
         }
     }
 }

@@ -399,6 +399,12 @@ impl Store {
                         .await;
                     return Err(err);
                 }
+                Err(err) if err.is_terminal_publish_rejection() => {
+                    inner
+                        .rollback_local_create(entity, &id, &effective_scope, origin)
+                        .await;
+                    return Err(err);
+                }
                 Err(err) => {
                     tracing::warn!(
                         entity = %entity,
@@ -418,7 +424,10 @@ impl Store {
     ///
     /// On a live connection, if the server rejects the write with `404`
     /// (the row was deleted out from under a stale local copy), the stale row
-    /// is removed locally and the call returns [`Error::NotFound`].
+    /// is removed locally and the call returns [`Error::NotFound`]. If it is
+    /// rejected with an ownership denial or a terminal publish rejection (e.g.
+    /// not authorized), the optimistic edit is reverted to the pre-update row
+    /// and the call returns that error.
     pub async fn update(
         &self,
         entity: &str,
@@ -436,6 +445,7 @@ impl Store {
             .any(|t| t.entity == entity);
 
         let existing = inner.memory.read(entity, id).await?;
+        let mut pre_image = existing.clone();
         let mut scope_id = existing
             .as_ref()
             .and_then(|e| Self::scope_from_row(e, entity, root_entity, is_top_level, scope_field));
@@ -461,6 +471,7 @@ impl Store {
                     scope_field,
                 );
                 if scope_id.is_some() && existing.is_none() {
+                    pre_image = Some(p_existing.clone());
                     inner
                         .memory
                         .update(entity, id, fields.clone(), origin)
@@ -511,10 +522,14 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
+                Err(err) if err.is_ownership() || err.is_terminal_publish_rejection() => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Update).await;
                     }
+                    inner
+                        .restore_local_row(entity, id, &scope_id, pre_image, origin)
+                        .await;
+                    return Err(err);
                 }
                 Err(err) if err.is_not_found() => {
                     if inner.pending_insert_exists(entity, id).await {
@@ -541,7 +556,10 @@ impl Store {
 
     /// Delete a row. No-op if the row doesn't exist locally. On a live
     /// connection, if the server rejects the delete with `404`, the stale row
-    /// is removed locally and the call returns [`Error::NotFound`].
+    /// is removed locally and the call returns [`Error::NotFound`]. If it is
+    /// rejected with an ownership denial or a terminal publish rejection (e.g.
+    /// not authorized), the optimistically removed row is reinstated and the
+    /// call returns that error.
     pub async fn delete(&self, entity: &str, id: &str, origin: Origin) -> Result<()> {
         let inner = self.inner()?;
         let scope_field = &inner.config.scope.scope_field;
@@ -553,6 +571,7 @@ impl Store {
             .any(|t| t.entity == entity);
 
         let existing = inner.memory.read(entity, id).await?;
+        let mut pre_image = existing.clone();
         let mut scope_id = existing
             .as_ref()
             .and_then(|e| Self::scope_from_row(e, entity, root_entity, is_top_level, scope_field));
@@ -575,6 +594,7 @@ impl Store {
                     scope_field,
                 );
                 if scope_id.is_some() && existing.is_none() {
+                    pre_image = Some(p_existing.clone());
                     inner.memory.delete(entity, id, origin).await.ok();
                 }
             }
@@ -614,10 +634,14 @@ impl Store {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
                 }
-                Err(err) if err.is_ownership() => {
+                Err(err) if err.is_ownership() || err.is_terminal_publish_rejection() => {
                     if let Some(queue) = &inner.queue {
                         let _ = queue.remove(entity, id, &scope_id, Operation::Delete).await;
                     }
+                    inner
+                        .restore_local_row(entity, id, &scope_id, pre_image, origin)
+                        .await;
+                    return Err(err);
                 }
                 Err(err) if err.is_not_found() => {
                     if inner.pending_insert_exists(entity, id).await {
@@ -1473,6 +1497,31 @@ impl StoreInner {
         }
     }
 
+    async fn restore_local_row(
+        &self,
+        entity: &str,
+        id: &str,
+        scope_id: &str,
+        pre_image: Option<Record>,
+        origin: Origin,
+    ) {
+        let Some(row) = pre_image else {
+            self.rollback_local_row(entity, id, origin).await;
+            return;
+        };
+        let _ = self.memory.delete(entity, id, origin).await;
+        let _ = self
+            .memory
+            .create(entity, scope_id, row.clone(), origin)
+            .await;
+        if let Some(persistence) = &self.persistence
+            && !origin.skips_persistence()
+        {
+            let _ = persistence.delete(entity, id, origin).await;
+            let _ = persistence.create(entity, row, origin).await;
+        }
+    }
+
     async fn rollback_local_create(&self, entity: &str, id: &str, scope_id: &str, origin: Origin) {
         self.rollback_local_row(entity, id, origin).await;
         if let Some(queue) = &self.queue {
@@ -2297,6 +2346,101 @@ mod tests {
         mirror_remote_to_memory(&inner, mutation, false).await;
 
         assert!(inner.memory.read("task", "ghost").await?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_local_row_reinstates_an_optimistically_deleted_row() -> crate::error::Result<()>
+    {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
+        let original = inner
+            .memory
+            .create(
+                "task",
+                "p1",
+                record(&[
+                    ("id", Value::String("t1".to_string())),
+                    ("projectId", Value::String("p1".to_string())),
+                    ("title", Value::String("keep".to_string())),
+                ]),
+                Origin::Local,
+            )
+            .await?;
+        inner.memory.delete("task", "t1", Origin::Local).await.ok();
+        assert!(inner.memory.read("task", "t1").await?.is_none());
+
+        inner
+            .restore_local_row("task", "t1", "p1", Some(original), Origin::Local)
+            .await;
+
+        let got = inner.memory.read("task", "t1").await?;
+        assert_eq!(
+            got.as_ref()
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str),
+            Some("t1"),
+            "a refused delete must put the row back with its id"
+        );
+        assert_eq!(
+            got.as_ref()
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str),
+            Some("keep")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_local_row_reverts_an_optimistic_update() -> crate::error::Result<()> {
+        let inner = fixture_inner(ConnectionStatus::Connected).await?;
+        let original = inner
+            .memory
+            .create(
+                "task",
+                "p1",
+                record(&[
+                    ("id", Value::String("t1".to_string())),
+                    ("projectId", Value::String("p1".to_string())),
+                    ("title", Value::String("before".to_string())),
+                ]),
+                Origin::Local,
+            )
+            .await?;
+        inner
+            .memory
+            .update(
+                "task",
+                "t1",
+                record(&[("title", Value::String("after".to_string()))]),
+                Origin::Local,
+            )
+            .await?;
+        assert_eq!(
+            inner
+                .memory
+                .read("task", "t1")
+                .await?
+                .as_ref()
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str),
+            Some("after")
+        );
+
+        inner
+            .restore_local_row("task", "t1", "p1", Some(original), Origin::Local)
+            .await;
+
+        assert_eq!(
+            inner
+                .memory
+                .read("task", "t1")
+                .await?
+                .as_ref()
+                .and_then(|r| r.get("title"))
+                .and_then(Value::as_str),
+            Some("before"),
+            "a refused update must revert the optimistic edit to the pre-image"
+        );
         Ok(())
     }
 

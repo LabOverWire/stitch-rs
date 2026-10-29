@@ -123,8 +123,8 @@ fn js_error(message: &str, kind: &str, entity: Option<&str>, id: Option<&str>) -
 fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) {
     use stitch::Error::{
         AlreadyInitialized, Config, Conflict, ConnectionClosed, Io, Mqdb, Mqtt, NotFound,
-        NotInitialized, Ownership, PreconditionFailed, Rejected, ScopeNotActive, Serde,
-        SessionInvalid, Timeout, UnknownEntity,
+        NotInitialized, Ownership, PreconditionFailed, PublishRejected, Rejected, ScopeNotActive,
+        Serde, SessionInvalid, Timeout, UnknownEntity,
     };
     match e {
         NotInitialized => ("notInitialized", None, None),
@@ -139,6 +139,8 @@ fn error_parts(e: &stitch::Error) -> (&'static str, Option<&str>, Option<&str>) 
         Mqdb { .. } if e.is_permanent_mutation() => ("constraint", None, None),
         Mqdb { .. } => ("mqdb", None, None),
         Rejected(_) => ("constraint", None, None),
+        PublishRejected { reason_code: 0x87 } => ("notAuthorized", None, None),
+        PublishRejected { .. } => ("publishRejected", None, None),
         Mqtt(_) => ("mqtt", None, None),
         ConnectionClosed => ("connectionClosed", None, None),
         Timeout(_) => ("timeout", None, None),
