@@ -31,13 +31,7 @@ fn js_err(ctx: &str, e: &JsValue) -> Error {
 }
 
 fn publish_rejection_code(e: &JsValue) -> Option<u8> {
-    let message = e.as_string()?;
-    let tail = message.split("reason code").nth(1)?;
-    let digits: String = tail.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits
-        .parse::<u16>()
-        .ok()
-        .and_then(|n| u8::try_from(n).ok())
+    super::parse_publish_reason_code(&e.as_string()?)
 }
 
 #[async_trait::async_trait(?Send)]

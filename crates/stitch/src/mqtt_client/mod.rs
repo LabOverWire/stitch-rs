@@ -81,3 +81,50 @@ pub(crate) fn new_client(client_id: &str) -> DynMqttClient {
         Shared::new(wasm::WasmMqttClientAdapter::new(client_id))
     }
 }
+
+/// Recover an MQTT publish reason code from a wasm adapter error message of the
+/// form `"...reason code: <n>..."`. Returns the first run of digits after
+/// `"reason code"` parsed as a `u8`; `None` when the phrase is absent or the
+/// number is out of range, so the caller degrades to a generic (retryable)
+/// error rather than misreading a changed message as a terminal rejection.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn parse_publish_reason_code(message: &str) -> Option<u8> {
+    let tail = message.split("reason code").nth(1)?;
+    let digits: String = tail
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<u8>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_publish_reason_code;
+
+    #[test]
+    fn parses_the_wasm_rejection_message() {
+        assert_eq!(
+            parse_publish_reason_code("Publish rejected with reason code: 135"),
+            Some(135)
+        );
+    }
+
+    #[test]
+    fn ignores_trailing_context_after_the_code() {
+        assert_eq!(
+            parse_publish_reason_code("Publish rejected with reason code: 135 for sale/42"),
+            Some(135)
+        );
+    }
+
+    #[test]
+    fn rejects_a_code_outside_u8_range() {
+        assert_eq!(parse_publish_reason_code("reason code: 999"), None);
+    }
+
+    #[test]
+    fn returns_none_when_no_reason_code_is_present() {
+        assert_eq!(parse_publish_reason_code("connection closed"), None);
+    }
+}
