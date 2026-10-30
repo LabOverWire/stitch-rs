@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-29
+
 ### Fixed
 
 - A `create`/`update`/`delete` the broker refused to publish — e.g. a `sale`
