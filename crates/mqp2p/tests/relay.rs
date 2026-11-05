@@ -1,5 +1,6 @@
 use mqp2p::quic::{QuicEndpoint, generate_self_signed_cert};
 use mqp2p::turn_client::{TurnClient, TurnConfig};
+use mqp2p::{Peer, PeerConfig};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -136,4 +137,101 @@ async fn relayed_quic_handshake_transfers_data_over_coturn() {
     assert_eq!(received, expected, "relayed payload mismatch");
 
     conn.close(0u32.into(), b"done");
+}
+
+struct BrokerGuard(Child);
+
+impl Drop for BrokerGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_broker(port: u16, dir: &std::path::Path) -> Option<BrokerGuard> {
+    let passwd = dir.join("passwd");
+    let output = Command::new("mqdb")
+        .args(["passwd", "peer", "-b", "peer", "-n"])
+        .output()
+        .ok()?;
+    assert!(output.status.success(), "mqdb passwd failed");
+    std::fs::write(&passwd, &output.stdout).expect("write passwd");
+    Command::new("mqdb")
+        .args(["agent", "start", "--bind", &format!("127.0.0.1:{port}")])
+        .args(["--db", &dir.join("db").to_string_lossy()])
+        .args(["--passwd", &passwd.to_string_lossy()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+        .map(BrokerGuard)
+}
+
+async fn registered_peer(name: &str, broker: &str, turn: &str) -> Peer {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let config = PeerConfig::new(name, broker)
+            .without_stun()
+            .with_credentials("peer", "peer")
+            .with_turn(turn, TURN_USER, TURN_PASS);
+        let registered = match Peer::new(config).await {
+            Ok(mut peer) => peer.register().await.map(|_| peer),
+            Err(e) => Err(e),
+        };
+        match registered {
+            Ok(peer) => return peer,
+            Err(e) if tokio::time::Instant::now() >= deadline => {
+                panic!("peer never registered: {e}")
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_responder_with_turn_accepts_one_initiator_after_another_without_delay() {
+    let turn_port = pick_free_port();
+    let Some(_turn) = start_turn_server(turn_port) else {
+        eprintln!("skipping relay test: coturn `turnserver` not found on PATH");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker_port = pick_free_port();
+    let Some(_broker) = start_broker(broker_port, dir.path()) else {
+        eprintln!("skipping relay test: `mqdb` not found on PATH");
+        return;
+    };
+    let broker = format!("127.0.0.1:{broker_port}");
+    let turn = format!("127.0.0.1:{turn_port}");
+
+    let responder = Arc::new(registered_peer("responder", &broker, &turn).await);
+    for name in ["first", "second"] {
+        let initiator = registered_peer(name, &broker, &turn).await;
+        let peers = initiator.discover_peers().await.expect("discover");
+        let target = peers
+            .iter()
+            .find(|peer| peer.name == "responder")
+            .expect("responder registered")
+            .clone();
+
+        let accepting = Arc::clone(&responder);
+        let accept = tokio::spawn(async move { accepting.accept_connection().await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let started = tokio::time::Instant::now();
+        let connected = initiator.connect_to(&target).await.expect("connect");
+        let accepted = tokio::time::timeout(Duration::from_secs(30), accept)
+            .await
+            .expect("accept timed out")
+            .expect("accept task")
+            .expect("accept");
+        let elapsed = started.elapsed();
+
+        assert!(!connected.is_relayed(), "{name} should connect directly");
+        assert!(!accepted.is_relayed(), "{name} should be accepted directly");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "{name} took {elapsed:?} to connect and be accepted"
+        );
+    }
 }
