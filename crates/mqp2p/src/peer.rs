@@ -24,6 +24,13 @@ const STUN_REDISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
 
 const TURN_LIFETIME_SECS: u32 = 600;
 const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_ACCEPT_MARGIN: Duration = Duration::from_secs(2);
+
+fn relay_accept_timeout(direct_candidates: u32) -> Duration {
+    CANDIDATE_TIMEOUT * (direct_candidates + 1) + RELAY_ACCEPT_MARGIN
+}
 
 #[derive(Clone)]
 pub struct TurnServer {
@@ -191,7 +198,7 @@ pub struct Peer {
     std_socket: std::net::UdpSocket,
     host_addr: SocketAddr,
     srflx_addr: Option<SocketAddr>,
-    turn: Option<TurnClient>,
+    turn: Option<TurnServer>,
     lease_secs: u64,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
     stun_tap: Option<Arc<StunTap>>,
@@ -256,25 +263,6 @@ impl Peer {
             None
         };
 
-        let turn = if let Some(ref turn_server) = config.turn {
-            match tokio::time::timeout(TURN_SETUP_TIMEOUT, setup_turn(turn_server)).await {
-                Ok(Ok(client)) => {
-                    info!(relayed = %client.relayed_addr(), "TURN allocation established");
-                    Some(client)
-                }
-                Ok(Err(e)) => {
-                    warn!(error = %e, "TURN allocation failed, peer will not advertise a relay candidate");
-                    None
-                }
-                Err(_) => {
-                    warn!("TURN allocation timed out, peer will not advertise a relay candidate");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let quic_socket = std_socket.try_clone()?;
         let fingerprint = identity.fingerprint.clone();
         let offload = config.segmentation_offload;
@@ -331,7 +319,7 @@ impl Peer {
             std_socket,
             host_addr,
             srflx_addr,
-            turn,
+            turn: config.turn,
             lease_secs,
             heartbeat: None,
             stun_tap: Some(stun_tap),
@@ -444,11 +432,29 @@ impl Peer {
         &self.fingerprint
     }
 
-    async fn relay_endpoint(&self, peer_relayed: SocketAddr) -> Result<QuicEndpoint> {
-        let turn = self
-            .turn
-            .as_ref()
-            .ok_or_else(|| Error::Turn("no turn allocation for relay".into()))?;
+    async fn allocate_relay(&self) -> Option<TurnClient> {
+        let turn_server = self.turn.as_ref()?;
+        match tokio::time::timeout(TURN_SETUP_TIMEOUT, setup_turn(turn_server)).await {
+            Ok(Ok(client)) => {
+                info!(relayed = %client.relayed_addr(), "TURN allocation established");
+                Some(client)
+            }
+            Ok(Err(e)) => {
+                warn!(error = %e, "TURN allocation failed, not advertising a relay candidate");
+                None
+            }
+            Err(_) => {
+                warn!("TURN allocation timed out, not advertising a relay candidate");
+                None
+            }
+        }
+    }
+
+    async fn relay_endpoint(
+        &self,
+        turn: &TurnClient,
+        peer_relayed: SocketAddr,
+    ) -> Result<QuicEndpoint> {
         let socket = turn.relay_socket(peer_relayed).await?;
         QuicEndpoint::bind_abstract(
             socket,
@@ -459,42 +465,39 @@ impl Peer {
 
     async fn connect_via_relay(
         &self,
+        turn: &TurnClient,
         relay_addr: SocketAddr,
         fingerprint: &str,
     ) -> Result<(Connection, QuicEndpoint)> {
-        let endpoint = self.relay_endpoint(relay_addr).await?;
-        let connection = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            endpoint.connect(relay_addr, fingerprint),
-        )
-        .await
-        .map_err(|_| Error::Quic("relay candidate timed out".into()))??;
+        let endpoint = self.relay_endpoint(turn, relay_addr).await?;
+        let connection =
+            tokio::time::timeout(CANDIDATE_TIMEOUT, endpoint.connect(relay_addr, fingerprint))
+                .await
+                .map_err(|_| Error::Quic("relay candidate timed out".into()))??;
         Ok((connection, endpoint))
     }
 
-    async fn accept_direct(&self, fingerprint: &str) -> Result<Connection> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.quic.accept_with_fingerprint(fingerprint),
-        )
-        .await
-        .map_err(|_| Error::Signaling("timeout waiting for inbound connection".into()))?
+    async fn accept_direct(&self, fingerprint: &str, timeout: Duration) -> Result<Connection> {
+        tokio::time::timeout(timeout, self.quic.accept_with_fingerprint(fingerprint))
+            .await
+            .map_err(|_| Error::Signaling("timeout waiting for inbound connection".into()))?
     }
 
     async fn accept_direct_or_relay(
         &self,
         fingerprint: &str,
-        relay_addr: Option<SocketAddr>,
+        relay: Option<(&TurnClient, SocketAddr)>,
+        direct_candidates: u32,
     ) -> Result<(Connection, Option<QuicEndpoint>)> {
-        let Some(relay_addr) = relay_addr.filter(|_| self.turn.is_some()) else {
-            return Ok((self.accept_direct(fingerprint).await?, None));
+        let Some((turn, relay_addr)) = relay else {
+            return Ok((self.accept_direct(fingerprint, ACCEPT_TIMEOUT).await?, None));
         };
 
-        let relay = match self.relay_endpoint(relay_addr).await {
+        let relay = match self.relay_endpoint(turn, relay_addr).await {
             Ok(endpoint) => endpoint,
             Err(e) => {
                 warn!(relay = %relay_addr, error = %e, "relay endpoint setup failed, accepting direct only");
-                return Ok((self.accept_direct(fingerprint).await?, None));
+                return Ok((self.accept_direct(fingerprint, ACCEPT_TIMEOUT).await?, None));
             }
         };
         let fp = fingerprint.to_string();
@@ -504,7 +507,7 @@ impl Peer {
         };
 
         tokio::select! {
-            direct = self.accept_direct(fingerprint) => Ok((direct?, None)),
+            direct = self.accept_direct(fingerprint, relay_accept_timeout(direct_candidates)) => Ok((direct?, None)),
             relayed = relay_accept => {
                 let (connection, endpoint) = relayed?;
                 Ok((connection, Some(endpoint)))
@@ -522,6 +525,8 @@ impl Peer {
 
         let answer_rx = self.signaling.subscribe_answers(my_peer_id).await?;
 
+        let turn = self.allocate_relay().await;
+
         let mut candidates = vec![Candidate {
             addr: self.host_addr,
             kind: CandidateKind::Host,
@@ -532,7 +537,7 @@ impl Peer {
                 kind: CandidateKind::Srflx,
             });
         }
-        if let Some(relayed) = self.turn.as_ref().map(|t| t.relayed_addr()) {
+        if let Some(relayed) = turn.as_ref().map(TurnClient::relayed_addr) {
             candidates.push(Candidate {
                 addr: relayed,
                 kind: CandidateKind::Relay,
@@ -618,7 +623,7 @@ impl Peer {
             }
 
             match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
+                CANDIDATE_TIMEOUT,
                 self.quic.connect(*remote_addr, &answer.cert_fingerprint),
             )
             .await
@@ -644,11 +649,11 @@ impl Peer {
         let mut relay_endpoint = None;
         if connection.is_none()
             && let Some(relay_addr) = relay_addr
-            && self.turn.is_some()
+            && let Some(turn) = &turn
         {
             info!(relay = %relay_addr, "trying relay candidate");
             match self
-                .connect_via_relay(relay_addr, &answer.cert_fingerprint)
+                .connect_via_relay(turn, relay_addr, &answer.cert_fingerprint)
                 .await
             {
                 Ok((conn, endpoint)) => {
@@ -697,6 +702,16 @@ impl Peer {
             "received connection offer"
         );
 
+        let relay_addr = offer
+            .candidates
+            .iter()
+            .find(|c| matches!(c.kind, CandidateKind::Relay))
+            .map(|c| c.addr);
+        let turn = match relay_addr {
+            Some(_) => self.allocate_relay().await,
+            None => None,
+        };
+
         let mut candidates = vec![Candidate {
             addr: self.host_addr,
             kind: CandidateKind::Host,
@@ -707,7 +722,8 @@ impl Peer {
                 kind: CandidateKind::Srflx,
             });
         }
-        if let Some(relayed) = self.turn.as_ref().map(|t| t.relayed_addr()) {
+        let direct_candidates = candidates.len() as u32;
+        if let Some(relayed) = turn.as_ref().map(TurnClient::relayed_addr) {
             candidates.push(Candidate {
                 addr: relayed,
                 kind: CandidateKind::Relay,
@@ -758,14 +774,12 @@ impl Peer {
                 .await;
         }
 
-        let relay_addr = offer
-            .candidates
-            .iter()
-            .find(|c| matches!(c.kind, CandidateKind::Relay))
-            .map(|c| c.addr);
-
         let (connection, relay_endpoint) = self
-            .accept_direct_or_relay(&offer.cert_fingerprint, relay_addr)
+            .accept_direct_or_relay(
+                &offer.cert_fingerprint,
+                turn.as_ref().zip(relay_addr),
+                direct_candidates,
+            )
             .await?;
 
         let remote_addr = connection.remote_address();
@@ -981,6 +995,14 @@ mod tests {
             .with_lease_secs(15)
             .with_keepalive_secs(60);
         assert_eq!(config.effective_keepalive_secs(), 60);
+    }
+
+    #[test]
+    fn relay_accept_outlasts_the_initiators_direct_and_relay_attempts() {
+        for direct_candidates in 1..=3 {
+            let initiator = CANDIDATE_TIMEOUT * direct_candidates + CANDIDATE_TIMEOUT;
+            assert!(relay_accept_timeout(direct_candidates) > initiator);
+        }
     }
 
     #[test]

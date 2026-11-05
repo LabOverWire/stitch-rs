@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `Peer` configured with TURN now allocates a relay for each connection
+  attempt. A single allocation lasted only for the first attempt, so later
+  relayed connections failed and later direct ones took about 11.5 s to be
+  accepted. A TURN server that can't be reached now costs up to 5 s per attempt
+  instead of once at startup, and is reported then.
+- The responder keeps accepting until the initiator's direct attempts and its
+  relay attempt have had time to finish. With host and server-reflexive
+  candidates it used to give up just as the initiator reached the relay.
+
 ## [0.3.1] - 2026-10-26
 
 ### Fixed
