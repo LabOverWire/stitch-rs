@@ -30,6 +30,8 @@ pub mod wire;
 pub mod discovery;
 #[cfg(feature = "membership")]
 pub mod membership;
+#[cfg(feature = "pairing")]
+pub mod pairing;
 #[cfg(feature = "persistence")]
 pub mod persistence;
 #[cfg(feature = "store")]
@@ -49,6 +51,11 @@ pub use sync_state::{FrameAuth, FramePersister};
 pub use discovery::{MemberGate, Swarm, peer_id_from_fingerprint};
 #[cfg(feature = "membership")]
 pub use membership::{Identity, Membership, MembershipChanges, verify_frame};
+#[cfg(feature = "pairing")]
+pub use pairing::{
+    DeviceConfirm, OwnerConfirm, PairingCode, PairingDevice, PairingError, PairingMessage,
+    PairingOffer,
+};
 #[cfg(feature = "persistence")]
 pub use persistence::{FjallLog, PersistError};
 #[cfg(feature = "store")]
