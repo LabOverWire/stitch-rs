@@ -208,7 +208,7 @@ impl OwnerConfirm {
             device_confirm.as_bytes(),
         )?;
         let tag = compute_mac(&self.key_owner, &self.transcript)?;
-        Ok((self.device_key, PairingMessage(tag)))
+        Ok((self.device_key, PairingMessage(tag.to_vec())))
     }
 }
 
@@ -272,7 +272,7 @@ impl PairingDevice {
                 transcript,
                 owner_key: self.owner_key,
             },
-            PairingMessage(tag),
+            PairingMessage(tag.to_vec()),
         ))
     }
 }
@@ -327,10 +327,13 @@ fn derive_confirm_keys(secret: &[u8]) -> Result<(ConfirmKey, ConfirmKey), Pairin
     Ok((key_owner, key_device))
 }
 
-fn compute_mac(key: &[u8; CONFIRM_KEY_LEN], transcript: &[u8]) -> Result<Vec<u8>, PairingError> {
+fn compute_mac(
+    key: &[u8; CONFIRM_KEY_LEN],
+    transcript: &[u8],
+) -> Result<[u8; CONFIRM_KEY_LEN], PairingError> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| PairingError::Internal)?;
     mac.update(transcript);
-    Ok(mac.finalize().into_bytes().to_vec())
+    Ok(mac.finalize().into_bytes().into())
 }
 
 fn verify_mac(
@@ -439,15 +442,10 @@ mod tests {
         let (owner_state, reply) = offer
             .accept(&owner, device.peer_id(), &hello, 0)
             .expect("accept");
-        let (_device_confirm, device_tag) = device_state.receive(&reply).expect("receive");
-        let (_device_peer_id, owner_tag) = owner_state.confirm(&device_tag).expect("confirm");
-        let reflected = DeviceConfirm {
-            key_owner: Zeroizing::new([0u8; CONFIRM_KEY_LEN]),
-            transcript: Vec::new(),
-            owner_key: owner.peer_id(),
-        };
+        let (device_confirm, device_tag) = device_state.receive(&reply).expect("receive");
+        owner_state.confirm(&device_tag).expect("confirm");
         assert!(matches!(
-            reflected.finish(&owner_tag),
+            device_confirm.finish(&device_tag),
             Err(PairingError::ConfirmationFailed)
         ));
     }
