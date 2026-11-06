@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `stitch_p2p::pairing` (feature `pairing`, in the default set): a
+  transport-agnostic SPAKE2 device-pairing core. The owner mints a one-time
+  six-digit [`PairingOffer`] and the device runs the exchange with the code;
+  both sides confirm with an HMAC over a transcript that pins both peers'
+  transport-authenticated Ed25519 keys, so a relay that terminates each leg
+  cannot complete the pairing. On success the owner learns the device's verified
+  `PeerId` (ready for `Membership` invite) and the device learns the owner's. The
+  core does no networking — each step returns bytes the application carries — and
+  the peer's transport key is supplied as a non-optional value so no path skips
+  the binding. Single-use is enforced by a consuming type-state API; the code and
+  derived secrets are zeroized and never logged.
+
 ## [0.3.0] - 2026-10-25
 
 ### Changed

@@ -13,17 +13,23 @@ readme = "README.md"
 [dependencies]
 ed25519-dalek = { version = "3", default-features = false, features = ["fast"], optional = true }
 fjall = { version = "3.0", optional = true }
+hkdf = { version = "0.12", optional = true }
+hmac = { version = "0.12", optional = true }
 mqp2p = { version = "0.3.0", path = "../mqp2p", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 serde_json = { version = "1.0.150", optional = true }
+sha2 = { version = "0.10", optional = true }
+spake2 = { version = "0.4.0", optional = true }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["sync", "io-util", "macros", "rt", "rt-multi-thread", "time", "net"] }
 tracing = "0.1.44"
+zeroize = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 
 [features]
-default = ["discovery", "store", "persistence", "membership"]
+default = ["discovery", "store", "persistence", "membership", "pairing"]
 # JSON document Store facade (stitch_p2p::store).
 store = ["dep:serde_json"]
 # Peer discovery + NAT traversal + QUIC transport via mqp2p (stitch_p2p::discovery).
@@ -32,3 +38,13 @@ discovery = ["dep:mqp2p"]
 persistence = ["dep:fjall"]
 # Ed25519-signed writes + owner-controlled membership (stitch_p2p::membership).
 membership = ["dep:ed25519-dalek"]
+# Short-code device pairing via SPAKE2 (stitch_p2p::pairing).
+pairing = [
+    "membership",
+    "dep:spake2",
+    "dep:hkdf",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:zeroize",
+    "dep:rand_core",
+]
