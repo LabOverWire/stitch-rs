@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{ConnectionStage, Error, Result};
 use crate::quic::{self, CertIdentity, QuicEndpoint, SegmentationOffload};
 use crate::signaling::{
     Candidate, CandidateKind, ConnectionOffer, ConnectionSync, MIN_LEASE_SECS, PEER_LEASE_SECS,
@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{debug, info, warn};
+use tracing::{Span, debug, field, info, instrument, warn};
 use zeroize::Zeroizing;
 
 const STUN_REDISCOVER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -515,13 +515,16 @@ impl Peer {
         }
     }
 
+    #[instrument(skip_all, fields(session = field::Empty, peer = %target.id))]
     pub async fn connect_to(&self, target: &PeerInfo) -> Result<P2pConnection> {
+        let started = tokio::time::Instant::now();
         let my_peer_id = self
             .peer_id
             .as_deref()
             .ok_or(Error::Signaling("not registered".into()))?;
 
         let session_id = uuid::Uuid::new_v4().to_string();
+        Span::current().record("session", session_id.as_str());
 
         let answer_rx = self.signaling.subscribe_answers(my_peer_id).await?;
 
@@ -557,21 +560,31 @@ impl Peer {
         let answer =
             tokio::time::timeout(std::time::Duration::from_secs(10), answer_rx.recv_async())
                 .await
-                .map_err(|_| Error::Signaling("timeout waiting for connection answer".into()))?
-                .map_err(|e| Error::Signaling(format!("answer channel closed: {e}")))?;
+                .map_err(|_| Error::Connection {
+                    stage: ConnectionStage::Answer,
+                    session: session_id.clone(),
+                    peer: target.id.clone(),
+                    reason: "timed out waiting for answer".into(),
+                })?
+                .map_err(|e| Error::Connection {
+                    stage: ConnectionStage::Answer,
+                    session: session_id.clone(),
+                    peer: target.id.clone(),
+                    reason: format!("answer channel closed: {e}"),
+                })?;
 
         let signaling_rtt = offer_sent.elapsed();
 
         if answer.session_id != session_id {
-            return Err(Error::Signaling(format!(
-                "session ID mismatch: expected {session_id}, got {}",
-                answer.session_id
-            )));
+            return Err(Error::Connection {
+                stage: ConnectionStage::Answer,
+                session: session_id.clone(),
+                peer: target.id.clone(),
+                reason: format!("session id mismatch: got {}", answer.session_id),
+            });
         }
 
         info!(
-            session = answer.session_id,
-            from = answer.from,
             rtt_ms = signaling_rtt.as_millis() as u64,
             "received answer, measured signaling RTT"
         );
@@ -601,7 +614,12 @@ impl Peer {
             .map(|c| c.addr);
 
         if ordered_candidates.is_empty() && relay_addr.is_none() {
-            return Err(Error::Signaling("no candidates in answer".into()));
+            return Err(Error::Connection {
+                stage: ConnectionStage::Candidate,
+                session: session_id.clone(),
+                peer: target.id.clone(),
+                reason: "no candidates in answer".into(),
+            });
         }
 
         let sync = ConnectionSync {
@@ -611,6 +629,7 @@ impl Peer {
         };
         self.signaling.send_sync(&answer.from, &sync).await?;
 
+        let transport_start = tokio::time::Instant::now();
         let mut connection = None;
         for (i, remote_addr) in ordered_candidates.iter().enumerate() {
             info!(remote = %remote_addr, attempt = i + 1, "trying candidate");
@@ -631,7 +650,6 @@ impl Peer {
                 Ok(Ok(conn)) => {
                     info!(
                         remote = %remote_addr,
-                        peer = target.name,
                         "P2P connection established (initiator)"
                     );
                     connection = Some(conn);
@@ -659,7 +677,6 @@ impl Peer {
                 Ok((conn, endpoint)) => {
                     info!(
                         relay = %relay_addr,
-                        peer = target.name,
                         "P2P connection established via relay (initiator)"
                     );
                     connection = Some(conn);
@@ -669,8 +686,13 @@ impl Peer {
             }
         }
 
-        let connection =
-            connection.ok_or_else(|| Error::Quic("all candidates exhausted".into()))?;
+        let connection = connection.ok_or_else(|| Error::Connection {
+            stage: ConnectionStage::Candidate,
+            session: session_id.clone(),
+            peer: target.id.clone(),
+            reason: "all candidates exhausted".into(),
+        })?;
+        let transport = transport_start.elapsed();
 
         let remote_public_key = quic::peer_public_key(&connection);
 
@@ -679,10 +701,18 @@ impl Peer {
             remote_peer: target.clone(),
             remote_public_key,
             relay_endpoint,
+            session_id,
+            timings: ConnectionTimings {
+                signaling_wait: signaling_rtt,
+                transport,
+                total: started.elapsed(),
+            },
         })
     }
 
+    #[instrument(skip_all, fields(session = field::Empty, peer = field::Empty))]
     pub async fn accept_connection(&self) -> Result<P2pConnection> {
+        let started = tokio::time::Instant::now();
         let my_peer_id = self
             .peer_id
             .as_deref()
@@ -696,11 +726,9 @@ impl Peer {
             .await
             .map_err(|e| Error::Signaling(format!("offer channel closed: {e}")))?;
 
-        debug!(
-            session = offer.session_id,
-            from = offer.from,
-            "received connection offer"
-        );
+        Span::current().record("session", offer.session_id.as_str());
+        Span::current().record("peer", offer.from.as_str());
+        debug!("received connection offer");
 
         let relay_addr = offer
             .candidates
@@ -749,15 +777,30 @@ impl Peer {
         }
 
         if !offer.candidates.iter().any(|c| c.kind.is_connectable()) {
-            return Err(Error::Signaling(
-                "no connectable candidates in offer".into(),
-            ));
+            return Err(Error::Connection {
+                stage: ConnectionStage::Candidate,
+                session: offer.session_id.clone(),
+                peer: offer.from.clone(),
+                reason: "no connectable candidates in offer".into(),
+            });
         }
 
+        let sync_wait_start = tokio::time::Instant::now();
         let sync = tokio::time::timeout(std::time::Duration::from_secs(10), sync_rx.recv_async())
             .await
-            .map_err(|_| Error::Signaling("timeout waiting for sync".into()))?
-            .map_err(|e| Error::Signaling(format!("sync channel closed: {e}")))?;
+            .map_err(|_| Error::Connection {
+                stage: ConnectionStage::Sync,
+                session: offer.session_id.clone(),
+                peer: offer.from.clone(),
+                reason: "timed out waiting for sync".into(),
+            })?
+            .map_err(|e| Error::Connection {
+                stage: ConnectionStage::Sync,
+                session: offer.session_id.clone(),
+                peer: offer.from.clone(),
+                reason: format!("sync channel closed: {e}"),
+            })?;
+        let signaling_wait = sync_wait_start.elapsed();
 
         let wait_ms = sync.rtt_ms / 2;
         info!(
@@ -774,13 +817,21 @@ impl Peer {
                 .await;
         }
 
+        let transport_start = tokio::time::Instant::now();
         let (connection, relay_endpoint) = self
             .accept_direct_or_relay(
                 &offer.cert_fingerprint,
                 turn.as_ref().zip(relay_addr),
                 direct_candidates,
             )
-            .await?;
+            .await
+            .map_err(|e| Error::Connection {
+                stage: ConnectionStage::InboundAccept,
+                session: offer.session_id.clone(),
+                peer: offer.from.clone(),
+                reason: e.to_string(),
+            })?;
+        let transport = transport_start.elapsed();
 
         let remote_addr = connection.remote_address();
 
@@ -799,7 +850,6 @@ impl Peer {
 
         info!(
             remote = %remote_addr,
-            peer_id = remote_peer.id,
             relayed = relay_endpoint.is_some(),
             "P2P connection established (responder)"
         );
@@ -809,6 +859,12 @@ impl Peer {
             remote_peer,
             remote_public_key,
             relay_endpoint,
+            session_id: offer.session_id,
+            timings: ConnectionTimings {
+                signaling_wait,
+                transport,
+                total: started.elapsed(),
+            },
         })
     }
 
@@ -852,16 +908,41 @@ impl Drop for Peer {
     }
 }
 
+/// How long each stage of establishing a [`P2pConnection`] took. `signaling_wait`
+/// is the initiator's wait for the answer or the responder's wait for the sync;
+/// `transport` is the QUIC handshake across the chosen candidate or relay; `total`
+/// spans the whole `connect_to` / `accept_connection` call.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionTimings {
+    pub signaling_wait: std::time::Duration,
+    pub transport: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
 pub struct P2pConnection {
     connection: Connection,
     remote_peer: PeerInfo,
     remote_public_key: Option<[u8; 32]>,
     relay_endpoint: Option<QuicEndpoint>,
+    session_id: String,
+    timings: ConnectionTimings,
 }
 
 impl P2pConnection {
     pub fn remote_peer(&self) -> &PeerInfo {
         &self.remote_peer
+    }
+
+    /// The signaling session id this connection was established under, shared by
+    /// both peers, so a host and client can join their records of the same
+    /// attempt.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// How long each stage of establishing this connection took.
+    pub fn timings(&self) -> &ConnectionTimings {
+        &self.timings
     }
 
     pub fn is_relayed(&self) -> bool {
@@ -1082,6 +1163,12 @@ mod tests {
                 remote_peer: info_a,
                 remote_public_key,
                 relay_endpoint: None,
+                session_id: "test-session".into(),
+                timings: ConnectionTimings {
+                    signaling_wait: Duration::ZERO,
+                    transport: Duration::ZERO,
+                    total: Duration::ZERO,
+                },
             }
         });
 
@@ -1092,10 +1179,18 @@ mod tests {
             remote_peer: info_b,
             remote_public_key,
             relay_endpoint: None,
+            session_id: "test-session".into(),
+            timings: ConnectionTimings {
+                signaling_wait: Duration::ZERO,
+                transport: Duration::ZERO,
+                total: Duration::ZERO,
+            },
         };
         let conn_b = accept.await.expect("accept task");
 
         assert_eq!(conn_a.remote_public_key(), Some(expected_b));
+        assert_eq!(conn_a.session_id(), "test-session");
+        assert_eq!(conn_a.timings().total, Duration::ZERO);
 
         let mut send = conn_a.open_uni().await.expect("open_uni");
         send.write_all(b"frame-1").await.expect("write");
