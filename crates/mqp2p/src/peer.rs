@@ -560,28 +560,32 @@ impl Peer {
         let answer =
             tokio::time::timeout(std::time::Duration::from_secs(10), answer_rx.recv_async())
                 .await
-                .map_err(|_| Error::Connection {
-                    stage: ConnectionStage::Answer,
-                    session: session_id.clone(),
-                    peer: target.id.clone(),
-                    reason: "timed out waiting for answer".into(),
+                .map_err(|_| {
+                    Error::connection(
+                        ConnectionStage::Answer,
+                        &session_id,
+                        &target.id,
+                        "timed out waiting for answer",
+                    )
                 })?
-                .map_err(|e| Error::Connection {
-                    stage: ConnectionStage::Answer,
-                    session: session_id.clone(),
-                    peer: target.id.clone(),
-                    reason: format!("answer channel closed: {e}"),
+                .map_err(|e| {
+                    Error::connection(
+                        ConnectionStage::Answer,
+                        &session_id,
+                        &target.id,
+                        format!("answer channel closed: {e}"),
+                    )
                 })?;
 
         let signaling_rtt = offer_sent.elapsed();
 
         if answer.session_id != session_id {
-            return Err(Error::Connection {
-                stage: ConnectionStage::Answer,
-                session: session_id.clone(),
-                peer: target.id.clone(),
-                reason: format!("session id mismatch: got {}", answer.session_id),
-            });
+            return Err(Error::connection(
+                ConnectionStage::Answer,
+                &session_id,
+                &target.id,
+                format!("session id mismatch: got {}", answer.session_id),
+            ));
         }
 
         info!(
@@ -614,12 +618,12 @@ impl Peer {
             .map(|c| c.addr);
 
         if ordered_candidates.is_empty() && relay_addr.is_none() {
-            return Err(Error::Connection {
-                stage: ConnectionStage::Candidate,
-                session: session_id.clone(),
-                peer: target.id.clone(),
-                reason: "no candidates in answer".into(),
-            });
+            return Err(Error::connection(
+                ConnectionStage::Candidate,
+                &session_id,
+                &target.id,
+                "no candidates in answer",
+            ));
         }
 
         let sync = ConnectionSync {
@@ -686,11 +690,13 @@ impl Peer {
             }
         }
 
-        let connection = connection.ok_or_else(|| Error::Connection {
-            stage: ConnectionStage::Candidate,
-            session: session_id.clone(),
-            peer: target.id.clone(),
-            reason: "all candidates exhausted".into(),
+        let connection = connection.ok_or_else(|| {
+            Error::connection(
+                ConnectionStage::Candidate,
+                &session_id,
+                &target.id,
+                "all candidates exhausted",
+            )
         })?;
         let transport = transport_start.elapsed();
 
@@ -712,7 +718,6 @@ impl Peer {
 
     #[instrument(skip_all, fields(session = field::Empty, peer = field::Empty))]
     pub async fn accept_connection(&self) -> Result<P2pConnection> {
-        let started = tokio::time::Instant::now();
         let my_peer_id = self
             .peer_id
             .as_deref()
@@ -726,6 +731,7 @@ impl Peer {
             .await
             .map_err(|e| Error::Signaling(format!("offer channel closed: {e}")))?;
 
+        let started = tokio::time::Instant::now();
         Span::current().record("session", offer.session_id.as_str());
         Span::current().record("peer", offer.from.as_str());
         debug!("received connection offer");
@@ -777,28 +783,32 @@ impl Peer {
         }
 
         if !offer.candidates.iter().any(|c| c.kind.is_connectable()) {
-            return Err(Error::Connection {
-                stage: ConnectionStage::Candidate,
-                session: offer.session_id.clone(),
-                peer: offer.from.clone(),
-                reason: "no connectable candidates in offer".into(),
-            });
+            return Err(Error::connection(
+                ConnectionStage::Candidate,
+                &offer.session_id,
+                &offer.from,
+                "no connectable candidates in offer",
+            ));
         }
 
         let sync_wait_start = tokio::time::Instant::now();
         let sync = tokio::time::timeout(std::time::Duration::from_secs(10), sync_rx.recv_async())
             .await
-            .map_err(|_| Error::Connection {
-                stage: ConnectionStage::Sync,
-                session: offer.session_id.clone(),
-                peer: offer.from.clone(),
-                reason: "timed out waiting for sync".into(),
+            .map_err(|_| {
+                Error::connection(
+                    ConnectionStage::Sync,
+                    &offer.session_id,
+                    &offer.from,
+                    "timed out waiting for sync",
+                )
             })?
-            .map_err(|e| Error::Connection {
-                stage: ConnectionStage::Sync,
-                session: offer.session_id.clone(),
-                peer: offer.from.clone(),
-                reason: format!("sync channel closed: {e}"),
+            .map_err(|e| {
+                Error::connection(
+                    ConnectionStage::Sync,
+                    &offer.session_id,
+                    &offer.from,
+                    format!("sync channel closed: {e}"),
+                )
             })?;
         let signaling_wait = sync_wait_start.elapsed();
 
@@ -825,11 +835,13 @@ impl Peer {
                 direct_candidates,
             )
             .await
-            .map_err(|e| Error::Connection {
-                stage: ConnectionStage::InboundAccept,
-                session: offer.session_id.clone(),
-                peer: offer.from.clone(),
-                reason: e.to_string(),
+            .map_err(|e| {
+                Error::connection(
+                    ConnectionStage::InboundAccept,
+                    &offer.session_id,
+                    &offer.from,
+                    e.to_string(),
+                )
             })?;
         let transport = transport_start.elapsed();
 
@@ -911,7 +923,12 @@ impl Drop for Peer {
 /// How long each stage of establishing a [`P2pConnection`] took. `signaling_wait`
 /// is the initiator's wait for the answer or the responder's wait for the sync;
 /// `transport` is the QUIC handshake across the chosen candidate or relay; `total`
-/// spans the whole `connect_to` / `accept_connection` call.
+/// runs from the start of the attempt (offer sent, for the initiator; offer
+/// received, for the responder) to the established connection, so it excludes the
+/// responder's idle wait for an offer. `signaling_wait` and `transport` are two
+/// phases within `total` and do not sum to it, since it also covers sending
+/// signaling and, on the responder, the deliberate RTT/2 pacing wait before
+/// probing.
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionTimings {
     pub signaling_wait: std::time::Duration,

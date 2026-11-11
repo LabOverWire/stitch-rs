@@ -66,8 +66,26 @@ pub enum ConnectionStage {
     Sync,
     /// Accepting the inbound QUIC connection (responder).
     InboundAccept,
-    /// Trying the candidate addresses from the answer (initiator).
+    /// Selecting or reaching a candidate address: the initiator exhausting the
+    /// answer's candidates, or the responder finding no connectable candidate in
+    /// the offer.
     Candidate,
+}
+
+impl Error {
+    pub(crate) fn connection(
+        stage: ConnectionStage,
+        session: &str,
+        peer: &str,
+        reason: impl Into<String>,
+    ) -> Self {
+        Error::Connection {
+            stage,
+            session: session.to_string(),
+            peer: peer.to_string(),
+            reason: reason.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for ConnectionStage {
