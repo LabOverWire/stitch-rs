@@ -46,6 +46,7 @@ struct EngineState {
     mutation_bus: broadcast::Sender<MutationDelivery>,
     connection_status: broadcast::Sender<ConnectionStatus>,
     session_invalid: Mutex<Option<SessionInvalidHandler>>,
+    handlers_registered: Mutex<bool>,
     client_id: String,
     prefix: String,
     response_prefix: String,
@@ -89,6 +90,7 @@ impl SyncEngine {
             mutation_bus,
             connection_status,
             session_invalid: Mutex::new(None),
+            handlers_registered: Mutex::new(false),
             client_id: client_id.clone(),
             prefix: prefix.clone(),
             response_prefix: response_prefix.clone(),
@@ -151,7 +153,8 @@ impl SyncEngine {
 
         let result = self.client.connect(server_url, args).await?;
 
-        if !result.session_present {
+        let handlers_registered = *self.state.handlers_registered.lock_guard();
+        if !result.session_present || !handlers_registered {
             self.subscribe_to_response_topic().await?;
             self.subscribe_to_top_level().await?;
             for scope_id in self.snapshot_subscribed_scopes() {
@@ -159,6 +162,7 @@ impl SyncEngine {
                     tracing::warn!(scope = %scope_id, error = %e, "resubscribe failed after session loss");
                 }
             }
+            *self.state.handlers_registered.lock_guard() = true;
         }
         Ok(())
     }
@@ -917,6 +921,7 @@ mod tests {
             mutation_bus,
             connection_status,
             session_invalid: Mutex::new(None),
+            handlers_registered: Mutex::new(false),
             client_id: client_id.to_string(),
             prefix: "$DB".to_string(),
             response_prefix: "$DB/clients".to_string(),
@@ -986,5 +991,124 @@ mod tests {
             .expect("remote event must reach the bus when the awaiting flag outlives the buffer");
         assert_eq!(delivered.scope_id, "e1");
         assert_eq!(delivered.mutation.id, "h1");
+    }
+
+    struct MockClient {
+        session_present: bool,
+        subscribes: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl crate::mqtt_client::MqttClientApi for MockClient {
+        async fn connect(
+            &self,
+            _url: &str,
+            _args: ConnectArgs,
+        ) -> Result<crate::mqtt_client::ConnectOutcome> {
+            Ok(crate::mqtt_client::ConnectOutcome {
+                session_present: self.session_present,
+            })
+        }
+        async fn disconnect(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn disconnect_abnormally(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn is_connected(&self) -> bool {
+            true
+        }
+        async fn publish(
+            &self,
+            _topic: String,
+            _payload: Vec<u8>,
+            _args: PublishArgs,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            topic: String,
+            _on_message: crate::mqtt_client::MessageHandler,
+        ) -> Result<()> {
+            self.subscribes.lock_guard().push(topic);
+            Ok(())
+        }
+        async fn unsubscribe(&self, _topic: String) -> Result<()> {
+            Ok(())
+        }
+        async fn on_connection_event(&self, _handler: ConnectionHandler) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn engine_with_mock(
+        client_id: &str,
+        session_present: bool,
+        subscribes: Arc<Mutex<Vec<String>>>,
+    ) -> SyncEngine {
+        let client: DynMqttClient = rt::Shared::new(MockClient {
+            session_present,
+            subscribes,
+        });
+        let config = StoreConfig::new(
+            HashMap::new(),
+            crate::config::ScopeConfig {
+                root_entity: "event".to_string(),
+                child_entities: Vec::new(),
+                scope_field: "scopeId".to_string(),
+            },
+        );
+        SyncEngine {
+            client_id: client_id.to_string(),
+            config: Arc::new(config),
+            prefix: "$DB".to_string(),
+            response_prefix: "$DB/clients".to_string(),
+            client,
+            state: rt::Shared::new(scope_engine_state(client_id)),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_registers_handlers_on_a_resumed_session_in_a_new_process() {
+        let subscribes = Arc::new(Mutex::new(Vec::new()));
+        let engine = engine_with_mock("reuse-1", true, Arc::clone(&subscribes));
+
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+
+        let subs = subscribes.lock_guard().clone();
+        assert!(
+            subs.iter().any(|t| t == "$DB/clients/reuse-1/#"),
+            "a resumed broker session in a fresh process must still register the response-topic handler: {subs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_re_subscribe_once_handlers_are_registered() {
+        let subscribes = Arc::new(Mutex::new(Vec::new()));
+        let engine = engine_with_mock("reuse-2", true, Arc::clone(&subscribes));
+
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+        let after_first = subscribes.lock_guard().len();
+        assert!(after_first > 0, "the first connect must register handlers");
+
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            subscribes.lock_guard().len(),
+            after_first,
+            "a reconnect with handlers already registered must not re-subscribe"
+        );
     }
 }
