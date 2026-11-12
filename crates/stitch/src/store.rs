@@ -1020,7 +1020,7 @@ impl Store {
         }
 
         if inner.persistence.is_some() {
-            let bundle = inner.load_bundle_from_persistence(scope_id).await?;
+            let bundle = inner.load_scope_bundle(scope_id).await?;
             inner.memory.load_scope(scope_id, bundle).await?;
         }
         inner.state.lock_guard().current_scope_server_synced = false;
@@ -1447,21 +1447,19 @@ impl StoreInner {
             let _ = remote.apply_mutation_to_db(mutation, &accessor).await;
         }
 
-        let bundle = self.load_bundle_from_persistence(scope_id).await?;
+        let bundle = self.load_scope_bundle(scope_id).await?;
         self.memory.load_scope(scope_id, bundle).await?;
         Ok(())
     }
 
-    async fn load_bundle_from_persistence(&self, scope_id: &str) -> Result<ScopeBundle> {
-        let Some(persistence) = &self.persistence else {
-            return Ok(ScopeBundle::default());
-        };
-        let root = persistence
+    async fn load_scope_bundle(self: &Shared<Self>, scope_id: &str) -> Result<ScopeBundle> {
+        let accessor = self.local_accessor();
+        let root = accessor
             .read(&self.config.scope.root_entity, scope_id)
             .await?;
         let mut children: BTreeMap<String, Vec<Record>> = BTreeMap::new();
         for child in &self.config.scope.child_entities {
-            let list = persistence.list_by_scope(child, scope_id).await?;
+            let list = accessor.list(child, Some(scope_id)).await?;
             children.insert(child.clone(), list);
         }
         Ok(ScopeBundle { root, children })

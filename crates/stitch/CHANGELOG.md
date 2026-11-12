@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `replace_scope` on a memory-only store (`persistence: None`) with a remote
+  returned `Ok` but left the scope empty: `read` and `snapshot` saw none of the
+  scope's records even though the server held them. `open_scope_with_server`
+  wrote the fetched root and children through the local accessor (into memory,
+  with no persistence) and then rebuilt the in-memory scope from persistence,
+  which returned an empty bundle and wiped what had just been written. The scope
+  bundle is now loaded from the active local store — persistence when configured,
+  otherwise memory — so a memory-only store holds the scope's records after
+  `replace_scope`, matching the persistence-backed path.
 - A new process reusing a `client_id` within the session-expiry window resumed the
   broker session (`clean_start: false`) and never registered its local message
   handlers, so the broker delivered responses to `$DB/clients/<client_id>/…` with
