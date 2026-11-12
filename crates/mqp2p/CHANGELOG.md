@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `P2pConnection::session_id()` and `P2pConnection::timings()` expose the
+  signaling session id (shared by both peers) and the per-stage durations
+  (`ConnectionTimings { signaling_wait, transport, total }`) of a connection, so
+  a host and client can join their records of the same attempt and see where the
+  time went.
+- `connect_to` and `accept_connection` now run inside a `tracing` span carrying
+  the session id and remote peer id, so every log line of a connection attempt
+  is attributable.
+- `Error::Connection { stage, session, peer, reason }` with `ConnectionStage`
+  (`Answer`, `Sync`, `InboundAccept`, `Candidate`) replaces opaque
+  `Error::Signaling` text for the connection-establishment failures, naming the
+  stage, session and peer.
+
 ### Fixed
 
 - A `Peer` configured with TURN now allocates a relay for each connection
