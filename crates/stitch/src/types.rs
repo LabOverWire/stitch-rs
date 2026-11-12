@@ -102,6 +102,7 @@ pub struct PendingMutation {
     pub id: String,
     pub scope_id: String,
     pub data: Option<Record>,
+    pub pre_image: Option<Record>,
     pub created_at: u64,
 }
 

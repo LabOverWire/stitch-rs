@@ -227,12 +227,24 @@ fn pending(
     scope_id: &str,
     data: Map<String, Value>,
 ) -> PendingMutation {
+    pending_with_pre_image(op, entity, id, scope_id, data, None)
+}
+
+fn pending_with_pre_image(
+    op: Operation,
+    entity: &str,
+    id: &str,
+    scope_id: &str,
+    data: Map<String, Value>,
+    pre_image: Option<Map<String, Value>>,
+) -> PendingMutation {
     PendingMutation {
         op,
         entity: entity.into(),
         id: id.into(),
         scope_id: scope_id.into(),
         data: if data.is_empty() { None } else { Some(data) },
+        pre_image,
         created_at: 0,
     }
 }
@@ -256,6 +268,31 @@ async fn persistent_queue_drops_row_after_successful_flush() {
     assert_eq!(sender.log(), vec!["create:task:p1"]);
     let remaining = queue.pending_for_scope("p1").await.unwrap();
     assert!(remaining.is_empty());
+}
+
+#[tokio::test]
+async fn persistent_queue_round_trips_a_pre_image() {
+    let (_dir, _persistence, queue) = open_persistent_queue().await;
+    let pre_image = make_record(&[("id", json!("t1")), ("status", json!("pending"))]);
+    queue
+        .queue(pending_with_pre_image(
+            Operation::Update,
+            "task",
+            "t1",
+            "p1",
+            make_record(&[("status", json!("running"))]),
+            Some(pre_image.clone()),
+        ))
+        .await
+        .unwrap();
+
+    let pending = queue.pending_for_scope("p1").await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].pre_image.as_ref(),
+        Some(&pre_image),
+        "a queued mutation's pre-image must survive the persistence round-trip"
+    );
 }
 
 #[tokio::test]
@@ -451,11 +488,11 @@ async fn conflict_on_insert_drops_without_stealing_the_unique_key() {
     );
     assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
     assert_eq!(
-        summary.rejected_inserts.len(),
+        summary.rejected_mutations.len(),
         1,
         "the dropped insert must be reported so the store can roll its local row back"
     );
-    let reported = &summary.rejected_inserts[0];
+    let reported = &summary.rejected_mutations[0];
     assert_eq!(reported.entity, "task");
     assert_eq!(reported.id, "t1");
     assert_eq!(reported.scope_id, "p1");
@@ -485,11 +522,11 @@ async fn ownership_denied_insert_is_dropped_and_reported_for_rollback() {
     );
     assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
     assert_eq!(
-        summary.rejected_inserts.len(),
+        summary.rejected_mutations.len(),
         1,
         "an ownership-denied insert must be reported so the store rolls its local row back"
     );
-    let reported = &summary.rejected_inserts[0];
+    let reported = &summary.rejected_mutations[0];
     assert_eq!(reported.entity, "task");
     assert_eq!(reported.id, "t1");
     assert_eq!(reported.scope_id, "p1");
@@ -719,9 +756,9 @@ async fn conflict_on_an_insert_the_broker_already_holds_becomes_an_update() {
         "a replayed insert must be checked and resent as an update"
     );
     assert!(
-        summary.rejected_inserts.is_empty(),
+        summary.rejected_mutations.is_empty(),
         "an insert the broker already holds must not be rolled back: {:?}",
-        summary.rejected_inserts
+        summary.rejected_mutations
     );
     assert_eq!(summary.retained, 0);
     assert!(queue.pending_for_scope("p1").await.unwrap().is_empty());
@@ -746,7 +783,7 @@ async fn replayed_insert_is_kept_when_its_update_fails_transiently() {
     sender.set("update", Behavior::Transient);
     sender.set_read("task", "t1", make_record(&[("id", json!("t1"))]));
     let summary = queue.flush(sender.as_ref()).await.unwrap();
-    assert!(summary.rejected_inserts.is_empty());
+    assert!(summary.rejected_mutations.is_empty());
     assert_eq!(
         summary.retained, 1,
         "a transient failure keeps the insert for the next flush"

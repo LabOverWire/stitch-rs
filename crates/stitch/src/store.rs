@@ -372,6 +372,7 @@ impl Store {
                     id: id.clone(),
                     scope_id: effective_scope.clone(),
                     data: Some(data.clone()),
+                    pre_image: None,
                     created_at: 0,
                 })
                 .await?;
@@ -507,6 +508,7 @@ impl Store {
                     id: id.to_string(),
                     scope_id: scope_id.clone(),
                     data: Some(fields.clone()),
+                    pre_image: pre_image.clone(),
                     created_at: 0,
                 })
                 .await?;
@@ -619,6 +621,7 @@ impl Store {
                     id: id.to_string(),
                     scope_id: scope_id.clone(),
                     data: None,
+                    pre_image: pre_image.clone(),
                     created_at: 0,
                 })
                 .await?;
@@ -1529,10 +1532,16 @@ impl StoreInner {
         }
     }
 
-    async fn rollback_rejected_inserts(&self, rejected: &[crate::queue::RejectedInsert]) {
-        for insert in rejected {
-            self.rollback_local_row(&insert.entity, &insert.id, Origin::Local)
-                .await;
+    async fn rollback_rejected_mutations(&self, rejected: &[crate::queue::RejectedMutation]) {
+        for rejected in rejected {
+            self.restore_local_row(
+                &rejected.entity,
+                &rejected.id,
+                &rejected.scope_id,
+                rejected.pre_image.clone(),
+                Origin::Local,
+            )
+            .await;
         }
     }
 }
@@ -1739,7 +1748,7 @@ async fn flush_loop(inner: Shared<StoreInner>) {
                 }
             };
             inner
-                .rollback_rejected_inserts(&summary.rejected_inserts)
+                .rollback_rejected_mutations(&summary.rejected_mutations)
                 .await;
             if summary.retained == 0 {
                 break;
@@ -1964,7 +1973,7 @@ async fn on_connected(inner: Shared<StoreInner>) {
         let sender: &dyn crate::queue::MutationSender = remote.as_ref();
         if let Ok(summary) = queue.flush(sender).await {
             inner
-                .rollback_rejected_inserts(&summary.rejected_inserts)
+                .rollback_rejected_mutations(&summary.rejected_mutations)
                 .await;
             if summary.retained > 0 {
                 inner.flush_notify.notify_one();

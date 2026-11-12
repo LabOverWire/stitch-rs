@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An `update` or `delete` queued while offline and then refused on a later flush
+  with a terminal publish reason code now reverts its optimistic local change —
+  the `update` restores the pre-update row, the `delete` reinstates the removed
+  row — instead of dropping the mutation and leaving the local store diverged
+  until the next full scope sync (the F5 gap noted in 0.6.5). The offline queue
+  now persists a pre-image alongside each queued `update`/`delete` and the store
+  restores it when the broker refuses the flush. A refusal with a retryable reason
+  code is still retained and retried.
+
 ## [0.6.5] - 2026-10-29
 
 ### Added
