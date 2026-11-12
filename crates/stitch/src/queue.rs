@@ -2,24 +2,26 @@ use crate::error::Result;
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
 
-/// A queued insert the broker rejected during flush — either a `Conflict` (409,
-/// its unique key is already held by another row) or an `Ownership` denial (403).
-/// Such an insert can never land, so the store rolls the optimistic local copy
-/// back and a losing racer converges to not-holding.
+/// A queued mutation the broker rejected with no retry left during flush — a
+/// `Conflict` (409) or `Ownership` denial (403) on an insert, or a terminal
+/// publish refusal on any op. The store rolls the optimistic local copy back to
+/// `pre_image`: `None` deletes the phantom row (a rejected insert), `Some` the
+/// prior state (a rejected update or delete) reverts or reinstates it.
 #[derive(Debug, Clone)]
-pub struct RejectedInsert {
+pub struct RejectedMutation {
     pub entity: String,
     pub id: String,
     pub scope_id: String,
+    pub pre_image: Option<Record>,
 }
 
 /// Outcome of an offline-queue flush: how many mutations were retained (still
-/// pending, needing another pass) and which inserts the broker rejected so the
+/// pending, needing another pass) and which mutations the broker rejected so the
 /// caller can roll their local rows back.
 #[derive(Debug, Default)]
 pub struct FlushSummary {
     pub retained: usize,
-    pub rejected_inserts: Vec<RejectedInsert>,
+    pub rejected_mutations: Vec<RejectedMutation>,
 }
 
 /// Sends a queued mutation to the remote during an offline-queue flush, and

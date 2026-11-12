@@ -2,7 +2,7 @@ use crate::error::{Error, Result};
 use crate::lock::MutexExt;
 use crate::origin::Origin;
 use crate::persistence::PersistenceLayer;
-pub use crate::queue::{FlushSummary, MutationSender, OfflineQueue, RejectedInsert};
+pub use crate::queue::{FlushSummary, MutationSender, OfflineQueue, RejectedMutation};
 use crate::rt::{Shared, new_id, now_millis};
 use crate::types::{Operation, PendingMutation, Record};
 use async_trait::async_trait;
@@ -38,6 +38,7 @@ struct ConsolidatedMutation {
     id: String,
     scope_id: String,
     data: Option<Record>,
+    pre_image: Option<Record>,
     record_ids: Vec<String>,
     min_created_at: u64,
 }
@@ -67,6 +68,7 @@ struct StoredRow {
     entity_id: String,
     scope_id: String,
     data: Option<Record>,
+    pre_image: Option<Record>,
     created_at: u64,
 }
 
@@ -85,6 +87,7 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
         let entity = entries[0].entity.clone();
         let entity_id = entries[0].entity_id.clone();
         let scope_id = entries[0].scope_id.clone();
+        let pre_image = entries[0].pre_image.clone();
 
         let has_insert = entries.iter().any(|e| e.op == Operation::Insert);
         let has_delete = entries.iter().any(|e| e.op == Operation::Delete);
@@ -96,6 +99,7 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
                 id: entity_id,
                 scope_id,
                 data: None,
+                pre_image,
                 record_ids,
                 min_created_at,
             }
@@ -120,6 +124,7 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
                 id: entity_id,
                 scope_id,
                 data: Some(merged),
+                pre_image,
                 record_ids,
                 min_created_at,
             }
@@ -130,6 +135,7 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
                 id: entity_id,
                 scope_id,
                 data: None,
+                pre_image,
                 record_ids,
                 min_created_at,
             }
@@ -152,6 +158,7 @@ fn consolidate(rows: Vec<StoredRow>) -> Vec<ConsolidatedMutation> {
                 } else {
                     Some(merged)
                 },
+                pre_image,
                 record_ids,
                 min_created_at,
             }
@@ -228,7 +235,7 @@ async fn flush_consolidated(
     mut remove_records: impl FnMut(Vec<String>) -> RemoveFuture,
 ) -> FlushSummary {
     let mut retained = 0usize;
-    let mut rejected_inserts: Vec<RejectedInsert> = Vec::new();
+    let mut rejected_mutations: Vec<RejectedMutation> = Vec::new();
     for mutation in consolidated {
         let attempt = match mutation.op {
             Operation::Insert => {
@@ -321,9 +328,9 @@ async fn flush_consolidated(
                     id = %mutation.id,
                     op = ?mutation.op,
                     error = %err,
-                    "dropping queued mutation the broker refused to publish"
+                    "dropping queued mutation the broker refused to publish; reverting the optimistic local change"
                 );
-                FlushOutcome::Drop
+                FlushOutcome::DropRejected
             }
             Err(err) if err.is_permanent_mutation() => {
                 tracing::error!(
@@ -352,10 +359,11 @@ async fn flush_consolidated(
                 remove_records(mutation.record_ids).await;
             }
             FlushOutcome::DropRejected => {
-                rejected_inserts.push(RejectedInsert {
+                rejected_mutations.push(RejectedMutation {
                     entity: mutation.entity.clone(),
                     id: mutation.id.clone(),
                     scope_id: mutation.scope_id.clone(),
+                    pre_image: mutation.pre_image.clone(),
                 });
                 remove_records(mutation.record_ids).await;
             }
@@ -366,7 +374,7 @@ async fn flush_consolidated(
     }
     FlushSummary {
         retained,
-        rejected_inserts,
+        rejected_mutations,
     }
 }
 
@@ -439,6 +447,9 @@ impl OfflineQueue for PersistentOfflineQueue {
         record.insert("createdAt".into(), Value::Number(created_at.into()));
         if let Some(data) = mutation.data {
             record.insert("data".into(), Value::Object(data));
+        }
+        if let Some(pre_image) = mutation.pre_image {
+            record.insert("preImage".into(), Value::Object(pre_image));
         }
         self.persistence
             .create(PENDING_ENTITY, record, Origin::Local)
@@ -607,6 +618,7 @@ impl OfflineQueue for InMemoryOfflineQueue {
             entity_id: mutation.id,
             scope_id: mutation.scope_id,
             data: mutation.data,
+            pre_image: mutation.pre_image,
             created_at: if mutation.created_at == 0 {
                 now_millis()
             } else {
@@ -735,6 +747,12 @@ fn pending_sync_definition() -> crate::config::EntityDefinition {
                 default: None,
             },
             SchemaField {
+                name: "preImage".into(),
+                r#type: FieldType::Object,
+                required: false,
+                default: None,
+            },
+            SchemaField {
                 name: "createdAt".into(),
                 r#type: FieldType::Number,
                 required: false,
@@ -760,6 +778,10 @@ fn row_from_record(record: Record) -> Option<StoredRow> {
         Value::Object(m) => Some(m.clone()),
         _ => None,
     });
+    let pre_image = record.get("preImage").and_then(|v| match v {
+        Value::Object(m) => Some(m.clone()),
+        _ => None,
+    });
     Some(StoredRow {
         record_id,
         op,
@@ -767,6 +789,7 @@ fn row_from_record(record: Record) -> Option<StoredRow> {
         entity_id,
         scope_id,
         data,
+        pre_image,
         created_at,
     })
 }
@@ -778,6 +801,7 @@ fn pending_from_row(row: StoredRow) -> PendingMutation {
         id: row.entity_id,
         scope_id: row.scope_id,
         data: row.data,
+        pre_image: row.pre_image,
         created_at: row.created_at,
     }
 }
@@ -819,6 +843,8 @@ mod tests {
         fail_create_transient: bool,
         fail_create_rejected: bool,
         fail_create_publish_rejection: Option<u8>,
+        fail_update_publish_rejection: Option<u8>,
+        fail_delete_publish_rejection: Option<u8>,
         read_result: Mutex<Option<Record>>,
     }
 
@@ -852,10 +878,16 @@ mod tests {
                     id: id.to_string(),
                 });
             }
+            if let Some(reason_code) = self.fail_update_publish_rejection {
+                return Err(Error::PublishRejected { reason_code });
+            }
             Ok(())
         }
 
         async fn sync_delete(&self, _entity: &str, _scope_id: &str, _id: &str) -> Result<()> {
+            if let Some(reason_code) = self.fail_delete_publish_rejection {
+                return Err(Error::PublishRejected { reason_code });
+            }
             Ok(())
         }
 
@@ -877,12 +909,23 @@ mod tests {
     }
 
     fn pending(op: Operation, id: &str, data: Option<Record>, created_at: u64) -> PendingMutation {
+        pending_with_pre_image(op, id, data, None, created_at)
+    }
+
+    fn pending_with_pre_image(
+        op: Operation,
+        id: &str,
+        data: Option<Record>,
+        pre_image: Option<Record>,
+        created_at: u64,
+    ) -> PendingMutation {
         PendingMutation {
             op,
             entity: "task".into(),
             id: id.into(),
             scope_id: "s1".into(),
             data,
+            pre_image,
             created_at,
         }
     }
@@ -1007,8 +1050,8 @@ mod tests {
         };
         let summary = queue.flush(&refusing).await?;
         assert_eq!(summary.retained, 0);
-        assert_eq!(summary.rejected_inserts.len(), 1);
-        assert_eq!(summary.rejected_inserts[0].id, "t1");
+        assert_eq!(summary.rejected_mutations.len(), 1);
+        assert_eq!(summary.rejected_mutations[0].id, "t1");
 
         let recovered = FakeSender::default();
         assert_eq!(queue.flush(&recovered).await?.retained, 0);
@@ -1038,7 +1081,7 @@ mod tests {
         };
         let summary = queue.flush(&refusing).await?;
         assert_eq!(summary.retained, 1);
-        assert!(summary.rejected_inserts.is_empty());
+        assert!(summary.rejected_mutations.is_empty());
 
         let recovered = FakeSender::default();
         assert_eq!(queue.flush(&recovered).await?.retained, 0);
@@ -1047,6 +1090,91 @@ mod tests {
             1,
             "a quota-exceeded refusal must be retried once the broker recovers"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_update_refused_with_terminal_code_reports_its_pre_image()
+    -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        let pre_image = record(&[("id", "t1"), ("status", "pending")]);
+        queue
+            .queue(pending_with_pre_image(
+                Operation::Update,
+                "t1",
+                Some(record(&[("status", "running")])),
+                Some(pre_image.clone()),
+                1,
+            ))
+            .await?;
+
+        let refusing = FakeSender {
+            fail_update_publish_rejection: Some(0x87),
+            ..Default::default()
+        };
+        let summary = queue.flush(&refusing).await?;
+        assert_eq!(summary.retained, 0);
+        assert_eq!(summary.rejected_mutations.len(), 1);
+        assert_eq!(summary.rejected_mutations[0].id, "t1");
+        assert_eq!(
+            summary.rejected_mutations[0].pre_image.as_ref(),
+            Some(&pre_image),
+            "a refused update must report its pre-image so the local row can be reverted"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_delete_refused_with_terminal_code_reports_its_pre_image()
+    -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        let pre_image = record(&[("id", "t1"), ("status", "pending")]);
+        queue
+            .queue(pending_with_pre_image(
+                Operation::Delete,
+                "t1",
+                None,
+                Some(pre_image.clone()),
+                1,
+            ))
+            .await?;
+
+        let refusing = FakeSender {
+            fail_delete_publish_rejection: Some(0x87),
+            ..Default::default()
+        };
+        let summary = queue.flush(&refusing).await?;
+        assert_eq!(summary.retained, 0);
+        assert_eq!(summary.rejected_mutations.len(), 1);
+        assert_eq!(
+            summary.rejected_mutations[0].pre_image.as_ref(),
+            Some(&pre_image),
+            "a refused delete must report its pre-image so the local row can be reinstated"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_retains_an_update_refused_with_a_retryable_reason_code()
+    -> crate::error::Result<()> {
+        let queue = InMemoryOfflineQueue::new("workspace".into());
+        queue
+            .queue(pending_with_pre_image(
+                Operation::Update,
+                "t1",
+                Some(record(&[("status", "running")])),
+                Some(record(&[("id", "t1"), ("status", "pending")])),
+                1,
+            ))
+            .await?;
+
+        let refusing = FakeSender {
+            fail_update_publish_rejection: Some(0x97),
+            ..Default::default()
+        };
+        let summary = queue.flush(&refusing).await?;
+        assert_eq!(summary.retained, 1);
+        assert!(summary.rejected_mutations.is_empty());
         Ok(())
     }
 
