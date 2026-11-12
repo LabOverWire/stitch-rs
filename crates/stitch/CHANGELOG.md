@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-12
+
+### Changed
+
+- The flush-refusal type `queue::RejectedInsert` is renamed to
+  `queue::RejectedMutation` (also re-exported from `offline_queue`) and
+  `FlushSummary::rejected_inserts` to `FlushSummary::rejected_mutations`, because
+  a refused flush now reverts `update` and `delete` as well as `create`. The type
+  carries a new `pre_image: Option<Record>` holding the row to restore. Breaking
+  for any code naming these symbols or destructuring the struct.
+
 ### Fixed
 
 - `replace_scope` on a memory-only store (`persistence: None`) with a remote

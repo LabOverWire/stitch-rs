@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-12
+
+### Fixed
+
+- `replaceScope` on a store with a remote but no persistence resolved
+  successfully yet left the scope empty — reads and snapshots saw none of the
+  scope's records although the server held them. The scope is now loaded from the
+  in-memory store when no persistence is configured, so a browser store without
+  persistence holds the scope after `replaceScope`. Inherited from stitch-sync;
+  see its changelog.
+- A tab reusing a `clientId` within the broker's session-expiry window resumed the
+  session and never registered its message handlers, so every `request` timed out.
+  Handlers are now registered on first connect in a process even when the broker
+  reports an existing session. Inherited from stitch-sync; see its changelog.
+- An `update` or `delete` queued offline and then refused on a later flush now
+  reverts its optimistic local change instead of leaving the store diverged until
+  the next full scope sync. Inherited from stitch-sync; see its changelog.
+
 ## [0.6.5] - 2026-10-29
 
 ### Fixed
