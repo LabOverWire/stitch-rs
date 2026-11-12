@@ -993,8 +993,10 @@ mod tests {
         assert_eq!(delivered.mutation.id, "h1");
     }
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     struct MockClient {
-        session_present: bool,
+        session_present: Arc<AtomicBool>,
         subscribes: Arc<Mutex<Vec<String>>>,
     }
 
@@ -1007,7 +1009,7 @@ mod tests {
             _args: ConnectArgs,
         ) -> Result<crate::mqtt_client::ConnectOutcome> {
             Ok(crate::mqtt_client::ConnectOutcome {
-                session_present: self.session_present,
+                session_present: self.session_present.load(Ordering::SeqCst),
             })
         }
         async fn disconnect(&self) -> Result<()> {
@@ -1045,7 +1047,7 @@ mod tests {
 
     fn engine_with_mock(
         client_id: &str,
-        session_present: bool,
+        session_present: Arc<AtomicBool>,
         subscribes: Arc<Mutex<Vec<String>>>,
     ) -> SyncEngine {
         let client: DynMqttClient = rt::Shared::new(MockClient {
@@ -1074,7 +1076,11 @@ mod tests {
     #[tokio::test]
     async fn connect_registers_handlers_on_a_resumed_session_in_a_new_process() {
         let subscribes = Arc::new(Mutex::new(Vec::new()));
-        let engine = engine_with_mock("reuse-1", true, Arc::clone(&subscribes));
+        let engine = engine_with_mock(
+            "reuse-1",
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&subscribes),
+        );
 
         engine
             .connect("tcp://localhost", None, None, None)
@@ -1091,7 +1097,11 @@ mod tests {
     #[tokio::test]
     async fn connect_does_not_re_subscribe_once_handlers_are_registered() {
         let subscribes = Arc::new(Mutex::new(Vec::new()));
-        let engine = engine_with_mock("reuse-2", true, Arc::clone(&subscribes));
+        let engine = engine_with_mock(
+            "reuse-2",
+            Arc::new(AtomicBool::new(true)),
+            Arc::clone(&subscribes),
+        );
 
         engine
             .connect("tcp://localhost", None, None, None)
@@ -1109,6 +1119,56 @@ mod tests {
             subscribes.lock_guard().len(),
             after_first,
             "a reconnect with handlers already registered must not re-subscribe"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_subscribes_on_a_fresh_session() {
+        let subscribes = Arc::new(Mutex::new(Vec::new()));
+        let engine = engine_with_mock(
+            "fresh-1",
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&subscribes),
+        );
+
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+
+        let subs = subscribes.lock_guard().clone();
+        assert!(
+            subs.iter().any(|t| t == "$DB/clients/fresh-1/#"),
+            "a fresh session with no session present must register the response-topic handler: {subs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_re_subscribes_after_a_session_loss_even_when_handlers_were_registered() {
+        let subscribes = Arc::new(Mutex::new(Vec::new()));
+        let session_present = Arc::new(AtomicBool::new(true));
+        let engine = engine_with_mock(
+            "reuse-3",
+            Arc::clone(&session_present),
+            Arc::clone(&subscribes),
+        );
+
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+        let after_first = subscribes.lock_guard().len();
+        assert!(after_first > 0, "the first connect must register handlers");
+
+        session_present.store(false, Ordering::SeqCst);
+        engine
+            .connect("tcp://localhost", None, None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            subscribes.lock_guard().len() > after_first,
+            "a reconnect that reports no session present must re-subscribe even after handlers were registered"
         );
     }
 }
