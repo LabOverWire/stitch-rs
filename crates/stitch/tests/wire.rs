@@ -23,6 +23,13 @@ fn options_with_remote(server_url: String, dir: &TempDir) -> StoreOptions {
     }
 }
 
+fn options_with_remote_memory_only(server_url: String) -> StoreOptions {
+    StoreOptions {
+        persistence: None,
+        remote: Some(RemoteConfig::new(server_url)),
+    }
+}
+
 async fn wait_for_connected(store: &Store) {
     for _ in 0..50 {
         if matches!(
@@ -300,6 +307,82 @@ async fn initial_sync_populates_local_state_from_server() {
     assert!(
         task.is_some(),
         "store_b should see the seeded task after replace_scope"
+    );
+
+    store_a.shutdown().await.unwrap();
+    store_b.shutdown().await.unwrap();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replace_scope_without_persistence_populates_memory() {
+    init_tracing();
+    let broker = BrokerHarness::new().start().await.expect("start broker");
+    let dir_a = TempDir::new().unwrap();
+
+    let store_a = Store::with_client_id(
+        fixture_config(),
+        options_with_remote(broker.tcp_url(), &dir_a),
+        "client-a-memseed".into(),
+    );
+    store_a.initialize().await.unwrap();
+    wait_for_connected(&store_a).await;
+    store_a
+        .set_authenticated_user(Some("user-1".into()))
+        .unwrap();
+
+    store_a
+        .create(
+            "project",
+            "p1",
+            make_record(&[("id", json!("p1")), ("name", json!("Seeded"))]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    store_a
+        .create(
+            "task",
+            "p1",
+            make_record(&[
+                ("id", json!("t-seed")),
+                ("title", json!("from-server")),
+                ("projectId", json!("p1")),
+            ]),
+            Origin::Local,
+        )
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(150)).await;
+
+    let store_b = Store::with_client_id(
+        fixture_config(),
+        options_with_remote_memory_only(broker.tcp_url()),
+        "client-b-memfresh".into(),
+    );
+    store_b.initialize().await.unwrap();
+    wait_for_connected(&store_b).await;
+    store_b
+        .set_authenticated_user(Some("user-2".into()))
+        .unwrap();
+
+    store_b.replace_scope("p1").await.unwrap();
+
+    let root = store_b.read("project", "p1").await.unwrap();
+    assert!(
+        root.is_some(),
+        "a memory-only store must hold the scope root after replace_scope"
+    );
+    let task = store_b.read("task", "t-seed").await.unwrap();
+    assert!(
+        task.is_some(),
+        "a memory-only store must hold the scope's child records after replace_scope"
+    );
+    let tasks = store_b.snapshot("task", "p1").await.unwrap();
+    assert_eq!(
+        tasks.len(),
+        1,
+        "a memory-only store's scope snapshot must contain the child after replace_scope; got {tasks:?}"
     );
 
     store_a.shutdown().await.unwrap();
