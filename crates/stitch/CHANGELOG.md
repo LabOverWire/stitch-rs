@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A new process reusing a `client_id` within the session-expiry window resumed the
+  broker session (`clean_start: false`) and never registered its local message
+  handlers, so the broker delivered responses to `$DB/clients/<client_id>/…` with
+  nothing to receive them and every `request` ended in `Timeout`. `SyncEngine`
+  previously subscribed only when the CONNACK reported no session present; it now
+  also registers the handlers the first time they are registered in a process even
+  when the session is present, while an in-process reconnect with handlers already
+  registered still skips re-subscribing.
 - An `update` or `delete` queued while offline and then refused on a later flush
   with a terminal publish reason code now reverts its optimistic local change —
   the `update` restores the pre-update row, the `delete` reinstates the removed
